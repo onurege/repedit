@@ -4,16 +4,25 @@
 # certificate automatically. It serves the built client (client/dist) and
 # proxies the API + WebSocket to the Node server, so the browser talks to a
 # single HTTPS origin (the client resolves /api and /ws against its own origin).
+#
+# `handle` blocks are mutually exclusive (first match wins), so /api/* and /ws
+# always reach the Node server and never get rewritten to the SPA index.
 
 play.example.com {
 	encode gzip zstd
 
 	# API + WebSocket -> Node game server
-	@api path /api/* /ws
-	reverse_proxy @api server:2567
+	handle /api/* {
+		reverse_proxy server:2567
+	}
+	handle /ws {
+		reverse_proxy server:2567
+	}
 
-	# Static client (single-page app)
-	root * /srv/client
-	file_server
-	try_files {path} /index.html
+	# Everything else -> static single-page client
+	handle {
+		root * /srv/client
+		try_files {path} /index.html
+		file_server
+	}
 }
