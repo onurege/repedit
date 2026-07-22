@@ -44,7 +44,7 @@ describe('offline progression & away report', () => {
     // ~1800s * 0.5/s = 900 wanted, clamped by L1 storage capacity (200)
     expect(biz2.milkProduced).toBe(FARM_LEVELS[1].milkCapacity);
     expect(biz2.inv.get('milk')!.qty).toBe(FARM_LEVELS[1].milkCapacity);
-    expect(biz2.status).toBe('STORAGE FULL');
+    expect(biz2.status).toBe('storage_full');
   });
 
   it('pauses businesses whose owner is away longer than the cap', async () => {
@@ -55,7 +55,7 @@ describe('offline progression & away report', () => {
     const before = biz.milkProduced;
     await world.tick(60);
     expect(biz.milkProduced).toBe(before);
-    expect(biz.status).toContain('PAUSED');
+    expect(biz.status).toBe('paused_away');
   });
 });
 

@@ -46,6 +46,27 @@ export interface InventoryEntry {
   capacity: number;
 }
 
+/**
+ * Business status as a locale-independent code. The client maps it to
+ * display text; never send prose over the wire.
+ */
+export type BizStatus =
+  | ''
+  | 'producing'
+  | 'storage_full'
+  | 'open'
+  | 'out_of_stock'
+  | 'paused_away';
+
+/** Statuses that should render as a warning rather than a healthy state. */
+export const BAD_STATUSES: BizStatus[] = ['storage_full', 'out_of_stock', 'paused_away'];
+
+/** Outcome of the most recent scheduled contract delivery. */
+export type ContractResult = 'completed' | 'delivered' | 'missed_stock' | 'missed_funds';
+
+/** Params interpolated into a localized message on the client. */
+export type MsgParams = Record<string, string | number>;
+
 export interface BizPub {
   id: number;
   ownerId: number;
@@ -53,7 +74,7 @@ export interface BizPub {
   type: BusinessType;
   lotId: string;
   level: number;
-  status: string; // PRODUCING | STORAGE FULL | OPEN | OUT OF STOCK ...
+  status: BizStatus;
   reputation: number;   // public: star rating
   supplies: ProductId[]; // products this business can supply via contract
   tradeCount: number;    // successful player trades + contract deliveries
@@ -121,7 +142,7 @@ export interface ContractPub {
   deliveries: number;      // total agreed deliveries
   remaining: number;
   status: ContractStatus;
-  lastResult: string | null;
+  lastResult: ContractResult | null;
   nextExecutionAt: number | null; // epoch ms
   createdAt: number;
 }
@@ -164,7 +185,7 @@ export type ServerMsg =
   | { t: 'contract'; contract: ContractPub }
   | { t: 'contracts'; contracts: ContractPub[] }
   | { t: 'away'; report: AwayReport }
-  | { t: 'toast'; msg: string; kind?: 'info' | 'success' | 'error' }
-  | { t: 'error'; msg: string }
+  | { t: 'toast'; code: string; params?: MsgParams; kind?: 'info' | 'success' | 'error' }
+  | { t: 'error'; code: string; params?: MsgParams }
   | { t: 'level_up'; level: number }
   | { t: 'pong' };

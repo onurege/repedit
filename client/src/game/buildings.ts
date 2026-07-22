@@ -1,6 +1,7 @@
 // Procedural low-poly building & prop factories. All original art,
 // built from primitives with a shared miniature-city palette.
 import * as THREE from 'three';
+import { t } from '../i18n.js';
 
 const mats = new Map<number, THREE.MeshLambertMaterial>();
 export function mat(color: number): THREE.MeshLambertMaterial {
@@ -166,7 +167,7 @@ export function makeFarm(level: number, ownerName: string): THREE.Group {
     cow.rotation.y = i * 1.3;
     g.add(cow);
   }
-  const lbl = label(ownerName, `Farm · Lv ${level}`, '#d7f9d0');
+  const lbl = label(ownerName, t('world.sign.farm', { level }), '#d7f9d0');
   lbl.position.set(0, 8.8, 0);
   g.add(lbl);
   return g;
@@ -213,7 +214,7 @@ export function makeCoffeeShop(level: number, ownerName: string): THREE.Group {
   g.add(cyl(0.55, 0.4, 0.75, 0xffffff, -3.9, 3.4, 2.9, 12));
   g.add(cyl(0.58, 0.58, 0.1, 0x7a4a2b, -3.9, 4.1, 2.9, 12));
 
-  const lbl = label(ownerName, `Coffee Shop · Lv ${level}`, '#ffe9c9');
+  const lbl = label(ownerName, t('world.sign.shop', { level }), '#ffe9c9');
   lbl.position.set(0, 8.2, 0);
   g.add(lbl);
   return g;
@@ -255,7 +256,7 @@ export function makeBakery(level: number, ownerName: string): THREE.Group {
     pretzel.position.set(-3.9, 3.5, 2.9);
     g.add(pretzel);
   }
-  const lbl = label(ownerName, `Bakery · Lv ${level}`, '#ffe3bd');
+  const lbl = label(ownerName, t('world.sign.bakery', { level }), '#ffe3bd');
   lbl.position.set(0, 8.2, 0);
   g.add(lbl);
   return g;
@@ -288,7 +289,7 @@ export function makeMiniMarket(level: number, ownerName: string): THREE.Group {
     g.add(box(3.2, 0.1, 2.2, 0x8a8f98, w / 2 + 1.4, 0.16, 1.4, false));
     g.add(box(2.6, 0.08, 0.25, 0xe8e6da, w / 2 + 1.4, 0.28, 1.4, false));
   }
-  const lbl = label(ownerName, `Mini Market · Lv ${level}`, '#d2f5e4');
+  const lbl = label(ownerName, t('world.sign.market', { level }), '#d2f5e4');
   lbl.position.set(0, 8.2, 0);
   g.add(lbl);
   return g;
@@ -323,7 +324,7 @@ export function makeWholesale(): THREE.Group {
   g.add(box(1, 1, 1, 0xc9a06a, 5.4, 0.2, -2.4));
   g.add(box(0.85, 0.85, 0.85, 0xb08a55, 5.5, 1.2, -2.4));
   g.add(box(1, 1, 1, 0xc9a06a, 4.2, 0.2, -3.3));
-  const lbl = label('Central Wholesale', 'Wholesale Goods · NPC', '#cfe3ff');
+  const lbl = label(t('world.wholesale'), t('world.wholesale.sub'), '#cfe3ff');
   lbl.position.set(0, 9.2, 0);
   g.add(lbl);
   return g;
@@ -419,11 +420,11 @@ export function makeCar(seed: number): THREE.Group {
   return g;
 }
 
-const LOT_LABELS: Record<string, string> = {
-  farm: 'Farm lot',
-  coffee_shop: 'Café lot',
-  bakery: 'Bakery lot',
-  mini_market: 'Market lot',
+const LOT_LABEL_KEYS: Record<string, string> = {
+  farm: 'world.lot.farm',
+  coffee_shop: 'world.lot.cafe',
+  bakery: 'world.lot.bakery',
+  mini_market: 'world.lot.market',
 };
 
 export function makeVacantSign(kind: string): THREE.Group {
@@ -438,7 +439,7 @@ export function makeVacantSign(kind: string): THREE.Group {
   const boardMesh = box(1.9, 1.0, 0.08, 0xf4f1e8, 0, 1.35, 0);
   g.add(boardMesh);
   g.add(box(2.0, 0.22, 0.1, 0xe4572e, 0, 1.75, 0.02)); // red header strip
-  const spr = smallSign('FOR SALE', LOT_LABELS[kind] ?? 'Lot');
+  const spr = smallSign(t('world.for_sale'), t(LOT_LABEL_KEYS[kind] ?? 'world.lot.generic'));
   spr.position.set(0, 1.35, 0.09);
   g.add(spr);
   return g;

@@ -15,6 +15,7 @@ import type {
   AwayReport,
   ContractPub,
 } from '@district/shared';
+import { t } from './i18n.js';
 
 // Server URL resolution:
 //  - explicit VITE_SERVER_URL always wins (set it at build time to point at a
@@ -71,7 +72,7 @@ export class GameClient {
       body: JSON.stringify({ username, password }),
     });
     const data = await res.json();
-    if (!res.ok) throw new Error(data.error || 'Authentication failed.');
+    if (!res.ok) throw new Error(data.code ? t(data.code) : t('auth.failed'));
     localStorage.setItem('bd_token', data.token);
     localStorage.setItem('bd_username', data.username);
   }
@@ -218,10 +219,11 @@ export class GameClient {
         this.emit('away', msg.report);
         break;
       case 'toast':
-        this.emit('toast', msg.msg, msg.kind ?? 'info');
+        // Server sends codes, never prose — resolve in the player's language.
+        this.emit('toast', t(msg.code, msg.params), msg.kind ?? 'info');
         break;
       case 'error':
-        this.emit('toast', msg.msg, 'error');
+        this.emit('toast', t(msg.code, msg.params), 'error');
         break;
       case 'level_up':
         this.emit('level_up', msg.level);

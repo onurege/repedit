@@ -133,7 +133,7 @@ describe('execution', () => {
     expect(world.deliveries.size).toBe(0);
     expect(c.status).toBe('active');
     expect(c.remaining).toBe(3);
-    expect(c.lastResult).toContain('SUPPLIER STOCK');
+    expect(c.lastResult).toBe('missed_stock');
     expect(c.nextExecutionAtMs).not.toBeNull();
   });
 
@@ -148,7 +148,7 @@ describe('execution', () => {
     expect(world.players.get(bakerId)!.cash).toBe(100);
     expect(world.deliveries.size).toBe(0);
     expect(c.status).toBe('active');
-    expect(c.lastResult).toContain('BUYER FUNDS');
+    expect(c.lastResult).toBe('missed_funds');
   });
 
   it('duplicate concurrent execution is impossible', async () => {

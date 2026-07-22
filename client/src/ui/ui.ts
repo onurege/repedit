@@ -1,23 +1,53 @@
-// All HTML UI: auth, business choice, HUD, management/market/wholesale
-// panels, onboarding objectives, toasts, away report, reconnect overlay.
+// All HTML UI: auth, business choice, HUD, management/market/wholesale/
+// contract panels, onboarding objectives, toasts, away report, reconnect.
+//
+// Every visible string goes through `t()` — see ../i18n.ts. Tabs, statuses
+// and contract results are identified by stable ids so switching language
+// never changes behaviour, only labels.
 import {
   PRODUCTS, NPC_WHOLESALE_PRICES, FARM_LEVELS, SHOP_LEVELS, BAKERY_LEVELS, MARKET_LEVELS,
-  MAX_LEVEL, xpForLevel, MAX_PLAYER_LEVEL, contractableProducts,
+  MAX_LEVEL, xpForLevel, MAX_PLAYER_LEVEL, contractableProducts, BAD_STATUSES,
+  CONTRACT_FREQUENCY_SECS,
   type BizPub, type OrderPub, type AwayReport, type ProductId, type ContractPub,
 } from '@district/shared';
-
-const BIZ_LABEL: Record<string, { icon: string; name: string }> = {
-  farm: { icon: '🐄', name: 'Farm' },
-  coffee_shop: { icon: '☕', name: 'Coffee Shop' },
-  bakery: { icon: '🥖', name: 'Bakery' },
-  mini_market: { icon: '🛒', name: 'Mini Market' },
-};
 import { client } from '../net.js';
 import { sfx, unlockAudio } from '../audio.js';
+import { t, fmtMoney as fmt, LANGS, getLang, setLang, onLangChange, type Lang } from '../i18n.js';
+
+const BIZ_ICON: Record<string, string> = {
+  farm: '🐄', coffee_shop: '☕', bakery: '🥖', mini_market: '🛒',
+};
 
 type PanelKind = 'none' | 'business' | 'market' | 'wholesale' | 'dev' | 'info' | 'contracts';
 
-const fmt = (n: number) => '$' + Math.round(n).toLocaleString('en-US');
+interface TabDef {
+  id: string;
+  label: string;
+}
+
+/** Localized display name for a business type. */
+function bizName(type: string): string {
+  return t(`biz.${type}`);
+}
+
+/** Localized "🐄 alice's Farm" heading used by the business and info panels. */
+function bizTitle(type: string, owner: string): string {
+  return t('biz.title', { icon: BIZ_ICON[type] ?? '🏪', owner, name: bizName(type) });
+}
+
+/** Business status code -> display text, with the vacant/unknown fallback. */
+function statusText(status: string): string {
+  return status ? t(`status.${status}`) : t('status.none');
+}
+
+function statusIsBad(status: string): boolean {
+  return (BAD_STATUSES as string[]).includes(status);
+}
+
+/** Localized product name (the shared PRODUCTS table stays English/data-only). */
+function pName(id: ProductId): string {
+  return t(`product.${id}`);
+}
 
 export class UI {
   private root: HTMLElement;
@@ -29,6 +59,8 @@ export class UI {
   private proposeFor: number | null = null;
   private flags: Record<string, boolean> = {};
   private objectivesHidden = false;
+  private authError = '';
+  private authVisible = false;
 
   onFocusLot: ((lotId: string) => void) | null = null;
   onCloseCity: (() => void) | null = null;
@@ -36,13 +68,15 @@ export class UI {
   constructor() {
     this.root = document.getElementById('app')!;
     document.addEventListener('pointerdown', () => unlockAudio(), { once: true });
+    this.buildLangBar();
     this.buildHud();
+    onLangChange(() => this.onLanguageChanged());
     client.on('update', () => this.refresh());
     client.on('toast', (msg: string, kind: string) => this.toast(msg, kind as any));
     client.on('away', (r: AwayReport) => this.showAway(r));
     client.on('level_up', (level: number) => {
       sfx.levelUp();
-      this.toast(`Level up! You reached level ${level} 🎉`, 'success');
+      this.toast(t('toast.level_up', { level }), 'success');
     });
     client.on('connection', (ok: boolean) => {
       document.getElementById('reconnect')!.classList.toggle('visible', !ok && !!client.token);
@@ -52,11 +86,15 @@ export class UI {
       // A new proposal arrived for me as supplier.
       if (c.status === 'proposed' && c.sellerId === me && !prev) {
         sfx.levelUp();
-        this.toast(`📜 ${c.buyerName} proposes a supply contract: ${c.quantity} × ${PRODUCTS[c.product].name} @ ${fmt(c.unitPrice)}`, 'info');
+        this.toast(t('toast.contract_proposal', {
+          name: c.buyerName, qty: c.quantity, product: c.product, price: fmt(c.unitPrice),
+        }), 'info');
       }
       if (prev && prev.status !== c.status) {
-        if (c.status === 'active' && c.buyerId === me) this.toast('Your supply contract is now active! 🤝', 'success');
-        if (c.status === 'completed') this.toast(`Contract completed: ${c.quantity} × ${PRODUCTS[c.product].name}.`, 'success');
+        if (c.status === 'active' && c.buyerId === me) this.toast(t('toast.contract_now_active'), 'success');
+        if (c.status === 'completed') {
+          this.toast(t('toast.contract_completed', { qty: c.quantity, product: c.product }), 'success');
+        }
       }
     });
   }
@@ -77,9 +115,81 @@ export class UI {
     this.refresh();
   }
 
+  // ================= LANGUAGE =================
+
+  /** Always-visible switcher so the language can be changed before login. */
+  private buildLangBar(): void {
+    const bar = document.createElement('div');
+    bar.id = 'langbar';
+    bar.title = t('lang.label');
+    bar.innerHTML = LANGS.map(
+      (l) => `<button data-lang="${l.id}" class="${l.id === getLang() ? 'active' : ''}">${l.flag} ${l.label}</button>`
+    ).join('');
+    document.body.appendChild(bar);
+    bar.querySelectorAll('button').forEach((b) =>
+      b.addEventListener('click', () => {
+        sfx.click();
+        setLang((b as HTMLElement).dataset.lang as Lang);
+      })
+    );
+  }
+
+  private refreshLangBar(): void {
+    const bar = document.getElementById('langbar');
+    if (!bar) return;
+    bar.title = t('lang.label');
+    bar.querySelectorAll('button').forEach((b) =>
+      b.classList.toggle('active', (b as HTMLElement).dataset.lang === getLang())
+    );
+  }
+
+  /**
+   * Re-render everything currently on screen in the new language. The HUD
+   * shell is rebuilt (its labels are static markup); panels and overlays
+   * re-render from their existing state.
+   */
+  private onLanguageChanged(): void {
+    this.refreshLangBar();
+    const wasVisible = this.hud.classList.contains('visible');
+    const panelKind = this.panelKind;
+    const panelTab = this.panelTab;
+    this.hud.remove();
+    document.getElementById('toasts')?.remove();
+    document.getElementById('reconnect')?.remove();
+    this.buildHud();
+    if (wasVisible) this.hud.classList.add('visible');
+    this.invalidateCaches();
+    if (panelKind !== 'none') {
+      this.panelKind = panelKind;
+      this.panel.classList.add('visible');
+      this.panelTab = panelTab;
+      this.renderPanel();
+      this.updateNav();
+    }
+    document.getElementById('reconnect')!.classList.toggle('visible', !client.connected && !!client.token);
+    if (client.you) this.refresh();
+    // Overlays hold static copy — rebuild the ones that are open.
+    if (this.authVisible) {
+      document.getElementById('auth-overlay')?.remove();
+      this.showAuth(this.authError);
+    }
+    if (document.getElementById('choose-overlay')) {
+      this.hideChoose();
+      this.showChoose();
+    }
+  }
+
+  private invalidateCaches(): void {
+    this.lastBodyHTML = '';
+    this.lastTabsHTML = '';
+    this.lastObjHTML = '';
+  }
+
   // ================= AUTH =================
 
   showAuth(initialError = ''): void {
+    this.authVisible = true;
+    this.authError = initialError;
     this.hud.classList.remove('visible');
     let mode: 'login' | 'register' = 'register';
     const overlay = document.createElement('div');
@@ -88,16 +198,16 @@ export class UI {
     overlay.innerHTML = `
       <div class="card">
         <h1>BUSINESS <span class="accent">DISTRICT</span></h1>
-        <div class="tagline">Build your business in a shared miniature city.</div>
+        <div class="tagline">${t('app.tagline')}</div>
         <div class="tabs">
-          <button data-mode="register" class="active">New player</button>
-          <button data-mode="login">Log in</button>
+          <button data-mode="register" class="active">${t('auth.tab.register')}</button>
+          <button data-mode="login">${t('auth.tab.login')}</button>
         </div>
         <div class="auth-error">${initialError}</div>
-        <div class="field"><label>Username</label><input id="auth-user" maxlength="20" placeholder="e.g. barista_joe" /></div>
-        <div class="field"><label>Password</label><input id="auth-pass" type="password" placeholder="min. 4 characters" /></div>
-        <button class="btn primary" id="auth-go">Create account &amp; play</button>
-        <div class="hint">Tip: open a second browser (or private window) with another account to trade with yourself.</div>
+        <div class="field"><label>${t('auth.username')}</label><input id="auth-user" maxlength="20" placeholder="${t('auth.username.placeholder')}" /></div>
+        <div class="field"><label>${t('auth.password')}</label><input id="auth-pass" type="password" placeholder="${t('auth.password.placeholder')}" /></div>
+        <button class="btn primary" id="auth-go">${t('auth.submit.register')}</button>
+        <div class="hint">${t('auth.hint')}</div>
       </div>`;
     document.body.appendChild(overlay);
     const err = overlay.querySelector('.auth-error') as HTMLElement;
@@ -107,7 +217,7 @@ export class UI {
         overlay.querySelectorAll('.tabs button').forEach((x) => x.classList.remove('active'));
         b.classList.add('active');
         mode = (b as HTMLElement).dataset.mode as any;
-        go.textContent = mode === 'register' ? 'Create account & play' : 'Log in & play';
+        go.textContent = t(mode === 'register' ? 'auth.submit.register' : 'auth.submit.login');
         sfx.click();
       })
     );
@@ -116,12 +226,15 @@ export class UI {
       const password = (overlay.querySelector('#auth-pass') as HTMLInputElement).value;
       go.disabled = true;
       err.textContent = '';
+      this.authError = '';
       try {
         await client.auth(mode, username, password);
+        this.authVisible = false;
         overlay.remove();
         client.connect();
       } catch (e: any) {
         err.textContent = e.message;
+        this.authError = e.message;
         go.disabled = false;
         sfx.error();
       }
@@ -141,32 +254,32 @@ export class UI {
     overlay.id = 'choose-overlay';
     overlay.innerHTML = `
       <div class="card" style="width:min(560px,94vw)">
-        <h1>Choose your business</h1>
-        <div class="tagline">You have <b>${fmt(client.you?.cash ?? 10000)}</b> to get started. Pick your path:</div>
+        <h1>${t('choose.title')}</h1>
+        <div class="tagline">${t('choose.tagline', { cash: `<b>${fmt(client.you?.cash ?? 10000)}</b>` })}</div>
         <div class="choose-wrap" style="flex-wrap:wrap">
           <div class="choice" data-type="farm" style="flex-basis:44%">
             <div class="icon">🐄</div>
-            <h3>Farm</h3>
-            <span class="role-tag producer">Producer</span>
-            <p>Produce Milk or Wheat automatically and supply the whole city via the marketplace.</p>
+            <h3>${t('biz.farm')}</h3>
+            <span class="role-tag producer">${t('role.producer')}</span>
+            <p>${t('choose.farm.desc2')}</p>
           </div>
           <div class="choice" data-type="coffee_shop" style="flex-basis:44%">
             <div class="icon">☕</div>
-            <h3>Coffee Shop</h3>
-            <span class="role-tag processor">Processor + Retailer</span>
-            <p>Buy milk &amp; beans, brew coffee, serve townsfolk. Set your own prices.</p>
+            <h3>${t('biz.coffee_shop')}</h3>
+            <span class="role-tag processor">${t('role.processor')}</span>
+            <p>${t('choose.shop.desc2')}</p>
           </div>
           <div class="choice" data-type="bakery" style="flex-basis:44%">
             <div class="icon">🥖</div>
-            <h3>Bakery</h3>
-            <span class="role-tag processor">Processor + Retailer</span>
-            <p>Turn wheat into fresh bread and sell it to hungry customers.</p>
+            <h3>${t('biz.bakery')}</h3>
+            <span class="role-tag processor">${t('role.processor')}</span>
+            <p>${t('choose.bakery.desc')}</p>
           </div>
           <div class="choice" data-type="mini_market" style="flex-basis:44%">
             <div class="icon">🛒</div>
-            <h3>Mini Market</h3>
-            <span class="role-tag retailer">Retailer</span>
-            <p>Pure retail: buy bread &amp; milk cheap, stock the shelves, earn the margin.</p>
+            <h3>${t('biz.mini_market')}</h3>
+            <span class="role-tag retailer">${t('role.retailer')}</span>
+            <p>${t('choose.market.desc')}</p>
           </div>
         </div>
       </div>`;
@@ -191,30 +304,30 @@ export class UI {
     this.hud.id = 'hud';
     this.hud.innerHTML = `
       <div class="topbar">
-        <div class="stat"><span class="k">Cash</span><span class="v" id="st-cash">$0</span></div>
+        <div class="stat"><span class="k">${t('hud.cash')}</span><span class="v" id="st-cash">$0</span></div>
         <div class="sep"></div>
-        <div class="stat"><span class="k">Profit</span><span class="v" id="st-profit">$0</span></div>
+        <div class="stat"><span class="k">${t('hud.profit')}</span><span class="v" id="st-profit">$0</span></div>
         <div class="sep"></div>
-        <div class="stat"><span class="k">Level</span><span class="v" id="st-level">1</span><div class="xpbar"><div id="st-xp" style="width:0%"></div></div></div>
+        <div class="stat"><span class="k">${t('hud.level')}</span><span class="v" id="st-level">1</span><div class="xpbar"><div id="st-xp" style="width:0%"></div></div></div>
         <div class="sep"></div>
-        <div class="stat"><span class="k">Reputation</span><span class="v" id="st-rep">★ 3.0</span></div>
+        <div class="stat"><span class="k">${t('hud.reputation')}</span><span class="v" id="st-rep">★ 3.0</span></div>
         <div class="sep"></div>
-        <div class="stat"><span class="k">Online</span><span class="v" id="st-online">1</span></div>
+        <div class="stat"><span class="k">${t('hud.online')}</span><span class="v" id="st-online">1</span></div>
       </div>
       <div class="nav">
-        <button id="nav-city">🏙️ City</button>
-        <button id="nav-biz">🏪 Business</button>
-        <button id="nav-market">📦 Market</button>
-        <button id="nav-contracts">📜 Contracts <span id="nav-contracts-badge"></span></button>
-        <button id="nav-dev" style="display:none">🛠️ Dev</button>
+        <button id="nav-city">${t('nav.city')}</button>
+        <button id="nav-biz">${t('nav.business')}</button>
+        <button id="nav-market">${t('nav.market')}</button>
+        <button id="nav-contracts">${t('nav.contracts')} <span id="nav-contracts-badge"></span></button>
+        <button id="nav-dev" style="display:none">${t('nav.dev')}</button>
       </div>
       <div class="panel" id="panel">
-        <div class="panel-head"><h2 id="panel-title">Panel</h2><button class="close" id="panel-close">✕</button></div>
+        <div class="panel-head"><h2 id="panel-title">${t('panel.title')}</h2><button class="close" id="panel-close">✕</button></div>
         <div class="panel-tabs" id="panel-tabs"></div>
         <div class="panel-body" id="panel-body"></div>
       </div>
       <div class="objectives" id="objectives" style="display:none"></div>
-      <div class="controls-hint">WASD pan · drag rotate · wheel zoom · click select · R reset</div>
+      <div class="controls-hint">${t('hud.controls')}</div>
     `;
     document.body.appendChild(this.hud);
     const toasts = document.createElement('div');
@@ -222,7 +335,7 @@ export class UI {
     document.body.appendChild(toasts);
     const rec = document.createElement('div');
     rec.id = 'reconnect';
-    rec.innerHTML = `<div class="spinner"></div><div>Reconnecting to the city…</div>`;
+    rec.innerHTML = `<div class="spinner"></div><div>${t('hud.reconnecting')}</div>`;
     document.body.appendChild(rec);
 
     document.getElementById('nav-city')!.addEventListener('click', () => {
@@ -255,6 +368,7 @@ export class UI {
   }
 
   showHud(): void {
+    this.authVisible = false;
     this.hud.classList.add('visible');
     this.loadFlags();
     this.refresh();
@@ -279,8 +393,7 @@ export class UI {
   openPanel(kind: PanelKind): void {
     this.panelKind = kind;
     this.panelTab = '';
-    this.lastBodyHTML = '';
-    this.lastTabsHTML = '';
+    this.invalidateCaches();
     this.panel.classList.add('visible');
     this.renderPanel();
     this.updateNav();
@@ -384,10 +497,11 @@ export class UI {
     }
   }
 
-  private tabBar(tabs: HTMLElement, names: string[]): string {
-    if (!this.panelTab || !names.includes(this.panelTab)) this.panelTab = names[0];
-    const html = names
-      .map((n) => `<button data-tab="${n}" class="${n === this.panelTab ? 'active' : ''}">${n}</button>`)
+  private tabBar(tabs: HTMLElement, defs: TabDef[]): string {
+    const ids = defs.map((d) => d.id);
+    if (!this.panelTab || !ids.includes(this.panelTab)) this.panelTab = ids[0];
+    const html = defs
+      .map((d) => `<button data-tab="${d.id}" class="${d.id === this.panelTab ? 'active' : ''}">${d.label}</button>`)
       .join('');
     if (html !== this.lastTabsHTML) {
       this.lastTabsHTML = html;
@@ -408,44 +522,43 @@ export class UI {
   private renderBusinessPanel(title: HTMLElement, tabs: HTMLElement, body: HTMLElement): void {
     const biz = client.myBiz;
     if (!biz) {
-      title.textContent = 'No business yet';
+      title.textContent = t('biz.none.title');
       tabs.innerHTML = '';
-      this.setBody(body, '<p>Choose a business to get started.</p>');
+      this.setBody(body, `<p>${t('biz.none.body')}</p>`);
       return;
     }
-    const meta = BIZ_LABEL[biz.type] ?? BIZ_LABEL.farm;
     const isFarm = biz.type === 'farm';
-    title.textContent = `${meta.icon} ${biz.ownerName}'s ${meta.name}`;
-    const tab = this.tabBar(tabs, isFarm
-      ? ['Overview', 'Inventory', 'Production', 'Upgrade']
-      : ['Overview', 'Inventory', 'Pricing', 'Upgrade']);
+    title.textContent = bizTitle(biz.type, biz.ownerName);
+    const tab = this.tabBar(tabs, [
+      { id: 'overview', label: t('tab.overview') },
+      { id: 'inventory', label: t('tab.inventory') },
+      isFarm
+        ? { id: 'production', label: t('tab.production') }
+        : { id: 'pricing', label: t('tab.pricing') },
+      { id: 'upgrade', label: t('tab.upgrade') },
+    ]);
 
     const profit = biz.revenue - biz.expenses;
-    if (tab === 'Overview') {
-      const statusClass = /FULL|OUT|PAUSED/.test(biz.status) ? 'bad' : 'ok';
-      const soldLabel =
-        ({ coffee_shop: 'Coffee sold', bakery: 'Bread sold', mini_market: 'Items sold' } as Record<string, string>)[biz.type] ?? 'Units sold';
-      const hints: Record<string, string> = {
-        farm: `Sell your Milk or Wheat on the Market — shops and bakeries need it! Central Wholesale charges $${NPC_WHOLESALE_PRICES.milk}/milk and $${NPC_WHOLESALE_PRICES.wheat}/wheat, so undercut that.`,
-        coffee_shop: 'Restock milk & beans from the Market (player offers) or Central Wholesale (the blue depot).',
-        bakery: `Restock Wheat from the Market (player farms) or Central Wholesale ($${NPC_WHOLESALE_PRICES.wheat}/wheat). Each bread consumes 1 wheat.`,
-        mini_market: `Stock Bread and Milk from the Market (player bakeries & farms) or Central Wholesale. Your profit is the retail margin.`,
-      };
+    if (tab === 'overview') {
+      const soldLabel = t(`biz.sold.${biz.type}`) || t('biz.sold.default');
+      const hint = isFarm
+        ? t('biz.hint.farm2', { milk: NPC_WHOLESALE_PRICES.milk!, wheat: NPC_WHOLESALE_PRICES.wheat! })
+        : t(`biz.hint.${biz.type}`, { wheat: NPC_WHOLESALE_PRICES.wheat! });
       this.setBody(body, `
-        <div class="bigstatus ${statusClass}">${biz.status || '—'}</div>
-        <div class="kv"><span class="k">Level</span><span class="v">${biz.level} / ${MAX_LEVEL}</span></div>
-        <div class="kv"><span class="k">Revenue (lifetime)</span><span class="v pos">${fmt(biz.revenue)}</span></div>
-        <div class="kv"><span class="k">Expenses (lifetime)</span><span class="v neg">${fmt(biz.expenses)}</span></div>
-        <div class="kv"><span class="k">Profit</span><span class="v ${profit >= 0 ? 'pos' : 'neg'}">${fmt(profit)}</span></div>
+        <div class="bigstatus ${statusIsBad(biz.status) ? 'bad' : 'ok'}">${statusText(biz.status)}</div>
+        <div class="kv"><span class="k">${t('biz.level')}</span><span class="v">${biz.level} / ${MAX_LEVEL}</span></div>
+        <div class="kv"><span class="k">${t('biz.revenue')}</span><span class="v pos">${fmt(biz.revenue)}</span></div>
+        <div class="kv"><span class="k">${t('biz.expenses')}</span><span class="v neg">${fmt(biz.expenses)}</span></div>
+        <div class="kv"><span class="k">${t('biz.profit')}</span><span class="v ${profit >= 0 ? 'pos' : 'neg'}">${fmt(profit)}</span></div>
         ${isFarm
-          ? `<div class="kv"><span class="k">Units produced</span><span class="v">${biz.milkProduced}</span></div>
-             <div class="kv"><span class="k">Producing</span><span class="v">${biz.production === 'wheat' ? '🌾 Wheat' : '🥛 Milk'}</span></div>`
+          ? `<div class="kv"><span class="k">${t('biz.units_produced')}</span><span class="v">${biz.milkProduced}</span></div>
+             <div class="kv"><span class="k">${t('biz.producing')}</span><span class="v">${biz.production === 'wheat' ? `🌾 ${pName('wheat')}` : `🥛 ${pName('milk')}`}</span></div>`
           : `<div class="kv"><span class="k">${soldLabel}</span><span class="v">${biz.coffeeSold}</span></div>
-             <div class="kv"><span class="k">Customers</span><span class="v">${biz.customers}</span></div>`}
-        <div class="kv"><span class="k">Reputation</span><span class="v">★ ${biz.reputation.toFixed(2)}</span></div>
-        <div class="hint">${hints[biz.type]}</div>
+             <div class="kv"><span class="k">${t('biz.customers')}</span><span class="v">${biz.customers}</span></div>`}
+        <div class="kv"><span class="k">${t('biz.reputation')}</span><span class="v">★ ${biz.reputation.toFixed(2)}</span></div>
+        <div class="hint">${hint}</div>
       `);
-    } else if (tab === 'Inventory') {
+    } else if (tab === 'inventory') {
       this.setBody(body, Object.entries(biz.inventory)
         .map(([pid, e]) => {
           const p = PRODUCTS[pid as ProductId];
@@ -453,32 +566,32 @@ export class UI {
           const pct = e.capacity > 0 ? Math.min(100, (used / e.capacity) * 100) : 0;
           return `<div class="invrow">
             <span class="emoji">${p.emoji}</span>
-            <span class="name">${p.name}
+            <span class="name">${pName(pid as ProductId)}
               <div class="capbar"><div style="width:${pct}%"></div></div>
             </span>
             <span>
               <span class="qty">${e.qty}</span>
               <span class="cap">/ ${e.capacity}</span><br/>
-              <span class="cap">${e.reserved ? `${e.reserved} on market · ` : ''}${e.incoming ? `${e.incoming} incoming 🚚` : ''}</span>
+              <span class="cap">${e.reserved ? `${t('inv.on_market', { qty: e.reserved })} · ` : ''}${e.incoming ? t('inv.incoming', { qty: e.incoming }) : ''}</span>
             </span>
           </div>`;
         })
         .join('') +
-        `<div class="hint">Reserved goods are listed on the marketplace. Incoming goods are on a delivery van.</div>`);
-    } else if (tab === 'Production' && isFarm) {
+        `<div class="hint">${t('inv.hint')}</div>`);
+    } else if (tab === 'production' && isFarm) {
       const lv = FARM_LEVELS[biz.level];
       const producing = biz.production === 'wheat' ? 'wheat' : 'milk';
       this.setBody(body, `
-        <div class="bigstatus ${biz.status === 'PRODUCING' ? 'ok' : 'bad'}">${biz.status}</div>
-        <div class="kv"><span class="k">Producing</span><span class="v">${producing === 'wheat' ? '🌾 Wheat' : '🥛 Milk'}</span></div>
+        <div class="bigstatus ${statusIsBad(biz.status) ? 'bad' : 'ok'}">${statusText(biz.status)}</div>
+        <div class="kv"><span class="k">${t('biz.producing')}</span><span class="v">${producing === 'wheat' ? `🌾 ${pName('wheat')}` : `🥛 ${pName('milk')}`}</span></div>
         <div class="qtyrow">
-          <button class="btn small ${producing === 'milk' ? 'primary' : 'ghost'}" data-prod="milk">🥛 Milk</button>
-          <button class="btn small ${producing === 'wheat' ? 'primary' : 'ghost'}" data-prod="wheat">🌾 Wheat</button>
+          <button class="btn small ${producing === 'milk' ? 'primary' : 'ghost'}" data-prod="milk">🥛 ${pName('milk')}</button>
+          <button class="btn small ${producing === 'wheat' ? 'primary' : 'ghost'}" data-prod="wheat">🌾 ${pName('wheat')}</button>
         </div>
-        <div class="kv"><span class="k">Production rate</span><span class="v">${(lv.milkPerSec * 60).toFixed(0)} / min</span></div>
-        <div class="kv"><span class="k">Storage capacity (per product)</span><span class="v">${lv.milkCapacity}</span></div>
-        <div class="kv"><span class="k">Units produced (lifetime)</span><span class="v">${biz.milkProduced}</span></div>
-        <div class="hint">Production runs automatically, even offline (up to 8 h). Milk supplies coffee shops & mini markets; wheat supplies bakeries. Switching keeps existing stock.</div>`, (b) => {
+        <div class="kv"><span class="k">${t('prod.rate')}</span><span class="v">${t('prod.rate.generic', { n: (lv.milkPerSec * 60).toFixed(0) })}</span></div>
+        <div class="kv"><span class="k">${t('prod.capacity.per_product')}</span><span class="v">${lv.milkCapacity}</span></div>
+        <div class="kv"><span class="k">${t('prod.units_lifetime')}</span><span class="v">${biz.milkProduced}</span></div>
+        <div class="hint">${t('prod.hint2')}</div>`, (b) => {
         b.querySelectorAll('[data-prod]').forEach((btn) =>
           btn.addEventListener('click', () => {
             client.send({ t: 'set_production', product: (btn as HTMLElement).dataset.prod as ProductId });
@@ -486,20 +599,20 @@ export class UI {
           })
         );
       });
-    } else if (tab === 'Pricing' && !isFarm) {
+    } else if (tab === 'pricing' && !isFarm) {
       if (biz.type === 'mini_market') {
         this.setBody(body, `
-          <div class="kv"><span class="k">🍞 Bread retail price</span><span class="v">${fmt(biz.price)}</span></div>
+          <div class="kv"><span class="k">${t('price.bread_retail')}</span><span class="v">${fmt(biz.price)}</span></div>
           <div class="qtyrow">
             <input id="price-input" type="number" min="5" max="100" value="${biz.price}" />
-            <button class="btn small primary" id="price-set">Set bread price</button>
+            <button class="btn small primary" id="price-set">${t('price.set_bread')}</button>
           </div>
-          <div class="kv"><span class="k">🥛 Milk retail price</span><span class="v">${fmt(biz.price2)}</span></div>
+          <div class="kv"><span class="k">${t('price.milk_retail')}</span><span class="v">${fmt(biz.price2)}</span></div>
           <div class="qtyrow">
             <input id="price2-input" type="number" min="5" max="100" value="${biz.price2}" />
-            <button class="btn small primary" id="price2-set">Set milk price</button>
+            <button class="btn small primary" id="price2-set">${t('price.set_milk')}</button>
           </div>
-          <div class="hint">Reference prices: bread $20, milk $18. Cheaper attracts more customers and builds reputation; ~20% above reference repels them. Buy stock below your retail price to earn the margin.</div>`, (b) => {
+          <div class="hint">${t('price.hint.market')}</div>`, (b) => {
           b.querySelector('#price-set')!.addEventListener('click', () => {
             client.send({ t: 'set_price', price: parseInt((b.querySelector('#price-input') as HTMLInputElement).value, 10) });
             sfx.click();
@@ -512,14 +625,12 @@ export class UI {
       } else {
         const isBakery = biz.type === 'bakery';
         this.setBody(body, `
-          <div class="kv"><span class="k">Current ${isBakery ? 'bread' : 'coffee'} price</span><span class="v">${fmt(biz.price)}</span></div>
+          <div class="kv"><span class="k">${t(isBakery ? 'price.current.bread' : 'price.current.coffee')}</span><span class="v">${fmt(biz.price)}</span></div>
           <div class="qtyrow">
             <input id="price-input" type="number" min="5" max="100" value="${biz.price}" />
-            <button class="btn small primary" id="price-set">Set price</button>
+            <button class="btn small primary" id="price-set">${t('price.set')}</button>
           </div>
-          <div class="hint">${isBakery
-            ? 'Base price is $20. Each bread consumes 1 wheat. Cheaper bread attracts more customers; pricing above ~$24 slows traffic and hurts your stars.'
-            : 'Base price is $30. Cheaper coffee attracts more customers and builds reputation; pricing above ~$36 slows traffic and hurts your stars. Each coffee consumes 1 milk + 1 beans.'}</div>`, (b) => {
+          <div class="hint">${t(isBakery ? 'price.hint.bakery' : 'price.hint')}</div>`, (b) => {
           b.querySelector('#price-set')!.addEventListener('click', () => {
             const v = parseInt((b.querySelector('#price-input') as HTMLInputElement).value, 10);
             client.send({ t: 'set_price', price: v });
@@ -527,7 +638,7 @@ export class UI {
           });
         });
       }
-    } else if (tab === 'Upgrade') {
+    } else if (tab === 'upgrade') {
       const levels: Record<string, any> = {
         farm: FARM_LEVELS, coffee_shop: SHOP_LEVELS, bakery: BAKERY_LEVELS, mini_market: MARKET_LEVELS,
       };
@@ -540,30 +651,30 @@ export class UI {
         const bb = lvs[next];
         if (isFarm) {
           improvements = `
-            <div class="kv"><span class="k">Units / min</span><span class="v">${(a.milkPerSec * 60).toFixed(0)} → <b class="pos">${(bb.milkPerSec * 60).toFixed(0)}</b></span></div>
-            <div class="kv"><span class="k">Storage</span><span class="v">${a.milkCapacity} → <b class="pos">${bb.milkCapacity}</b></span></div>`;
+            <div class="kv"><span class="k">${t('upg.units_per_min')}</span><span class="v">${(a.milkPerSec * 60).toFixed(0)} → <b class="pos">${(bb.milkPerSec * 60).toFixed(0)}</b></span></div>
+            <div class="kv"><span class="k">${t('upg.storage')}</span><span class="v">${a.milkCapacity} → <b class="pos">${bb.milkCapacity}</b></span></div>`;
         } else if (biz.type === 'mini_market') {
           improvements = `
-            <div class="kv"><span class="k">Customers / min (per product)</span><span class="v">~${(a.customersPerSec * 60).toFixed(0)} → <b class="pos">~${(bb.customersPerSec * 60).toFixed(0)}</b></span></div>
-            <div class="kv"><span class="k">Shelf capacity (per product)</span><span class="v">${a.stockCapacity} → <b class="pos">${bb.stockCapacity}</b></span></div>`;
+            <div class="kv"><span class="k">${t('upg.customers_per_min.per_product')}</span><span class="v">~${(a.customersPerSec * 60).toFixed(0)} → <b class="pos">~${(bb.customersPerSec * 60).toFixed(0)}</b></span></div>
+            <div class="kv"><span class="k">${t('upg.shelf_capacity')}</span><span class="v">${a.stockCapacity} → <b class="pos">${bb.stockCapacity}</b></span></div>`;
         } else {
           improvements = `
-            <div class="kv"><span class="k">Customers / min</span><span class="v">~${(a.customersPerSec * 60).toFixed(0)} → <b class="pos">~${(bb.customersPerSec * 60).toFixed(0)}</b></span></div>
-            <div class="kv"><span class="k">${biz.type === 'bakery' ? 'Bake speed' : 'Brew speed'}</span><span class="v">${(a.brewPerSec * 60).toFixed(0)} → <b class="pos">${(bb.brewPerSec * 60).toFixed(0)}</b> / min</span></div>
-            <div class="kv"><span class="k">Ingredient storage</span><span class="v">${a.ingredientCapacity} → <b class="pos">${bb.ingredientCapacity}</b></span></div>`;
+            <div class="kv"><span class="k">${t('upg.customers_per_min')}</span><span class="v">~${(a.customersPerSec * 60).toFixed(0)} → <b class="pos">~${(bb.customersPerSec * 60).toFixed(0)}</b></span></div>
+            <div class="kv"><span class="k">${t(biz.type === 'bakery' ? 'upg.bake_speed' : 'upg.brew_speed')}</span><span class="v">${t('upg.brew_speed.value', { n: `${(a.brewPerSec * 60).toFixed(0)} → <b class="pos">${(bb.brewPerSec * 60).toFixed(0)}</b>` })}</span></div>
+            <div class="kv"><span class="k">${t('upg.ingredient_storage')}</span><span class="v">${a.ingredientCapacity} → <b class="pos">${bb.ingredientCapacity}</b></span></div>`;
         }
       }
       const html = cost == null
-        ? `<div class="bigstatus ok">MAX LEVEL REACHED 🏆</div><p class="hint">Your ${meta.name.toLowerCase()} is fully upgraded.</p>`
+        ? `<div class="bigstatus ok">${t('upg.max')}</div><p class="hint">${t('upg.max.hint', { biz: t(`biz.${biz.type}.lower`) })}</p>`
         : `
-        <div class="kv"><span class="k">Current level</span><span class="v">${biz.level}</span></div>
+        <div class="kv"><span class="k">${t('upg.current_level')}</span><span class="v">${biz.level}</span></div>
         ${improvements}
         <div style="margin-top:14px">
           <button class="btn success" style="width:100%" id="do-upgrade" ${((client.you?.cash ?? 0) < cost) ? 'disabled' : ''}>
-            Upgrade to Level ${next} — ${fmt(cost)}
+            ${t('upg.button', { level: next, cost: fmt(cost) })}
           </button>
         </div>
-        <div class="hint">Upgrading visibly expands your building in the city.</div>`;
+        <div class="hint">${t('upg.hint')}</div>`;
       this.setBody(body, html, (b) => {
         b.querySelector('#do-upgrade')?.addEventListener('click', () => {
           client.send({ t: 'upgrade' });
@@ -573,26 +684,31 @@ export class UI {
   }
 
   private renderMarketPanel(title: HTMLElement, tabs: HTMLElement, body: HTMLElement): void {
-    title.textContent = '📦 Marketplace';
-    const tab = this.tabBar(tabs, ['Orders', 'My Orders', 'History']);
+    title.textContent = t('market.title');
+    const tab = this.tabBar(tabs, [
+      { id: 'orders', label: t('tab.orders') },
+      { id: 'my_orders', label: t('tab.my_orders') },
+      { id: 'history', label: t('tab.history') },
+    ]);
     const myId = client.you?.id;
-    if (tab === 'Orders') {
+    if (tab === 'orders') {
       const orders = [...client.orders.values()].sort((a, b) => b.createdAt - a.createdAt);
       const rows = orders.map((o) => this.orderRow(o, o.ownerId !== myId)).join('');
       this.setBody(body, `
         <div class="mkt-form">
-          <h4>Create order</h4>
+          <h4>${t('market.create')}</h4>
           <div class="mkt-row">
-            <select id="mo-side"><option value="sell">SELL</option><option value="buy">BUY</option></select>
-            <select id="mo-product"><option value="milk">Milk</option><option value="wheat">Wheat</option><option value="bread">Bread</option><option value="beans">Coffee Beans</option></select>
-            <input id="mo-qty" type="number" min="1" value="100" style="width:76px" title="Quantity" />
+            <select id="mo-side"><option value="sell">${t('market.side.sell')}</option><option value="buy">${t('market.side.buy')}</option></select>
+            <select id="mo-product">${(['milk', 'wheat', 'bread', 'beans'] as ProductId[])
+              .map((pid) => `<option value="${pid}">${pName(pid)}</option>`).join('')}</select>
+            <input id="mo-qty" type="number" min="1" value="100" style="width:76px" title="${t('market.qty')}" />
             <span>@</span>
-            <input id="mo-price" type="number" min="1" value="12" style="width:64px" title="Unit price ($)" />
+            <input id="mo-price" type="number" min="1" value="12" style="width:64px" title="${t('market.unit_price')}" />
           </div>
-          <button class="btn small primary" id="mo-create">Place order</button>
-          <div class="hint">SELL escrows your goods; BUY escrows your cash. NPC wholesale milk costs $${NPC_WHOLESALE_PRICES.milk} — player milk is usually cheaper.</div>
+          <button class="btn small primary" id="mo-create">${t('market.place')}</button>
+          <div class="hint">${t('market.hint', { price: NPC_WHOLESALE_PRICES.milk! })}</div>
         </div>
-        ${rows || '<p class="hint">No open orders. Create one above!</p>'}`, (b) => {
+        ${rows || `<p class="hint">${t('market.empty')}</p>`}`, (b) => {
         b.querySelector('#mo-create')!.addEventListener('click', () => {
           const side = (b.querySelector('#mo-side') as HTMLSelectElement).value as 'buy' | 'sell';
           const product = (b.querySelector('#mo-product') as HTMLSelectElement).value as ProductId;
@@ -604,16 +720,16 @@ export class UI {
         });
         this.bindOrderButtons(b);
       });
-    } else if (tab === 'My Orders') {
+    } else if (tab === 'my_orders') {
       const mine = [...client.orders.values()].filter((o) => o.ownerId === myId);
       this.setBody(body,
         (mine.map((o) => `
           <div class="order">
-            <span class="side ${o.side}">${o.side.toUpperCase()}</span>
-            <span class="grow">${PRODUCTS[o.product].emoji} ${o.remaining}/${o.qty} ${PRODUCTS[o.product].name} @ ${fmt(o.price)}</span>
-            <button class="btn small warn" data-cancel="${o.id}">Cancel</button>
-          </div>`).join('') || '<p class="hint">You have no open orders.</p>') +
-        `<div class="hint">Cancelling refunds escrowed cash / returns reserved goods.</div>`, (bd) => {
+            <span class="side ${o.side}">${t(`market.side.${o.side}`)}</span>
+            <span class="grow">${PRODUCTS[o.product].emoji} ${o.remaining}/${o.qty} ${pName(o.product)} @ ${fmt(o.price)}</span>
+            <button class="btn small warn" data-cancel="${o.id}">${t('market.cancel')}</button>
+          </div>`).join('') || `<p class="hint">${t('market.mine.empty')}</p>`) +
+        `<div class="hint">${t('market.cancel.hint')}</div>`, (bd) => {
         bd.querySelectorAll('[data-cancel]').forEach((b) =>
           b.addEventListener('click', () => {
             client.send({ t: 'order_cancel', orderId: parseInt((b as HTMLElement).dataset.cancel!, 10) });
@@ -623,10 +739,10 @@ export class UI {
       });
     } else {
       this.setBody(body,
-        `<h4 style="font-size:13px;color:#334155;margin-bottom:6px">Recent player trades</h4>` +
-        (client.trades.map((t) => `
-          <div class="trade-row">${PRODUCTS[t.product].emoji} <b>${t.qty}</b> ${PRODUCTS[t.product].name} @ ${fmt(t.price)} — <b>${t.sellerName}</b> → <b>${t.buyerName}</b></div>`).join('') ||
-          '<p class="hint">No trades yet. Be the first!</p>'));
+        `<h4 style="font-size:13px;color:#334155;margin-bottom:6px">${t('market.recent_trades')}</h4>` +
+        (client.trades.map((tr) => `
+          <div class="trade-row">${PRODUCTS[tr.product].emoji} <b>${tr.qty}</b> ${pName(tr.product)} @ ${fmt(tr.price)} — <b>${tr.sellerName}</b> → <b>${tr.buyerName}</b></div>`).join('') ||
+          `<p class="hint">${t('market.trades.empty')}</p>`));
     }
   }
 
@@ -635,12 +751,12 @@ export class UI {
     const action = canFulfill
       ? `<input type="number" min="1" max="${o.remaining}" value="${o.remaining}" data-qty-for="${o.id}" />
          <button class="btn small ${o.side === 'buy' ? 'success' : 'primary'}" data-fulfill="${o.id}">
-           ${o.side === 'buy' ? 'Sell to' : 'Buy from'}</button>`
-      : `<span class="who">your order</span>`;
+           ${t(o.side === 'buy' ? 'market.sell_to' : 'market.buy_from')}</button>`
+      : `<span class="who">${t('market.your_order')}</span>`;
     return `<div class="order">
-      <span class="side ${o.side}">${o.side.toUpperCase()}</span>
-      <span class="grow">${p.emoji} <b>${o.remaining}</b> ${p.name} @ <b>${fmt(o.price)}</b><br/>
-      <span class="who">${o.side === 'buy' ? 'wanted by' : 'offered by'} ${o.ownerName}</span></span>
+      <span class="side ${o.side}">${t(`market.side.${o.side}`)}</span>
+      <span class="grow">${p.emoji} <b>${o.remaining}</b> ${pName(o.product)} @ <b>${fmt(o.price)}</b><br/>
+      <span class="who">${t(o.side === 'buy' ? 'market.wanted_by' : 'market.offered_by', { name: o.ownerName })}</span></span>
       ${action}
     </div>`;
   }
@@ -658,22 +774,22 @@ export class UI {
   }
 
   private renderWholesalePanel(title: HTMLElement, tabs: HTMLElement, body: HTMLElement): void {
-    title.textContent = '🏭 Central Wholesale';
+    title.textContent = t('wholesale.title');
     tabs.innerHTML = '';
     const rows = (['beans', 'milk', 'wheat', 'bread'] as ProductId[])
       .map((pid) => {
         const price = NPC_WHOLESALE_PRICES[pid]!;
         return `<div class="invrow">
           <span class="emoji">${PRODUCTS[pid].emoji}</span>
-          <span class="name">${PRODUCTS[pid].name}<br/><span class="cap" style="white-space:nowrap">${fmt(price)} / unit</span></span>
+          <span class="name">${pName(pid)}<br/><span class="cap" style="white-space:nowrap">${t('wholesale.per_unit', { price: fmt(price) })}</span></span>
           <input type="number" min="1" value="50" style="width:70px;padding:7px;border:1.5px solid #dbe3ee;border-radius:8px" data-npc-qty="${pid}" />
-          <button class="btn small primary" data-npc-buy="${pid}">Buy</button>
+          <button class="btn small primary" data-npc-buy="${pid}">${t('wholesale.buy')}</button>
         </div>`;
       })
       .join('');
     this.setBody(body, `
       ${rows}
-      <div class="hint">The NPC wholesaler guarantees supply so your shop never stalls — but player milk on the Market is usually cheaper. Goods arrive by delivery van.</div>`, (bd) => {
+      <div class="hint">${t('wholesale.hint')}</div>`, (bd) => {
       bd.querySelectorAll('[data-npc-buy]').forEach((b) =>
         b.addEventListener('click', () => {
           const pid = (b as HTMLElement).dataset.npcBuy as ProductId;
@@ -689,17 +805,16 @@ export class UI {
     tabs.innerHTML = '';
     const biz = this.infoBizId != null ? client.businesses.get(this.infoBizId) : null;
     if (!biz) {
-      title.textContent = 'Business';
-      this.setBody(body, '<p class="hint">This lot is vacant.</p>');
+      title.textContent = t('info.title');
+      this.setBody(body, `<p class="hint">${t('info.vacant')}</p>`);
       return;
     }
-    const meta = BIZ_LABEL[biz.type] ?? BIZ_LABEL.farm;
-    title.textContent = `${meta.icon} ${biz.ownerName}'s ${meta.name}`;
+    title.textContent = bizTitle(biz.type, biz.ownerName);
     const online = client.players.find((p) => p.id === biz.ownerId)?.online;
     const supplies = biz.supplies ?? [];
     const suppliesTxt = supplies.length
-      ? supplies.map((p) => `${PRODUCTS[p].emoji} ${PRODUCTS[p].name}`).join(', ')
-      : 'Retailer (no supply)';
+      ? supplies.map((pid) => `${PRODUCTS[pid].emoji} ${pName(pid)}`).join(', ')
+      : t('info.retailer_no_supply');
 
     // Can MY business form a supply contract to buy from this one?
     const myBiz = client.myBiz;
@@ -713,38 +828,38 @@ export class UI {
     if (canContract) {
       proposeBlock = proposeOpen
         ? `<div class="mkt-form">
-            <h4>Propose supply contract</h4>
+            <h4>${t('contract.propose_title')}</h4>
             <div class="mkt-row">
-              <select id="ct-product">${compatProducts.map((p) => `<option value="${p}">${PRODUCTS[p].emoji} ${PRODUCTS[p].name}</option>`).join('')}</select>
+              <select id="ct-product">${compatProducts.map((pid) => `<option value="${pid}">${PRODUCTS[pid].emoji} ${pName(pid)}</option>`).join('')}</select>
             </div>
             <div class="mkt-row">
-              <span style="font-size:12px">Qty</span><input id="ct-qty" type="number" min="1" value="50" style="width:70px" />
+              <span style="font-size:12px">${t('contract.qty_short')}</span><input id="ct-qty" type="number" min="1" value="50" style="width:70px" />
               <span style="font-size:12px">@ $</span><input id="ct-price" type="number" min="1" value="8" style="width:60px" />
-              <span style="font-size:12px">/unit</span>
+              <span style="font-size:12px">${t('contract.per_unit')}</span>
             </div>
             <div class="mkt-row">
-              <span style="font-size:12px">Deliveries</span><input id="ct-deliv" type="number" min="1" max="30" value="5" style="width:60px" />
-              <span class="hint" style="margin:0">one per game day (~45s)</span>
+              <span style="font-size:12px">${t('contract.deliveries_label')}</span><input id="ct-deliv" type="number" min="1" max="30" value="5" style="width:60px" />
+              <span class="hint" style="margin:0">${t('contract.freq_hint', { secs: CONTRACT_FREQUENCY_SECS })}</span>
             </div>
             <div class="mkt-row">
-              <button class="btn small success" id="ct-send">Send proposal</button>
-              <button class="btn small ghost" id="ct-cancel">Cancel</button>
+              <button class="btn small success" id="ct-send">${t('contract.send')}</button>
+              <button class="btn small ghost" id="ct-cancel">${t('contract.cancel')}</button>
             </div>
           </div>`
-        : `<button class="btn primary" id="ct-open" style="width:100%;margin-top:10px">📜 Propose Supply Contract</button>`;
+        : `<button class="btn primary" id="ct-open" style="width:100%;margin-top:10px">${t('info.propose_btn')}</button>`;
     }
 
     this.setBody(body, `
-      <div class="kv"><span class="k">Company</span><span class="v">${biz.ownerName}'s ${meta.name}</span></div>
-      <div class="kv"><span class="k">Owner</span><span class="v">${biz.ownerName} ${online ? '🟢 online' : '⚪ offline'}</span></div>
-      <div class="kv"><span class="k">Type</span><span class="v">${meta.name}</span></div>
-      <div class="kv"><span class="k">Level</span><span class="v">${biz.level} / ${MAX_LEVEL}</span></div>
-      <div class="kv"><span class="k">Reputation</span><span class="v">★ ${(biz.reputation ?? 3).toFixed(2)}</span></div>
-      <div class="kv"><span class="k">Supplies</span><span class="v">${suppliesTxt}</span></div>
-      <div class="kv"><span class="k">Successful trades</span><span class="v">${biz.tradeCount ?? 0}</span></div>
-      <div class="kv"><span class="k">Status</span><span class="v">${biz.status || '—'}</span></div>
+      <div class="kv"><span class="k">${t('info.company')}</span><span class="v">${bizTitle(biz.type, biz.ownerName)}</span></div>
+      <div class="kv"><span class="k">${t('info.owner')}</span><span class="v">${biz.ownerName} ${t(online ? 'info.online' : 'info.offline')}</span></div>
+      <div class="kv"><span class="k">${t('info.type')}</span><span class="v">${bizName(biz.type)}</span></div>
+      <div class="kv"><span class="k">${t('biz.level')}</span><span class="v">${biz.level} / ${MAX_LEVEL}</span></div>
+      <div class="kv"><span class="k">${t('biz.reputation')}</span><span class="v">★ ${(biz.reputation ?? 3).toFixed(2)}</span></div>
+      <div class="kv"><span class="k">${t('info.supplies_label')}</span><span class="v">${suppliesTxt}</span></div>
+      <div class="kv"><span class="k">${t('info.successful_trades')}</span><span class="v">${biz.tradeCount ?? 0}</span></div>
+      <div class="kv"><span class="k">${t('info.status')}</span><span class="v">${statusText(biz.status)}</span></div>
       ${proposeBlock}
-      ${!canContract ? `<div class="hint">${myBiz ? 'Your business type cannot form a supply contract with this one.' : 'Choose a business to trade with others.'}</div>` : ''}
+      ${!canContract ? `<div class="hint">${t(myBiz ? 'info.cannot_contract' : 'info.choose_business_first')}</div>` : ''}
     `, (b) => {
       b.querySelector('#ct-open')?.addEventListener('click', () => {
         this.proposeFor = biz.id;
@@ -773,55 +888,63 @@ export class UI {
 
   private contractRow(c: ContractPub, role: 'incoming' | 'outgoing' | 'active' | 'history'): string {
     const p = PRODUCTS[c.product];
-    const counterparty = c.buyerId === client.you?.id ? c.sellerName : c.buyerName;
-    const dir = c.buyerId === client.you?.id ? `from ${counterparty}` : `to ${counterparty}`;
+    const iAmBuyer = c.buyerId === client.you?.id;
+    const counterparty = iAmBuyer ? c.sellerName : c.buyerName;
+    const dir = t(iAmBuyer ? 'contract.dir.from' : 'contract.dir.to', { name: counterparty });
     const total = c.quantity * c.unitPrice;
     let actions = '';
     if (role === 'incoming') {
-      actions = `<button class="btn small success" data-ct-accept="${c.id}">Accept</button>
-                 <button class="btn small warn" data-ct-reject="${c.id}">Reject</button>`;
+      actions = `<button class="btn small success" data-ct-accept="${c.id}">${t('contract.accept')}</button>
+                 <button class="btn small warn" data-ct-reject="${c.id}">${t('contract.reject')}</button>`;
     } else if (role === 'outgoing') {
-      actions = `<span class="who">awaiting supplier</span><button class="btn small ghost" data-ct-cancel="${c.id}">Withdraw</button>`;
+      actions = `<span class="who">${t('contract.awaiting_supplier')}</span><button class="btn small ghost" data-ct-cancel="${c.id}">${t('contract.withdraw')}</button>`;
     } else if (role === 'active') {
       const next = c.nextExecutionAt ? Math.max(0, Math.round((c.nextExecutionAt - Date.now()) / 1000)) : null;
-      actions = `<span class="who">${c.remaining} left${next != null ? ` · next ~${next}s` : ''}</span><button class="btn small ghost" data-ct-cancel="${c.id}">Cancel</button>`;
+      actions = `<span class="who">${t('contract.left', { n: c.remaining })}${next != null ? ` · ${t('contract.next_in', { secs: next })}` : ''}</span><button class="btn small ghost" data-ct-cancel="${c.id}">${t('contract.cancel')}</button>`;
     } else {
-      actions = `<span class="who">${c.status.toUpperCase()}</span>`;
+      actions = `<span class="who">${t(`contract.status.${c.status}`)}</span>`;
     }
+    // `lastResult` is a code ('delivered' | 'missed_stock' | ...), not prose.
+    const missed = c.lastResult?.startsWith('missed');
     const statusNote = c.lastResult && role !== 'incoming' && role !== 'outgoing'
-      ? `<br/><span class="who" style="color:${/MISSED/.test(c.lastResult) ? '#dc2626' : '#16a34a'}">${c.lastResult}</span>` : '';
+      ? `<br/><span class="who" style="color:${missed ? '#dc2626' : '#16a34a'}">${t(`contract.result.${c.lastResult}`)}</span>` : '';
     return `<div class="order">
-      <span class="grow">${p.emoji} <b>${c.quantity}</b> ${p.name} @ <b>${fmt(c.unitPrice)}</b> ${dir}<br/>
-        <span class="who">${c.deliveries} deliveries · total ${fmt(total * c.deliveries)}</span>${statusNote}</span>
+      <span class="grow">${p.emoji} <b>${c.quantity}</b> ${pName(c.product)} @ <b>${fmt(c.unitPrice)}</b> ${dir}<br/>
+        <span class="who">${t('contract.deliveries_total', { n: c.deliveries, total: fmt(total * c.deliveries) })}</span>${statusNote}</span>
       <span style="display:flex;flex-direction:column;gap:4px;align-items:flex-end">${actions}</span>
     </div>`;
   }
 
   private renderContractsPanel(title: HTMLElement, tabs: HTMLElement, body: HTMLElement): void {
-    title.textContent = '📜 Supply Contracts';
-    const tab = this.tabBar(tabs, ['Incoming', 'Outgoing', 'Active', 'History']);
+    title.textContent = t('contracts.title');
+    const tab = this.tabBar(tabs, [
+      { id: 'incoming', label: t('tab.incoming') },
+      { id: 'outgoing', label: t('tab.outgoing') },
+      { id: 'active', label: t('tab.active') },
+      { id: 'history', label: t('tab.history') },
+    ]);
     const me = client.you?.id;
     const all = [...client.contracts.values()];
     let rows = '';
     let empty = '';
-    if (tab === 'Incoming') {
+    if (tab === 'incoming') {
       const list = all.filter((c) => c.status === 'proposed' && c.sellerId === me);
       rows = list.map((c) => this.contractRow(c, 'incoming')).join('');
-      empty = 'No incoming proposals. Others can propose contracts by clicking your business.';
-    } else if (tab === 'Outgoing') {
+      empty = t('contracts.empty.incoming');
+    } else if (tab === 'outgoing') {
       const list = all.filter((c) => c.status === 'proposed' && c.buyerId === me);
       rows = list.map((c) => this.contractRow(c, 'outgoing')).join('');
-      empty = 'No pending proposals. Click another player\'s business to propose one.';
-    } else if (tab === 'Active') {
+      empty = t('contracts.empty.outgoing');
+    } else if (tab === 'active') {
       const list = all.filter((c) => c.status === 'active');
       rows = list.map((c) => this.contractRow(c, 'active')).join('');
-      empty = 'No active contracts yet.';
+      empty = t('contracts.empty.active');
     } else {
       const list = all
         .filter((c) => ['completed', 'rejected', 'cancelled'].includes(c.status))
         .sort((a, b) => b.createdAt - a.createdAt);
       rows = list.map((c) => this.contractRow(c, 'history')).join('');
-      empty = 'No past contracts.';
+      empty = t('contracts.empty.history');
     }
     this.setBody(body, rows || `<p class="hint">${empty}</p>`, (b) => {
       b.querySelectorAll('[data-ct-accept]').forEach((el) => el.addEventListener('click', () => {
@@ -840,28 +963,28 @@ export class UI {
   }
 
   private renderDevPanel(title: HTMLElement, tabs: HTMLElement, body: HTMLElement): void {
-    title.textContent = '🛠️ Dev Tools';
+    title.textContent = t('dev.title');
     tabs.innerHTML = '';
     this.setBody(body, `
-      <div class="hint" style="margin-bottom:10px">Development-only helpers (disabled in production builds).</div>
-      <div class="mkt-row"><button class="btn small ghost" data-dev="add_money" data-val="5000">+ $5,000</button>
-      <button class="btn small ghost" data-dev="add_milk" data-val="100">+ 100 Milk</button>
-      <button class="btn small ghost" data-dev="add_beans" data-val="100">+ 100 Beans</button>
-      <button class="btn small ghost" data-dev="add_wheat" data-val="100">+ 100 Wheat</button>
-      <button class="btn small ghost" data-dev="add_bread" data-val="100">+ 100 Bread</button></div>
-      <div class="mkt-row"><span style="font-size:13px">Game speed:</span>
+      <div class="hint" style="margin-bottom:10px">${t('dev.hint')}</div>
+      <div class="mkt-row"><button class="btn small ghost" data-dev="add_money" data-val="5000">${t('dev.add_money')}</button>
+      <button class="btn small ghost" data-dev="add_milk" data-val="100">${t('dev.add_milk')}</button>
+      <button class="btn small ghost" data-dev="add_beans" data-val="100">${t('dev.add_beans')}</button>
+      <button class="btn small ghost" data-dev="add_wheat" data-val="100">${t('dev.add_wheat')}</button>
+      <button class="btn small ghost" data-dev="add_bread" data-val="100">${t('dev.add_bread')}</button></div>
+      <div class="mkt-row"><span style="font-size:13px">${t('dev.speed')}</span>
       <button class="btn small ghost" data-dev="speed" data-val="1">×1</button>
       <button class="btn small ghost" data-dev="speed" data-val="5">×5</button>
       <button class="btn small ghost" data-dev="speed" data-val="20">×20</button></div>
-      <div class="mkt-row"><button class="btn small warn" data-dev="reset_business">Reset my business</button></div>
-      <div class="kv"><span class="k">Open orders</span><span class="v">${client.orders.size}</span></div>
-      <div class="kv"><span class="k">Deliveries in transit</span><span class="v">${client.deliveries.size}</span></div>
-      <div class="kv"><span class="k">Businesses</span><span class="v">${client.businesses.size}</span></div>
-      <div style="margin-top:12px"><button class="btn small ghost" id="dev-logout">Log out</button></div>`, (bd) => {
+      <div class="mkt-row"><button class="btn small warn" data-dev="reset_business">${t('dev.reset')}</button></div>
+      <div class="kv"><span class="k">${t('dev.open_orders')}</span><span class="v">${client.orders.size}</span></div>
+      <div class="kv"><span class="k">${t('dev.deliveries')}</span><span class="v">${client.deliveries.size}</span></div>
+      <div class="kv"><span class="k">${t('dev.businesses')}</span><span class="v">${client.businesses.size}</span></div>
+      <div style="margin-top:12px"><button class="btn small ghost" id="dev-logout">${t('dev.logout')}</button></div>`, (bd) => {
       bd.querySelectorAll('[data-dev]').forEach((b) =>
         b.addEventListener('click', () => {
           const el = b as HTMLElement;
-          if (el.dataset.dev === 'reset_business' && !confirm('Really reset your business?')) return;
+          if (el.dataset.dev === 'reset_business' && !confirm(t('dev.reset.confirm'))) return;
           client.send({ t: 'dev', cmd: el.dataset.dev!, value: el.dataset.val ? parseInt(el.dataset.val, 10) : undefined });
           sfx.click();
         })
@@ -881,42 +1004,42 @@ export class UI {
     }
     const isFarm = biz.type === 'farm';
     const tradedWithMe = client.trades.some(
-      (t) => t.buyerName === client.you?.name || t.sellerName === client.you?.name
+      (tr) => tr.buyerName === client.you?.name || tr.sellerName === client.you?.name
     );
     const has = (pid: ProductId) =>
       (biz.inventory[pid]?.qty ?? 0) + (biz.inventory[pid]?.incoming ?? 0) > 0;
     const objsByType: Record<string, [string, boolean][]> = {
       farm: [
-        ['Open your Farm', !!this.flags.opened_business],
-        ['Produce Milk or Wheat', biz.milkProduced > 0],
-        ['Open the Marketplace', !!this.flags.opened_market],
-        ['Create a Sell Order', !!this.flags.created_order],
-        ['Complete a player trade', tradedWithMe || biz.revenue > 0],
-        ['Upgrade your Farm', biz.level >= 2],
+        ['obj.farm.open', !!this.flags.opened_business],
+        ['obj.farm.produce2', biz.milkProduced > 0],
+        ['obj.market.open', !!this.flags.opened_market],
+        ['obj.farm.sell_order', !!this.flags.created_order],
+        ['obj.farm.trade', tradedWithMe || biz.revenue > 0],
+        ['obj.farm.upgrade', biz.level >= 2],
       ],
       coffee_shop: [
-        ['Open your Coffee Shop', !!this.flags.opened_business],
-        ['Buy Coffee Beans', has('beans') || biz.expenses > 0],
-        ['Buy Milk', has('milk')],
-        ['Make your first sale', biz.coffeeSold > 0],
-        ['Open the Marketplace', !!this.flags.opened_market],
-        ['Upgrade your Coffee Shop', biz.level >= 2],
+        ['obj.shop.open', !!this.flags.opened_business],
+        ['obj.shop.beans', has('beans') || biz.expenses > 0],
+        ['obj.shop.milk', has('milk')],
+        ['obj.shop.sale', biz.coffeeSold > 0],
+        ['obj.market.open', !!this.flags.opened_market],
+        ['obj.shop.upgrade', biz.level >= 2],
       ],
       bakery: [
-        ['Open your Bakery', !!this.flags.opened_business],
-        ['Acquire Wheat', has('wheat') || biz.expenses > 0],
-        ['Sell your first Bread', biz.coffeeSold > 0],
-        ['Open the Marketplace', !!this.flags.opened_market],
-        ['Buy Wheat from another player', tradedWithMe],
-        ['Upgrade your Bakery', biz.level >= 2],
+        ['obj.bakery.open', !!this.flags.opened_business],
+        ['obj.bakery.wheat', has('wheat') || biz.expenses > 0],
+        ['obj.bakery.sale', biz.coffeeSold > 0],
+        ['obj.market.open', !!this.flags.opened_market],
+        ['obj.bakery.buy_wheat', tradedWithMe],
+        ['obj.bakery.upgrade', biz.level >= 2],
       ],
       mini_market: [
-        ['Open your Mini Market', !!this.flags.opened_business],
-        ['Stock Bread or Milk', has('bread') || has('milk')],
-        ['Make your first retail sale', biz.coffeeSold > 0],
-        ['Open the Marketplace', !!this.flags.opened_market],
-        ['Buy stock from another player', tradedWithMe],
-        ['Upgrade your Mini Market', biz.level >= 2],
+        ['obj.market.openbiz', !!this.flags.opened_business],
+        ['obj.market.stock', has('bread') || has('milk')],
+        ['obj.market.sale', biz.coffeeSold > 0],
+        ['obj.market.open', !!this.flags.opened_market],
+        ['obj.market.buy_stock', tradedWithMe],
+        ['obj.market.upgrade', biz.level >= 2],
       ],
     };
     const objs = objsByType[biz.type] ?? objsByType.farm;
@@ -927,9 +1050,9 @@ export class UI {
     }
     el.style.display = '';
     const html =
-      `<h3>Objectives <button id="obj-hide">hide</button></h3>` +
+      `<h3>${t('obj.title')} <button id="obj-hide">${t('obj.hide')}</button></h3>` +
       objs
-        .map(([name, done]) => `<div class="obj ${done ? 'done' : ''}"><span class="tick">${done ? '✓' : '·'}</span>${name}</div>`)
+        .map(([key, done]) => `<div class="obj ${done ? 'done' : ''}"><span class="tick">${done ? '✓' : '·'}</span>${t(key)}</div>`)
         .join('');
     if (html === this.lastObjHTML) return;
     this.lastObjHTML = html;
@@ -960,22 +1083,23 @@ export class UI {
     const biz = client.myBiz;
     const hours = Math.floor(r.seconds / 3600);
     const mins = Math.floor((r.seconds % 3600) / 60);
-    const dur = hours > 0 ? `${hours}h ${mins}m` : `${mins}m`;
+    const dur = hours > 0 ? t('away.hours', { h: hours, m: mins }) : t('away.minutes', { m: mins });
+    const isFarm = biz?.type === 'farm';
     const overlay = document.createElement('div');
     overlay.className = 'overlay modal';
     overlay.innerHTML = `
       <div class="card">
-        <h1>While you were away</h1>
-        <div class="tagline">Your ${biz?.type === 'farm' ? 'farm kept working' : 'business kept serving'} for ${dur}.</div>
+        <h1>${t('away.title')}</h1>
+        <div class="tagline">${t(isFarm ? 'away.tagline.farm' : 'away.tagline.generic', { dur })}</div>
         <div class="away-grid">
-          <div class="away-cell"><div class="k">Revenue</div><div class="v" style="color:#16a34a">${fmt(r.revenue)}</div></div>
-          <div class="away-cell"><div class="k">Expenses</div><div class="v" style="color:#dc2626">${fmt(r.expenses)}</div></div>
-          <div class="away-cell"><div class="k">Profit</div><div class="v">${fmt(r.profit)}</div></div>
-          ${biz?.type === 'farm'
-            ? `<div class="away-cell"><div class="k">Units produced</div><div class="v">${biz.production === 'wheat' ? '🌾' : '🥛'} ${r.milkProduced}</div></div>`
-            : `<div class="away-cell"><div class="k">Items sold</div><div class="v">${biz?.type === 'bakery' ? '🍞' : biz?.type === 'mini_market' ? '🛒' : '☕'} ${r.coffeeSold}</div></div>`}
+          <div class="away-cell"><div class="k">${t('away.revenue')}</div><div class="v" style="color:#16a34a">${fmt(r.revenue)}</div></div>
+          <div class="away-cell"><div class="k">${t('away.expenses')}</div><div class="v" style="color:#dc2626">${fmt(r.expenses)}</div></div>
+          <div class="away-cell"><div class="k">${t('away.profit')}</div><div class="v">${fmt(r.profit)}</div></div>
+          ${isFarm
+            ? `<div class="away-cell"><div class="k">${t('away.units_produced')}</div><div class="v">${biz!.production === 'wheat' ? '🌾' : '🥛'} ${r.milkProduced}</div></div>`
+            : `<div class="away-cell"><div class="k">${t('away.items_sold')}</div><div class="v">${biz?.type === 'bakery' ? '🍞' : biz?.type === 'mini_market' ? '🛒' : '☕'} ${r.coffeeSold}</div></div>`}
         </div>
-        <button class="btn primary" id="away-ok">Back to business</button>
+        <button class="btn primary" id="away-ok">${t('away.ok')}</button>
       </div>`;
     document.body.appendChild(overlay);
     overlay.querySelector('#away-ok')!.addEventListener('click', () => {
