@@ -14,7 +14,7 @@ export const ROAD_HALF_WIDTH = 3.2; // road half width
 export const ROAD_LINES = [-42, 0, 42]; // grid road centerlines (both axes)
 export const ROAD_SPAN = 48;        // roads run from -ROAD_SPAN..ROAD_SPAN
 
-export type LotKind = 'farm' | 'coffee_shop' | 'wholesale';
+export type LotKind = 'farm' | 'coffee_shop' | 'bakery' | 'mini_market' | 'wholesale';
 
 export interface LotDef {
   id: string;
@@ -40,6 +40,14 @@ export const LOTS: LotDef[] = [
   { id: 'cafe_4', kind: 'coffee_shop', x: 14, z: -30, rotY: -Math.PI / 2 },
   { id: 'cafe_5', kind: 'coffee_shop', x: -30, z: -14, rotY: 0 },
   { id: 'cafe_6', kind: 'coffee_shop', x: 30, z: 14, rotY: Math.PI },
+  // Bakeries (block corners)
+  { id: 'bakery_1', kind: 'bakery', x: -28, z: -28, rotY: Math.PI / 2 },
+  { id: 'bakery_2', kind: 'bakery', x: 28, z: 28, rotY: -Math.PI / 2 },
+  { id: 'bakery_3', kind: 'bakery', x: 30, z: -22, rotY: -Math.PI / 2 },
+  // Mini markets
+  { id: 'market_1', kind: 'mini_market', x: -28, z: 28, rotY: Math.PI / 2 },
+  { id: 'market_2', kind: 'mini_market', x: 28, z: -28, rotY: -Math.PI / 2 },
+  { id: 'market_3', kind: 'mini_market', x: -21, z: 30, rotY: 0 },
   // NPC wholesale depot
   { id: 'wholesale', kind: 'wholesale', x: 16, z: -14, rotY: Math.PI },
 ];

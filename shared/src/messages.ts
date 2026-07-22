@@ -13,7 +13,8 @@ export type ClientMsg =
   | { t: 'order_cancel'; orderId: number }
   | { t: 'order_fulfill'; orderId: number; qty: number }
   | { t: 'upgrade' }
-  | { t: 'set_price'; price: number }
+  | { t: 'set_price'; price: number; product?: ProductId }
+  | { t: 'set_production'; product: ProductId }
   | { t: 'dev'; cmd: string; value?: number }
   | { t: 'ping' };
 
@@ -53,7 +54,9 @@ export interface BizPub {
 
 export interface BizPriv extends BizPub {
   inventory: Partial<Record<ProductId, InventoryEntry>>;
-  price: number; // coffee sale price (shop only)
+  price: number;   // retail price (coffee / bread)
+  price2: number;  // mini market milk retail price
+  production: string; // farm: 'milk' | 'wheat'
   revenue: number;
   expenses: number;
   milkProduced: number;

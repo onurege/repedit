@@ -12,7 +12,7 @@ import {
 } from '@district/shared';
 import {
   box, mat,
-  makeFarm, makeCoffeeShop, makeWholesale, makeHouse,
+  makeFarm, makeCoffeeShop, makeBakery, makeMiniMarket, makeWholesale, makeHouse,
   makeTree, makeStreetlight, makeVacantSign,
 } from './buildings.js';
 
@@ -79,11 +79,10 @@ export class City {
     }
 
     // NPC houses in the inner blocks (positions avoid lots)
+    // (several former house spots now host bakery / mini market lots)
     const housePositions: [number, number, number][] = [
-      [-28, -28, 1], [-21, -30, 2], [-30, -21, 3],
-      [28, 28, 4], [21, 30, 5], [30, 21, 6],
-      [-28, 28, 7], [-21, 30, 8],
-      [28, -28, 9], [30, -22, 10],
+      [-21, -30, 2], [-30, -21, 3],
+      [21, 30, 5], [30, 21, 6],
       [-9, -30, 11], [9, 30, 12], [-30, 9, 13], [30, -9, 14],
     ];
     for (const [x, z, seed] of housePositions) {
@@ -168,10 +167,13 @@ export class City {
         group = makeWholesale();
         sel = { lotId: lot.id, kind: 'wholesale' };
       } else if (biz) {
-        group =
-          biz.type === 'farm'
-            ? makeFarm(biz.level, biz.ownerName)
-            : makeCoffeeShop(biz.level, biz.ownerName);
+        const builders: Record<string, (lv: number, name: string) => THREE.Group> = {
+          farm: makeFarm,
+          coffee_shop: makeCoffeeShop,
+          bakery: makeBakery,
+          mini_market: makeMiniMarket,
+        };
+        group = (builders[biz.type] ?? makeFarm)(biz.level, biz.ownerName);
         sel = { lotId: lot.id, kind: 'business', bizId: biz.id };
       } else {
         group = makeVacantSign(lot.kind);

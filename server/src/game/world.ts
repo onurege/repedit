@@ -16,6 +16,11 @@ import {
   BusinessType,
   FARM_LEVELS,
   SHOP_LEVELS,
+  BAKERY_LEVELS,
+  MARKET_LEVELS,
+  RETAIL_BASE,
+  DEFAULT_BREAD_PRICE,
+  DEFAULT_RETAIL_MILK_PRICE,
   MAX_LEVEL,
   STARTING_CASH,
   NPC_WHOLESALE_PRICES,
@@ -89,6 +94,8 @@ export interface BizRec {
   lotId: string;
   level: number;
   price: number;
+  price2: number;      // mini market milk retail price
+  production: string;  // farm: 'milk' | 'wheat'
   reputation: number;
   revenue: number;
   expenses: number;
@@ -147,8 +154,14 @@ function ledgerParams(e: LedgerEntry): any[] {
   return [e.playerId, e.businessId, e.type, e.amount, e.refType, e.refId, e.before, e.after];
 }
 
-const TRADABLE: ProductId[] = ['milk', 'beans'];
-const FAIR_COFFEE_PRICE = Math.round(PRODUCTS.coffee.basePrice * 1.2);
+const TRADABLE: ProductId[] = ['milk', 'beans', 'wheat', 'bread'];
+
+const STARTING_PRODUCTS: Record<BusinessType, ProductId[]> = {
+  farm: ['milk', 'wheat'],
+  coffee_shop: ['milk', 'beans', 'coffee'],
+  bakery: ['wheat', 'bread'],
+  mini_market: ['bread', 'milk'],
+};
 
 function inv(biz: BizRec, product: ProductId): InvRec {
   let rec = biz.inv.get(product);
@@ -160,12 +173,26 @@ function inv(biz: BizRec, product: ProductId): InvRec {
 }
 
 function capacityFor(biz: BizRec, product: ProductId): number {
-  if (biz.type === 'farm') {
-    return product === 'milk' ? FARM_LEVELS[biz.level].milkCapacity : 0;
+  switch (biz.type) {
+    case 'farm':
+      return product === 'milk' || product === 'wheat'
+        ? FARM_LEVELS[biz.level].milkCapacity
+        : 0;
+    case 'coffee_shop': {
+      const lv = SHOP_LEVELS[biz.level];
+      if (product === 'coffee') return lv.coffeeCapacity;
+      return product === 'milk' || product === 'beans' ? lv.ingredientCapacity : 0;
+    }
+    case 'bakery': {
+      const lv = BAKERY_LEVELS[biz.level];
+      if (product === 'bread') return lv.coffeeCapacity;
+      return product === 'wheat' ? lv.ingredientCapacity : 0;
+    }
+    case 'mini_market':
+      return product === 'bread' || product === 'milk'
+        ? MARKET_LEVELS[biz.level].stockCapacity
+        : 0;
   }
-  const lv = SHOP_LEVELS[biz.level];
-  if (product === 'coffee') return lv.coffeeCapacity;
-  return lv.ingredientCapacity;
 }
 
 export class World extends EventEmitter {
@@ -228,6 +255,8 @@ export class World extends EventEmitter {
         lotId: r.lot_id,
         level: r.level,
         price: r.price,
+        price2: r.price2 ?? DEFAULT_RETAIL_MILK_PRICE,
+        production: r.production ?? 'milk',
         reputation: r.reputation,
         revenue: r.revenue,
         expenses: r.expenses,
@@ -324,7 +353,8 @@ export class World extends EventEmitter {
       for (const b of dirtyBiz) {
         await c.query(
           `UPDATE businesses SET level=$1, price=$2, reputation=$3, revenue=$4, expenses=$5,
-             milk_produced=$6, coffee_sold=$7, customers=$8, accums=$9, sim_ts=now() WHERE id=$10`,
+             milk_produced=$6, coffee_sold=$7, customers=$8, accums=$9, sim_ts=now(),
+             price2=$11, production=$12 WHERE id=$10`,
           [
             b.level,
             b.price,
@@ -336,6 +366,8 @@ export class World extends EventEmitter {
             b.customers,
             JSON.stringify({ prod: b.prodAccum, brew: b.brewAccum, cust: b.custAccum }),
             b.id,
+            b.price2,
+            b.production,
           ]
         );
         for (const [product, rec] of b.inv) {
@@ -417,81 +449,141 @@ export class World extends EventEmitter {
   simulate(biz: BizRec, dt: number, silent: boolean): void {
     const owner = this.players.get(biz.ownerId);
     if (!owner) return;
-    if (biz.type === 'farm') {
-      const lv = FARM_LEVELS[biz.level];
-      const milk = inv(biz, 'milk');
-      biz.prodAccum += lv.milkPerSec * dt;
-      const want = Math.floor(biz.prodAccum);
-      const space = Math.max(0, lv.milkCapacity - milk.qty - milk.reserved);
-      const add = Math.min(want, space);
-      if (add > 0) {
-        milk.qty += add;
-        biz.milkProduced += add;
-        biz.prodAccum -= add;
-        this.addXp(owner, add * XP.perMilkProduced, silent);
-        biz.dirty = true;
-      }
-      // Full storage must not bank production time.
-      if (biz.prodAccum > 1) biz.prodAccum = 1;
-      biz.status = space - add <= 0 ? 'STORAGE FULL' : 'PRODUCING';
-    } else {
-      const lv = SHOP_LEVELS[biz.level];
-      const milk = inv(biz, 'milk');
-      const beans = inv(biz, 'beans');
-      const coffee = inv(biz, 'coffee');
-      // Brew coffee from ingredients.
-      biz.brewAccum += lv.brewPerSec * dt;
-      const brewWant = Math.floor(biz.brewAccum);
-      const brewed = Math.max(
-        0,
-        Math.min(brewWant, milk.qty, beans.qty, lv.coffeeCapacity - coffee.qty)
-      );
-      if (brewed > 0) {
-        milk.qty -= brewed;
-        beans.qty -= brewed;
-        coffee.qty += brewed;
-        biz.brewAccum -= brewed;
-        biz.dirty = true;
-      }
-      if (biz.brewAccum > 1) biz.brewAccum = 1;
-      // Customers arrive and buy coffee.
-      const demand =
-        lv.customersPerSec * priceDemandMultiplier(biz.price) * repDemandMultiplier(biz.reputation);
-      biz.custAccum += demand * dt;
-      const arrivals = Math.floor(biz.custAccum);
-      biz.custAccum -= arrivals;
-      if (arrivals > 0) {
-        const sold = Math.min(arrivals, coffee.qty);
-        const lost = arrivals - sold;
-        coffee.qty -= sold;
-        const gross = sold * biz.price;
-        if (sold > 0) {
-          this.ledgerQueue.push({
-            playerId: owner.id, businessId: biz.id, type: 'CUSTOMER_SALE',
-            amount: gross, refType: 'business', refId: biz.id,
-            before: owner.cash, after: owner.cash + gross,
-          });
-          owner.cash += gross;
-          owner.dirty = true;
-          biz.revenue += gross;
-          biz.coffeeSold += sold;
-          this.addXp(owner, sold * XP.perSale, silent);
-          biz.reputation +=
-            sold * (biz.price <= FAIR_COFFEE_PRICE ? REP_SALE_FAIR_PRICE : REP_SALE_GOUGING);
+    switch (biz.type) {
+      case 'farm': {
+        const lv = FARM_LEVELS[biz.level];
+        const product: ProductId = biz.production === 'wheat' ? 'wheat' : 'milk';
+        const rec = inv(biz, product);
+        biz.prodAccum += lv.milkPerSec * dt;
+        const want = Math.floor(biz.prodAccum);
+        const space = Math.max(0, lv.milkCapacity - rec.qty - rec.reserved);
+        const add = Math.min(want, space);
+        if (add > 0) {
+          rec.qty += add;
+          biz.milkProduced += add; // total units produced (milk or wheat)
+          biz.prodAccum -= add;
+          this.addXp(owner, add * XP.perMilkProduced, silent);
+          biz.dirty = true;
         }
-        if (lost > 0) biz.reputation += lost * REP_LOST_CUSTOMER;
-        biz.reputation = Math.min(REP_MAX, Math.max(REP_MIN, biz.reputation));
-        biz.customers += arrivals;
-        biz.dirty = true;
-        if (!silent) {
-          for (let i = 0; i < Math.min(sold, 3); i++) {
-            this.emit('sale', { bizId: biz.id, lotId: biz.lotId, amount: biz.price });
-          }
-          if (lost > 0) this.emit('lost_customer', { bizId: biz.id, lotId: biz.lotId });
-        }
+        // Full storage must not bank production time.
+        if (biz.prodAccum > 1) biz.prodAccum = 1;
+        biz.status = space - add <= 0 ? 'STORAGE FULL' : 'PRODUCING';
+        break;
       }
-      const canServe = coffee.qty > 0 || (milk.qty > 0 && beans.qty > 0);
-      biz.status = canServe ? 'OPEN' : 'OUT OF STOCK';
+      case 'coffee_shop': {
+        const lv = SHOP_LEVELS[biz.level];
+        const milk = inv(biz, 'milk');
+        const beans = inv(biz, 'beans');
+        const coffee = inv(biz, 'coffee');
+        // Brew coffee from ingredients.
+        biz.brewAccum += lv.brewPerSec * dt;
+        const brewWant = Math.floor(biz.brewAccum);
+        const brewed = Math.max(
+          0,
+          Math.min(brewWant, milk.qty, beans.qty, lv.coffeeCapacity - coffee.qty)
+        );
+        if (brewed > 0) {
+          milk.qty -= brewed;
+          beans.qty -= brewed;
+          coffee.qty += brewed;
+          biz.brewAccum -= brewed;
+          biz.dirty = true;
+        }
+        if (biz.brewAccum > 1) biz.brewAccum = 1;
+        biz.custAccum +=
+          lv.customersPerSec *
+          priceDemandMultiplier(biz.price, RETAIL_BASE.coffee) *
+          repDemandMultiplier(biz.reputation) * dt;
+        const arrivals = Math.floor(biz.custAccum);
+        biz.custAccum -= arrivals;
+        this.applyRetail(biz, owner, 'coffee', biz.price, arrivals, silent);
+        const canServe = coffee.qty > 0 || (milk.qty > 0 && beans.qty > 0);
+        biz.status = canServe ? 'OPEN' : 'OUT OF STOCK';
+        break;
+      }
+      case 'bakery': {
+        const lv = BAKERY_LEVELS[biz.level];
+        const wheat = inv(biz, 'wheat');
+        const bread = inv(biz, 'bread');
+        // Bake bread from wheat (1:1). Stops when wheat is empty.
+        biz.brewAccum += lv.brewPerSec * dt;
+        const bakeWant = Math.floor(biz.brewAccum);
+        const baked = Math.max(0, Math.min(bakeWant, wheat.qty, lv.coffeeCapacity - bread.qty));
+        if (baked > 0) {
+          wheat.qty -= baked;
+          bread.qty += baked;
+          biz.brewAccum -= baked;
+          biz.dirty = true;
+        }
+        if (biz.brewAccum > 1) biz.brewAccum = 1;
+        biz.custAccum +=
+          lv.customersPerSec *
+          priceDemandMultiplier(biz.price, RETAIL_BASE.bread) *
+          repDemandMultiplier(biz.reputation) * dt;
+        const arrivals = Math.floor(biz.custAccum);
+        biz.custAccum -= arrivals;
+        this.applyRetail(biz, owner, 'bread', biz.price, arrivals, silent);
+        biz.status = bread.qty > 0 || wheat.qty > 0 ? 'OPEN' : 'OUT OF STOCK';
+        break;
+      }
+      case 'mini_market': {
+        const lv = MARKET_LEVELS[biz.level];
+        const rep = repDemandMultiplier(biz.reputation);
+        // Two independent customer streams: bread (custAccum) and milk
+        // (prodAccum, unused by retail businesses otherwise).
+        biz.custAccum += lv.customersPerSec * priceDemandMultiplier(biz.price, RETAIL_BASE.bread) * rep * dt;
+        const breadArrivals = Math.floor(biz.custAccum);
+        biz.custAccum -= breadArrivals;
+        this.applyRetail(biz, owner, 'bread', biz.price, breadArrivals, silent);
+        biz.prodAccum += lv.customersPerSec * priceDemandMultiplier(biz.price2, RETAIL_BASE.milk) * rep * dt;
+        const milkArrivals = Math.floor(biz.prodAccum);
+        biz.prodAccum -= milkArrivals;
+        this.applyRetail(biz, owner, 'milk', biz.price2, milkArrivals, silent);
+        biz.status =
+          inv(biz, 'bread').qty > 0 || inv(biz, 'milk').qty > 0 ? 'OPEN' : 'OUT OF STOCK';
+        break;
+      }
+    }
+  }
+
+  /** Sell up to `arrivals` units of `product` to NPC customers. */
+  private applyRetail(
+    biz: BizRec,
+    owner: PlayerRec,
+    product: ProductId,
+    price: number,
+    arrivals: number,
+    silent: boolean
+  ): void {
+    if (arrivals <= 0) return;
+    const rec = inv(biz, product);
+    const sold = Math.min(arrivals, rec.qty);
+    const lost = arrivals - sold;
+    rec.qty -= sold;
+    const gross = sold * price;
+    if (sold > 0) {
+      this.ledgerQueue.push({
+        playerId: owner.id, businessId: biz.id, type: 'CUSTOMER_SALE',
+        amount: gross, refType: 'business', refId: biz.id,
+        before: owner.cash, after: owner.cash + gross,
+      });
+      owner.cash += gross;
+      owner.dirty = true;
+      biz.revenue += gross;
+      biz.coffeeSold += sold; // total units sold at retail
+      this.addXp(owner, sold * XP.perSale, silent);
+      const fair = Math.round((RETAIL_BASE[product] ?? PRODUCTS[product].basePrice) * 1.2);
+      biz.reputation += sold * (price <= fair ? REP_SALE_FAIR_PRICE : REP_SALE_GOUGING);
+    }
+    if (lost > 0) biz.reputation += lost * REP_LOST_CUSTOMER;
+    biz.reputation = Math.min(REP_MAX, Math.max(REP_MIN, biz.reputation));
+    biz.customers += arrivals;
+    biz.dirty = true;
+    if (!silent) {
+      for (let i = 0; i < Math.min(sold, 3); i++) {
+        this.emit('sale', { bizId: biz.id, lotId: biz.lotId, amount: price });
+      }
+      if (lost > 0) this.emit('lost_customer', { bizId: biz.id, lotId: biz.lotId });
     }
   }
 
@@ -581,20 +673,20 @@ export class World extends EventEmitter {
   async chooseBusiness(playerId: number, type: BusinessType): Promise<BizRec> {
     const p = this.player(playerId);
     if (this.bizByOwner(playerId)) throw new GameError('You already own a business.');
-    if (type !== 'farm' && type !== 'coffee_shop') throw new GameError('Unknown business type.');
+    if (!STARTING_PRODUCTS[type]) throw new GameError('Unknown business type.');
     const taken = new Set([...this.businesses.values()].map((b) => b.lotId));
     const lot = lotsOfKind(type).find((l) => !taken.has(l.id));
     if (!lot) throw new GameError('No free lots for that business type right now.');
 
     const row = await tx(async (c) => {
+      const defaultPrice = type === 'coffee_shop' ? DEFAULT_COFFEE_PRICE : DEFAULT_BREAD_PRICE;
       const ins = await c.query(
-        `INSERT INTO businesses (player_id, type, lot_id, price, reputation)
-         VALUES ($1,$2,$3,$4,$5) RETURNING id`,
-        [playerId, type, lot.id, DEFAULT_COFFEE_PRICE, REP_START]
+        `INSERT INTO businesses (player_id, type, lot_id, price, reputation, price2, production)
+         VALUES ($1,$2,$3,$4,$5,$6,'milk') RETURNING id`,
+        [playerId, type, lot.id, defaultPrice, REP_START, DEFAULT_RETAIL_MILK_PRICE]
       );
       const bizId = ins.rows[0].id;
-      const products: ProductId[] =
-        type === 'farm' ? ['milk'] : ['milk', 'beans', 'coffee'];
+      const products: ProductId[] = STARTING_PRODUCTS[type];
       for (const product of products) {
         await c.query(
           'INSERT INTO inventories (business_id, product, qty, reserved) VALUES ($1,$2,0,0)',
@@ -610,7 +702,9 @@ export class World extends EventEmitter {
       type,
       lotId: lot.id,
       level: 1,
-      price: DEFAULT_COFFEE_PRICE,
+      price: type === 'coffee_shop' ? DEFAULT_COFFEE_PRICE : DEFAULT_BREAD_PRICE,
+      price2: DEFAULT_RETAIL_MILK_PRICE,
+      production: 'milk',
       reputation: REP_START,
       revenue: 0,
       expenses: 0,
@@ -624,7 +718,7 @@ export class World extends EventEmitter {
       inv: new Map(),
       dirty: false,
     };
-    const products: ProductId[] = type === 'farm' ? ['milk'] : ['milk', 'beans', 'coffee'];
+    const products: ProductId[] = STARTING_PRODUCTS[type];
     for (const product of products) biz.inv.set(product, { qty: 0, reserved: 0 });
     this.businesses.set(biz.id, biz);
     this.emit('biz_created', biz);
@@ -1019,8 +1113,12 @@ export class World extends EventEmitter {
     const p = this.player(playerId);
     const biz = this.requireBiz(playerId);
     if (biz.level >= MAX_LEVEL) throw new GameError('Already at max level.');
-    const cost =
-      biz.type === 'farm' ? FARM_LEVELS[biz.level].upgradeCost : SHOP_LEVELS[biz.level].upgradeCost;
+    const cost = {
+      farm: FARM_LEVELS[biz.level].upgradeCost,
+      coffee_shop: SHOP_LEVELS[biz.level].upgradeCost,
+      bakery: BAKERY_LEVELS[biz.level].upgradeCost,
+      mini_market: MARKET_LEVELS[biz.level].upgradeCost,
+    }[biz.type];
     if (cost == null) throw new GameError('Already at max level.');
     if (p.cash < cost) throw new GameError(`Upgrade costs $${cost}.`);
     p.cash -= cost;
@@ -1052,16 +1150,31 @@ export class World extends EventEmitter {
     }
   }
 
-  setPrice(playerId: number, price: number): void {
+  setPrice(playerId: number, price: number, product?: ProductId): void {
     const biz = this.requireBiz(playerId);
-    if (biz.type !== 'coffee_shop') throw new GameError('Only coffee shops set a sale price.');
+    if (biz.type === 'farm') throw new GameError('Farms sell via the marketplace.');
     price = Math.floor(price);
     if (!Number.isFinite(price) || price < MIN_COFFEE_PRICE || price > MAX_COFFEE_PRICE) {
       throw new GameError(`Price must be $${MIN_COFFEE_PRICE}-$${MAX_COFFEE_PRICE}.`);
     }
-    biz.price = price;
+    if (biz.type === 'mini_market' && product === 'milk') {
+      biz.price2 = price;
+    } else {
+      biz.price = price;
+    }
     biz.dirty = true;
     this.emit('upgraded', { biz }); // reuse: broadcast public/private refresh
+  }
+
+  setProduction(playerId: number, product: ProductId): void {
+    const biz = this.requireBiz(playerId);
+    if (biz.type !== 'farm') throw new GameError('Only farms choose production.');
+    if (product !== 'milk' && product !== 'wheat') throw new GameError('Farms produce Milk or Wheat.');
+    if (biz.production === product) return;
+    biz.production = product;
+    biz.prodAccum = 0;
+    biz.dirty = true;
+    this.emit('upgraded', { biz });
   }
 
   async resetBusiness(playerId: number): Promise<void> {
@@ -1089,9 +1202,11 @@ export class World extends EventEmitter {
         p.dirty = true;
         return `+$${v > 0 ? v : 5000}`;
       case 'add_milk':
-      case 'add_beans': {
+      case 'add_beans':
+      case 'add_wheat':
+      case 'add_bread': {
         const biz = this.requireBiz(playerId);
-        const product: ProductId = cmd === 'add_milk' ? 'milk' : 'beans';
+        const product = cmd.slice(4) as ProductId;
         inv(biz, product).qty += v > 0 ? v : 50;
         biz.dirty = true;
         return `+${v > 0 ? v : 50} ${PRODUCTS[product].name}`;
@@ -1152,6 +1267,8 @@ export class World extends EventEmitter {
       ...this.toBizPub(b),
       inventory,
       price: b.price,
+      price2: b.price2,
+      production: b.production,
       revenue: b.revenue,
       expenses: b.expenses,
       milkProduced: b.milkProduced,

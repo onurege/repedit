@@ -7,12 +7,12 @@ Farm → Milk → player marketplace → Coffee Shop → NPC customers → profi
 upgrades. Shared 3D city, NPC wholesaler fallback, visible deliveries,
 offline progression, full persistence. **This phase is implemented.**
 
-## PHASE 2 — Business Expansion
+## PHASE 2 — Business Network  ✅ (current)
 
-- New player businesses: Bakery, Restaurant, Mini Market
-- Employees (hire/assign, simple wages)
-- More products and multi-step supply chains
-- Larger product storage/logistics options
+- New player businesses: Bakery, Mini Market — **implemented**
+- New products: Wheat, Bread; Farm chooses Milk or Wheat — **implemented**
+- Chain: Farm → Bakery → Mini Market → NPC customers — **implemented**
+- Deferred to later: Restaurant, employees, deeper supply chains
 
 ## PHASE 3 — Player Economy
 

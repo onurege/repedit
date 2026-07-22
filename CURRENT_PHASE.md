@@ -1,6 +1,23 @@
-# PHASE 1 — PLAYABLE ECONOMY MVP
+# PHASE 2 — BUSINESS NETWORK (current)
 
-**This is the current phase.**
+Phase 1 (Playable Economy MVP) and Phase 1.5 (hardening) are complete.
+Phase 2 adds exactly two business types (**Bakery**, **Mini Market**) and two
+products (**Wheat**, **Bread**), creating the interconnected chain:
+
+```
+FARM ─ milk ──→ COFFEE SHOP ─→ customers
+  └── wheat ──→ BAKERY ─ bread ──→ MINI MARKET ─→ customers
+```
+
+Farms choose Milk or Wheat production; bakeries bake wheat into bread;
+mini markets are pure retail (bread + milk, two prices). Central Wholesale
+provides fallback supply for all inputs; player suppliers can profitably
+undercut it. Everything reuses the existing marketplace, deliveries,
+inventory, ledger, upgrades, offline progression and persistence.
+
+---
+
+# PHASE 1 — PLAYABLE ECONOMY MVP (complete)
 
 ## Goal
 

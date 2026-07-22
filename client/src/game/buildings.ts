@@ -205,6 +205,81 @@ export function makeCoffeeShop(level: number, ownerName: string): THREE.Group {
   return g;
 }
 
+export function makeBakery(level: number, ownerName: string): THREE.Group {
+  const g = new THREE.Group();
+  const plaza = box(11, 0.22, 9, 0xd8cbb8, 0, 0, 0, false);
+  plaza.receiveShadow = true;
+  g.add(plaza);
+  const w = level >= 3 ? 7.5 : level === 2 ? 5.8 : 4.2;
+  const h = level >= 3 ? 4.4 : 2.8;
+  g.add(box(w, h, 4.2, level >= 3 ? 0xf3d9a4 : 0xe8c187, 0, 0.2, -1.2));
+  g.add(gableRoof(w + 0.6, 4.8, 1.5, 0xa9683f, 0, h + 0.2, -1.2));
+  // brick chimney with smoke puffs
+  g.add(box(0.7, 1.6, 0.7, 0xb35745, w / 3, h + 0.6, -1.6));
+  for (let i = 0; i < (level >= 2 ? 3 : 2); i++) {
+    const puff = new THREE.Mesh(new THREE.SphereGeometry(0.28 + i * 0.12, 7, 7), mat(0xf2f2ee));
+    puff.position.set(w / 3, h + 2.5 + i * 0.7, -1.6 - i * 0.15);
+    g.add(puff);
+  }
+  // shop window + door
+  g.add(box(1.6, 1.1, 0.12, 0xbfe3ee, -w / 5, 0.9, 0.95));
+  g.add(box(1, 1.7, 0.13, 0x6b4a2f, w / 4, 0.2, 0.95));
+  g.add(awning(w * 0.85, 1.1, 0, 2.1, 1.35));
+  if (level >= 2) {
+    // bread stand
+    g.add(box(1.8, 0.8, 0.9, 0x9a7148, -3.6, 0.2, 2.2));
+    for (let i = 0; i < 4; i++) {
+      const loaf = new THREE.Mesh(new THREE.CapsuleGeometry(0.16, 0.35, 3, 6), mat(0xd9a05f));
+      loaf.rotation.z = Math.PI / 2;
+      loaf.position.set(-4.2 + (i % 2) * 1.1, 1.15, 1.95 + Math.floor(i / 2) * 0.5);
+      g.add(loaf);
+    }
+  }
+  if (level >= 3) {
+    g.add(cyl(0.09, 0.09, 3, 0x6b7280, -3.9, 0.2, 2.9));
+    const pretzel = new THREE.Mesh(new THREE.TorusGeometry(0.5, 0.18, 7, 12), mat(0xc07f3e));
+    pretzel.position.set(-3.9, 3.5, 2.9);
+    g.add(pretzel);
+  }
+  const lbl = label(ownerName, `Bakery · Lv ${level}`, '#ffe3bd');
+  lbl.position.set(0, 7.6, 0);
+  g.add(lbl);
+  return g;
+}
+
+export function makeMiniMarket(level: number, ownerName: string): THREE.Group {
+  const g = new THREE.Group();
+  const pad = box(11, 0.22, 9, 0xc4c8cf, 0, 0, 0, false);
+  pad.receiveShadow = true;
+  g.add(pad);
+  const w = level >= 3 ? 8.5 : level === 2 ? 6.5 : 4.6;
+  const h = level >= 3 ? 3.6 : 2.7;
+  g.add(box(w, h, 4.6, level >= 3 ? 0x7fc8a9 : 0x66b894, 0, 0.2, -1.2));
+  g.add(box(w + 0.5, 0.35, 5.1, 0x3f7a63, 0, h + 0.2, -1.2)); // flat roof
+  // storefront glass + sliding door
+  const glassW = w * 0.8;
+  g.add(box(glassW, 1.5, 0.12, 0xbfe3ee, 0, 0.75, 1.12));
+  g.add(box(1.2, 1.9, 0.14, 0x37535f, 0, 0.2, 1.14));
+  // fascia sign band
+  g.add(box(w * 0.9, 0.6, 0.16, 0xf4a259, 0, h - 0.5, 1.15));
+  if (level >= 2) {
+    // sidewalk crates of goods
+    g.add(box(1, 0.7, 1, 0xc9a06a, -w / 2 + 0.2, 0.22, 2.2));
+    g.add(box(1, 0.5, 1, 0x74b658, -w / 2 + 1.4, 0.22, 2.2));
+    // shopping cart hint
+    g.add(box(0.8, 0.55, 0.55, 0x9aa5b1, w / 2 - 0.6, 0.5, 2.4));
+  }
+  if (level >= 3) {
+    // small parking strip + cart bay
+    g.add(box(3.2, 0.1, 2.2, 0x8a8f98, w / 2 + 1.4, 0.16, 1.4, false));
+    g.add(box(2.6, 0.08, 0.25, 0xe8e6da, w / 2 + 1.4, 0.28, 1.4, false));
+  }
+  const lbl = label(ownerName, `Mini Market · Lv ${level}`, '#d2f5e4');
+  lbl.position.set(0, 7.6, 0);
+  g.add(lbl);
+  return g;
+}
+
 function awning(w: number, depth: number, x: number, y: number, z: number): THREE.Group {
   const g = new THREE.Group();
   const stripes = Math.max(3, Math.round(w / 0.8));
@@ -234,7 +309,7 @@ export function makeWholesale(): THREE.Group {
   g.add(box(1, 1, 1, 0xc9a06a, 5.4, 0.2, -2.4));
   g.add(box(0.85, 0.85, 0.85, 0xb08a55, 5.5, 1.2, -2.4));
   g.add(box(1, 1, 1, 0xc9a06a, 4.2, 0.2, -3.3));
-  const lbl = label('Central Wholesale', 'Milk & Beans · NPC', '#cfe3ff');
+  const lbl = label('Central Wholesale', 'Wholesale Goods · NPC', '#cfe3ff');
   lbl.position.set(0, 8.6, 0);
   g.add(lbl);
   return g;
@@ -330,14 +405,21 @@ export function makeCar(seed: number): THREE.Group {
   return g;
 }
 
-export function makeVacantSign(kind: 'farm' | 'coffee_shop'): THREE.Group {
+const LOT_LABELS: Record<string, string> = {
+  farm: 'Farm lot',
+  coffee_shop: 'Café lot',
+  bakery: 'Bakery lot',
+  mini_market: 'Market lot',
+};
+
+export function makeVacantSign(kind: string): THREE.Group {
   const g = new THREE.Group();
   const pad = box(kind === 'farm' ? 16 : 10, 0.16, kind === 'farm' ? 12 : 8, 0xd6cdA0, 0, 0, 0, false);
   (pad.material as THREE.Material).transparent = true;
   (pad.material as any).opacity = 0.5;
   g.add(pad);
   g.add(box(0.18, 2.2, 0.18, 0x8a6f4d, 0, 0, 0));
-  const board = label('FOR SALE', kind === 'farm' ? 'Farm lot' : 'Café lot', '#ffd166');
+  const board = label('FOR SALE', LOT_LABELS[kind] ?? 'Lot', '#ffd166');
   board.position.y = 3.1;
   board.scale.set(7, 2.2, 1);
   g.add(board);

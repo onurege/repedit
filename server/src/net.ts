@@ -185,11 +185,13 @@ export class Net {
           break;
         case 'choose_business': {
           await world.chooseBusiness(pid, msg.type);
-          this.send(conn.ws, {
-            t: 'toast',
-            msg: msg.type === 'farm' ? 'Welcome to your new farm!' : 'Your coffee shop is open!',
-            kind: 'success',
-          });
+          const welcome: Record<string, string> = {
+            farm: 'Welcome to your new farm!',
+            coffee_shop: 'Your coffee shop is open!',
+            bakery: 'Your bakery is open — the ovens are warm!',
+            mini_market: 'Your mini market is open for business!',
+          };
+          this.send(conn.ws, { t: 'toast', msg: welcome[msg.type] ?? 'Business opened!', kind: 'success' });
           break;
         }
         case 'buy_npc':
@@ -224,7 +226,11 @@ export class Net {
           this.send(conn.ws, { t: 'toast', msg: 'Upgrade complete!', kind: 'success' });
           break;
         case 'set_price':
-          world.setPrice(pid, msg.price);
+          world.setPrice(pid, msg.price, msg.product);
+          this.pushOwnState(pid);
+          break;
+        case 'set_production':
+          world.setProduction(pid, msg.product);
           this.pushOwnState(pid);
           break;
         case 'dev': {

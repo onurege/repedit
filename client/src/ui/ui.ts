@@ -1,10 +1,17 @@
 // All HTML UI: auth, business choice, HUD, management/market/wholesale
 // panels, onboarding objectives, toasts, away report, reconnect overlay.
 import {
-  PRODUCTS, NPC_WHOLESALE_PRICES, FARM_LEVELS, SHOP_LEVELS, MAX_LEVEL,
-  xpForLevel, MAX_PLAYER_LEVEL,
+  PRODUCTS, NPC_WHOLESALE_PRICES, FARM_LEVELS, SHOP_LEVELS, BAKERY_LEVELS, MARKET_LEVELS,
+  MAX_LEVEL, xpForLevel, MAX_PLAYER_LEVEL,
   type BizPub, type OrderPub, type AwayReport, type ProductId,
 } from '@district/shared';
+
+const BIZ_LABEL: Record<string, { icon: string; name: string }> = {
+  farm: { icon: '🐄', name: 'Farm' },
+  coffee_shop: { icon: '☕', name: 'Coffee Shop' },
+  bakery: { icon: '🥖', name: 'Bakery' },
+  mini_market: { icon: '🛒', name: 'Mini Market' },
+};
 import { client } from '../net.js';
 import { sfx, unlockAudio } from '../audio.js';
 
@@ -122,16 +129,26 @@ export class UI {
       <div class="card" style="width:min(560px,94vw)">
         <h1>Choose your business</h1>
         <div class="tagline">You have <b>${fmt(client.you?.cash ?? 10000)}</b> to get started. Pick your path:</div>
-        <div class="choose-wrap">
-          <div class="choice" data-type="farm">
+        <div class="choose-wrap" style="flex-wrap:wrap">
+          <div class="choice" data-type="farm" style="flex-basis:44%">
             <div class="icon">🐄</div>
             <h3>Farm</h3>
-            <p>Produce fresh milk automatically. Sell it to coffee shops on the player marketplace for steady profit.</p>
+            <p>Produce Milk or Wheat automatically and supply the whole city via the marketplace.</p>
           </div>
-          <div class="choice" data-type="coffee_shop">
+          <div class="choice" data-type="coffee_shop" style="flex-basis:44%">
             <div class="icon">☕</div>
             <h3>Coffee Shop</h3>
-            <p>Buy milk &amp; beans, brew coffee, and serve a stream of townsfolk. Set your own prices.</p>
+            <p>Buy milk &amp; beans, brew coffee, serve townsfolk. Set your own prices.</p>
+          </div>
+          <div class="choice" data-type="bakery" style="flex-basis:44%">
+            <div class="icon">🥖</div>
+            <h3>Bakery</h3>
+            <p>Turn wheat into fresh bread and sell it to hungry customers.</p>
+          </div>
+          <div class="choice" data-type="mini_market" style="flex-basis:44%">
+            <div class="icon">🛒</div>
+            <h3>Mini Market</h3>
+            <p>Pure retail: buy bread &amp; milk cheap, stock the shelves, earn the margin.</p>
           </div>
         </div>
       </div>`;
@@ -357,8 +374,9 @@ export class UI {
       this.setBody(body, '<p>Choose a business to get started.</p>');
       return;
     }
+    const meta = BIZ_LABEL[biz.type] ?? BIZ_LABEL.farm;
     const isFarm = biz.type === 'farm';
-    title.textContent = isFarm ? `🐄 ${biz.ownerName}'s Farm` : `☕ ${biz.ownerName}'s Coffee Shop`;
+    title.textContent = `${meta.icon} ${biz.ownerName}'s ${meta.name}`;
     const tab = this.tabBar(tabs, isFarm
       ? ['Overview', 'Inventory', 'Production', 'Upgrade']
       : ['Overview', 'Inventory', 'Pricing', 'Upgrade']);
@@ -366,6 +384,14 @@ export class UI {
     const profit = biz.revenue - biz.expenses;
     if (tab === 'Overview') {
       const statusClass = /FULL|OUT|PAUSED/.test(biz.status) ? 'bad' : 'ok';
+      const soldLabel =
+        ({ coffee_shop: 'Coffee sold', bakery: 'Bread sold', mini_market: 'Items sold' } as Record<string, string>)[biz.type] ?? 'Units sold';
+      const hints: Record<string, string> = {
+        farm: `Sell your Milk or Wheat on the Market — shops and bakeries need it! Central Wholesale charges $${NPC_WHOLESALE_PRICES.milk}/milk and $${NPC_WHOLESALE_PRICES.wheat}/wheat, so undercut that.`,
+        coffee_shop: 'Restock milk & beans from the Market (player offers) or Central Wholesale (the blue depot).',
+        bakery: `Restock Wheat from the Market (player farms) or Central Wholesale ($${NPC_WHOLESALE_PRICES.wheat}/wheat). Each bread consumes 1 wheat.`,
+        mini_market: `Stock Bread and Milk from the Market (player bakeries & farms) or Central Wholesale. Your profit is the retail margin.`,
+      };
       this.setBody(body, `
         <div class="bigstatus ${statusClass}">${biz.status || '—'}</div>
         <div class="kv"><span class="k">Level</span><span class="v">${biz.level} / ${MAX_LEVEL}</span></div>
@@ -373,11 +399,12 @@ export class UI {
         <div class="kv"><span class="k">Expenses (lifetime)</span><span class="v neg">${fmt(biz.expenses)}</span></div>
         <div class="kv"><span class="k">Profit</span><span class="v ${profit >= 0 ? 'pos' : 'neg'}">${fmt(profit)}</span></div>
         ${isFarm
-          ? `<div class="kv"><span class="k">Milk produced</span><span class="v">${biz.milkProduced}</span></div>`
-          : `<div class="kv"><span class="k">Coffee sold</span><span class="v">${biz.coffeeSold}</span></div>
+          ? `<div class="kv"><span class="k">Units produced</span><span class="v">${biz.milkProduced}</span></div>
+             <div class="kv"><span class="k">Producing</span><span class="v">${biz.production === 'wheat' ? '🌾 Wheat' : '🥛 Milk'}</span></div>`
+          : `<div class="kv"><span class="k">${soldLabel}</span><span class="v">${biz.coffeeSold}</span></div>
              <div class="kv"><span class="k">Customers</span><span class="v">${biz.customers}</span></div>`}
         <div class="kv"><span class="k">Reputation</span><span class="v">★ ${biz.reputation.toFixed(2)}</span></div>
-        ${!isFarm ? `<div class="hint">Restock milk &amp; beans from the Market (player offers) or Central Wholesale (click the blue depot).</div>` : `<div class="hint">Sell your milk on the Market — coffee shops need it! Central Wholesale charges them $${NPC_WHOLESALE_PRICES.milk} per milk, so undercut that.</div>`}
+        <div class="hint">${hints[biz.type]}</div>
       `);
     } else if (tab === 'Inventory') {
       this.setBody(body, Object.entries(biz.inventory)
@@ -401,48 +428,94 @@ export class UI {
         `<div class="hint">Reserved goods are listed on the marketplace. Incoming goods are on a delivery van.</div>`);
     } else if (tab === 'Production' && isFarm) {
       const lv = FARM_LEVELS[biz.level];
+      const producing = biz.production === 'wheat' ? 'wheat' : 'milk';
       this.setBody(body, `
         <div class="bigstatus ${biz.status === 'PRODUCING' ? 'ok' : 'bad'}">${biz.status}</div>
-        <div class="kv"><span class="k">Production rate</span><span class="v">${(lv.milkPerSec * 60).toFixed(0)} milk / min</span></div>
-        <div class="kv"><span class="k">Storage capacity</span><span class="v">${lv.milkCapacity}</span></div>
-        <div class="kv"><span class="k">Milk produced (lifetime)</span><span class="v">${biz.milkProduced}</span></div>
-        <div class="hint">Milk is produced automatically, even while you're offline (up to 8 hours). When storage is full, production pauses — sell milk on the Market to keep the cows busy!</div>`);
-    } else if (tab === 'Pricing' && !isFarm) {
-      this.setBody(body, `
-        <div class="kv"><span class="k">Current coffee price</span><span class="v">${fmt(biz.price)}</span></div>
+        <div class="kv"><span class="k">Producing</span><span class="v">${producing === 'wheat' ? '🌾 Wheat' : '🥛 Milk'}</span></div>
         <div class="qtyrow">
-          <input id="price-input" type="number" min="5" max="100" value="${biz.price}" />
-          <button class="btn small primary" id="price-set">Set price</button>
+          <button class="btn small ${producing === 'milk' ? 'primary' : 'ghost'}" data-prod="milk">🥛 Milk</button>
+          <button class="btn small ${producing === 'wheat' ? 'primary' : 'ghost'}" data-prod="wheat">🌾 Wheat</button>
         </div>
-        <div class="hint">Base price is $30. Cheaper coffee attracts more customers and builds reputation; pricing above ~$36 slows traffic and hurts your stars. Each coffee consumes 1 milk + 1 beans.</div>`, (b) => {
-        b.querySelector('#price-set')!.addEventListener('click', () => {
-          const v = parseInt((b.querySelector('#price-input') as HTMLInputElement).value, 10);
-          client.send({ t: 'set_price', price: v });
-          sfx.click();
-        });
+        <div class="kv"><span class="k">Production rate</span><span class="v">${(lv.milkPerSec * 60).toFixed(0)} / min</span></div>
+        <div class="kv"><span class="k">Storage capacity (per product)</span><span class="v">${lv.milkCapacity}</span></div>
+        <div class="kv"><span class="k">Units produced (lifetime)</span><span class="v">${biz.milkProduced}</span></div>
+        <div class="hint">Production runs automatically, even offline (up to 8 h). Milk supplies coffee shops & mini markets; wheat supplies bakeries. Switching keeps existing stock.</div>`, (b) => {
+        b.querySelectorAll('[data-prod]').forEach((btn) =>
+          btn.addEventListener('click', () => {
+            client.send({ t: 'set_production', product: (btn as HTMLElement).dataset.prod as ProductId });
+            sfx.click();
+          })
+        );
       });
+    } else if (tab === 'Pricing' && !isFarm) {
+      if (biz.type === 'mini_market') {
+        this.setBody(body, `
+          <div class="kv"><span class="k">🍞 Bread retail price</span><span class="v">${fmt(biz.price)}</span></div>
+          <div class="qtyrow">
+            <input id="price-input" type="number" min="5" max="100" value="${biz.price}" />
+            <button class="btn small primary" id="price-set">Set bread price</button>
+          </div>
+          <div class="kv"><span class="k">🥛 Milk retail price</span><span class="v">${fmt(biz.price2)}</span></div>
+          <div class="qtyrow">
+            <input id="price2-input" type="number" min="5" max="100" value="${biz.price2}" />
+            <button class="btn small primary" id="price2-set">Set milk price</button>
+          </div>
+          <div class="hint">Reference prices: bread $20, milk $18. Cheaper attracts more customers and builds reputation; ~20% above reference repels them. Buy stock below your retail price to earn the margin.</div>`, (b) => {
+          b.querySelector('#price-set')!.addEventListener('click', () => {
+            client.send({ t: 'set_price', price: parseInt((b.querySelector('#price-input') as HTMLInputElement).value, 10) });
+            sfx.click();
+          });
+          b.querySelector('#price2-set')!.addEventListener('click', () => {
+            client.send({ t: 'set_price', price: parseInt((b.querySelector('#price2-input') as HTMLInputElement).value, 10), product: 'milk' });
+            sfx.click();
+          });
+        });
+      } else {
+        const isBakery = biz.type === 'bakery';
+        this.setBody(body, `
+          <div class="kv"><span class="k">Current ${isBakery ? 'bread' : 'coffee'} price</span><span class="v">${fmt(biz.price)}</span></div>
+          <div class="qtyrow">
+            <input id="price-input" type="number" min="5" max="100" value="${biz.price}" />
+            <button class="btn small primary" id="price-set">Set price</button>
+          </div>
+          <div class="hint">${isBakery
+            ? 'Base price is $20. Each bread consumes 1 wheat. Cheaper bread attracts more customers; pricing above ~$24 slows traffic and hurts your stars.'
+            : 'Base price is $30. Cheaper coffee attracts more customers and builds reputation; pricing above ~$36 slows traffic and hurts your stars. Each coffee consumes 1 milk + 1 beans.'}</div>`, (b) => {
+          b.querySelector('#price-set')!.addEventListener('click', () => {
+            const v = parseInt((b.querySelector('#price-input') as HTMLInputElement).value, 10);
+            client.send({ t: 'set_price', price: v });
+            sfx.click();
+          });
+        });
+      }
     } else if (tab === 'Upgrade') {
-      const cost = isFarm ? FARM_LEVELS[biz.level].upgradeCost : SHOP_LEVELS[biz.level].upgradeCost;
+      const levels: Record<string, any> = {
+        farm: FARM_LEVELS, coffee_shop: SHOP_LEVELS, bakery: BAKERY_LEVELS, mini_market: MARKET_LEVELS,
+      };
+      const lvs = levels[biz.type];
+      const cost = lvs[biz.level].upgradeCost;
       const next = biz.level + 1;
       let improvements = '';
       if (cost != null) {
+        const a = lvs[biz.level];
+        const bb = lvs[next];
         if (isFarm) {
-          const a = FARM_LEVELS[biz.level];
-          const b = FARM_LEVELS[next];
           improvements = `
-            <div class="kv"><span class="k">Milk / min</span><span class="v">${(a.milkPerSec * 60).toFixed(0)} → <b class="pos">${(b.milkPerSec * 60).toFixed(0)}</b></span></div>
-            <div class="kv"><span class="k">Storage</span><span class="v">${a.milkCapacity} → <b class="pos">${b.milkCapacity}</b></span></div>`;
+            <div class="kv"><span class="k">Units / min</span><span class="v">${(a.milkPerSec * 60).toFixed(0)} → <b class="pos">${(bb.milkPerSec * 60).toFixed(0)}</b></span></div>
+            <div class="kv"><span class="k">Storage</span><span class="v">${a.milkCapacity} → <b class="pos">${bb.milkCapacity}</b></span></div>`;
+        } else if (biz.type === 'mini_market') {
+          improvements = `
+            <div class="kv"><span class="k">Customers / min (per product)</span><span class="v">~${(a.customersPerSec * 60).toFixed(0)} → <b class="pos">~${(bb.customersPerSec * 60).toFixed(0)}</b></span></div>
+            <div class="kv"><span class="k">Shelf capacity (per product)</span><span class="v">${a.stockCapacity} → <b class="pos">${bb.stockCapacity}</b></span></div>`;
         } else {
-          const a = SHOP_LEVELS[biz.level];
-          const b = SHOP_LEVELS[next];
           improvements = `
-            <div class="kv"><span class="k">Customers / min</span><span class="v">~${(a.customersPerSec * 60).toFixed(0)} → <b class="pos">~${(b.customersPerSec * 60).toFixed(0)}</b></span></div>
-            <div class="kv"><span class="k">Brew speed</span><span class="v">${(a.brewPerSec * 60).toFixed(0)} → <b class="pos">${(b.brewPerSec * 60).toFixed(0)}</b> / min</span></div>
-            <div class="kv"><span class="k">Ingredient storage</span><span class="v">${a.ingredientCapacity} → <b class="pos">${b.ingredientCapacity}</b></span></div>`;
+            <div class="kv"><span class="k">Customers / min</span><span class="v">~${(a.customersPerSec * 60).toFixed(0)} → <b class="pos">~${(bb.customersPerSec * 60).toFixed(0)}</b></span></div>
+            <div class="kv"><span class="k">${biz.type === 'bakery' ? 'Bake speed' : 'Brew speed'}</span><span class="v">${(a.brewPerSec * 60).toFixed(0)} → <b class="pos">${(bb.brewPerSec * 60).toFixed(0)}</b> / min</span></div>
+            <div class="kv"><span class="k">Ingredient storage</span><span class="v">${a.ingredientCapacity} → <b class="pos">${bb.ingredientCapacity}</b></span></div>`;
         }
       }
       const html = cost == null
-        ? `<div class="bigstatus ok">MAX LEVEL REACHED 🏆</div><p class="hint">Your ${isFarm ? 'farm' : 'coffee shop'} is fully upgraded.</p>`
+        ? `<div class="bigstatus ok">MAX LEVEL REACHED 🏆</div><p class="hint">Your ${meta.name.toLowerCase()} is fully upgraded.</p>`
         : `
         <div class="kv"><span class="k">Current level</span><span class="v">${biz.level}</span></div>
         ${improvements}
@@ -472,7 +545,7 @@ export class UI {
           <h4>Create order</h4>
           <div class="mkt-row">
             <select id="mo-side"><option value="sell">SELL</option><option value="buy">BUY</option></select>
-            <select id="mo-product"><option value="milk">Milk</option><option value="beans">Coffee Beans</option></select>
+            <select id="mo-product"><option value="milk">Milk</option><option value="wheat">Wheat</option><option value="bread">Bread</option><option value="beans">Coffee Beans</option></select>
             <input id="mo-qty" type="number" min="1" value="100" style="width:76px" title="Quantity" />
             <span>@</span>
             <input id="mo-price" type="number" min="1" value="12" style="width:64px" title="Unit price ($)" />
@@ -548,7 +621,7 @@ export class UI {
   private renderWholesalePanel(title: HTMLElement, tabs: HTMLElement, body: HTMLElement): void {
     title.textContent = '🏭 Central Wholesale';
     tabs.innerHTML = '';
-    const rows = (['beans', 'milk'] as ProductId[])
+    const rows = (['beans', 'milk', 'wheat', 'bread'] as ProductId[])
       .map((pid) => {
         const price = NPC_WHOLESALE_PRICES[pid]!;
         return `<div class="invrow">
@@ -634,23 +707,43 @@ export class UI {
     const tradedWithMe = client.trades.some(
       (t) => t.buyerName === client.you?.name || t.sellerName === client.you?.name
     );
-    const objs: [string, boolean][] = isFarm
-      ? [
-          ['Open your Farm', !!this.flags.opened_business],
-          ['Produce Milk', biz.milkProduced > 0],
-          ['Open the Marketplace', !!this.flags.opened_market],
-          ['Create a Sell Order', !!this.flags.created_order],
-          ['Complete a player trade', tradedWithMe || biz.revenue > 0],
-          ['Upgrade your Farm', biz.level >= 2],
-        ]
-      : [
-          ['Open your Coffee Shop', !!this.flags.opened_business],
-          ['Buy Coffee Beans', (biz.inventory.beans?.qty ?? 0) + (biz.inventory.beans?.incoming ?? 0) > 0 || biz.expenses > 0],
-          ['Buy Milk', (biz.inventory.milk?.qty ?? 0) + (biz.inventory.milk?.incoming ?? 0) > 0],
-          ['Make your first sale', biz.coffeeSold > 0],
-          ['Open the Marketplace', !!this.flags.opened_market],
-          ['Upgrade your Coffee Shop', biz.level >= 2],
-        ];
+    const has = (pid: ProductId) =>
+      (biz.inventory[pid]?.qty ?? 0) + (biz.inventory[pid]?.incoming ?? 0) > 0;
+    const objsByType: Record<string, [string, boolean][]> = {
+      farm: [
+        ['Open your Farm', !!this.flags.opened_business],
+        ['Produce Milk or Wheat', biz.milkProduced > 0],
+        ['Open the Marketplace', !!this.flags.opened_market],
+        ['Create a Sell Order', !!this.flags.created_order],
+        ['Complete a player trade', tradedWithMe || biz.revenue > 0],
+        ['Upgrade your Farm', biz.level >= 2],
+      ],
+      coffee_shop: [
+        ['Open your Coffee Shop', !!this.flags.opened_business],
+        ['Buy Coffee Beans', has('beans') || biz.expenses > 0],
+        ['Buy Milk', has('milk')],
+        ['Make your first sale', biz.coffeeSold > 0],
+        ['Open the Marketplace', !!this.flags.opened_market],
+        ['Upgrade your Coffee Shop', biz.level >= 2],
+      ],
+      bakery: [
+        ['Open your Bakery', !!this.flags.opened_business],
+        ['Acquire Wheat', has('wheat') || biz.expenses > 0],
+        ['Sell your first Bread', biz.coffeeSold > 0],
+        ['Open the Marketplace', !!this.flags.opened_market],
+        ['Buy Wheat from another player', tradedWithMe],
+        ['Upgrade your Bakery', biz.level >= 2],
+      ],
+      mini_market: [
+        ['Open your Mini Market', !!this.flags.opened_business],
+        ['Stock Bread or Milk', has('bread') || has('milk')],
+        ['Make your first retail sale', biz.coffeeSold > 0],
+        ['Open the Marketplace', !!this.flags.opened_market],
+        ['Buy stock from another player', tradedWithMe],
+        ['Upgrade your Mini Market', biz.level >= 2],
+      ],
+    };
+    const objs = objsByType[biz.type] ?? objsByType.farm;
     const allDone = objs.every(([, d]) => d);
     if (allDone) {
       el.style.display = 'none';
@@ -697,14 +790,14 @@ export class UI {
     overlay.innerHTML = `
       <div class="card">
         <h1>While you were away</h1>
-        <div class="tagline">Your ${biz?.type === 'farm' ? 'farm kept working' : 'shop kept serving'} for ${dur}.</div>
+        <div class="tagline">Your ${biz?.type === 'farm' ? 'farm kept working' : 'business kept serving'} for ${dur}.</div>
         <div class="away-grid">
           <div class="away-cell"><div class="k">Revenue</div><div class="v" style="color:#16a34a">${fmt(r.revenue)}</div></div>
           <div class="away-cell"><div class="k">Expenses</div><div class="v" style="color:#dc2626">${fmt(r.expenses)}</div></div>
           <div class="away-cell"><div class="k">Profit</div><div class="v">${fmt(r.profit)}</div></div>
           ${biz?.type === 'farm'
-            ? `<div class="away-cell"><div class="k">Milk produced</div><div class="v">🥛 ${r.milkProduced}</div></div>`
-            : `<div class="away-cell"><div class="k">Coffee sold</div><div class="v">☕ ${r.coffeeSold}</div></div>`}
+            ? `<div class="away-cell"><div class="k">Units produced</div><div class="v">${biz.production === 'wheat' ? '🌾' : '🥛'} ${r.milkProduced}</div></div>`
+            : `<div class="away-cell"><div class="k">Items sold</div><div class="v">${biz?.type === 'bakery' ? '🍞' : biz?.type === 'mini_market' ? '🛒' : '☕'} ${r.coffeeSold}</div></div>`}
         </div>
         <button class="btn primary" id="away-ok">Back to business</button>
       </div>`;
