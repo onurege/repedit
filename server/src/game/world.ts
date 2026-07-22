@@ -39,6 +39,16 @@ import {
   REP_LOST_CUSTOMER,
   REP_TRADE_FULFILLED,
   REP_CONTRACT_FULFILLED,
+  BUSINESS_CAPACITY,
+  companyCapacity,
+  companyLevelForXp,
+  COMPANY_LEVELS,
+  MAX_COMPANY_LEVEL,
+  COMPANY_XP,
+  businessOpenCost,
+  COMPANY_NAME_MIN,
+  COMPANY_NAME_MAX,
+  defaultCompanyName,
   SELLER_SUPPLIES,
   BUYER_CONSUMES,
   contractableProducts,
@@ -71,6 +81,7 @@ import {
   type ContractResult,
   type MsgParams,
   type ContractPub,
+  type CompanyPriv,
 } from '@district/shared';
 import { query, tx } from '../db.js';
 
@@ -108,9 +119,21 @@ interface InvRec {
   reserved: number;
 }
 
+export interface CompanyRec {
+  id: number;
+  ownerId: number;
+  name: string;
+  level: number;
+  xp: number;
+  revenueAccum: number; // fractional revenue toward the next company XP point
+  createdAtMs: number;
+  dirty: boolean;
+}
+
 export interface BizRec {
   id: number;
   ownerId: number;
+  companyId: number;
   type: BusinessType;
   lotId: string;
   level: number;
@@ -153,6 +176,7 @@ export interface ContractRec {
 export interface OrderRec {
   id: number;
   playerId: number;
+  businessId: number;
   side: 'buy' | 'sell';
   product: ProductId;
   qty: number;
@@ -237,6 +261,7 @@ function capacityFor(biz: BizRec, product: ProductId): number {
 
 export class World extends EventEmitter {
   players = new Map<number, PlayerRec>();
+  companies = new Map<number, CompanyRec>(); // keyed by ownerId (1 company/player)
   businesses = new Map<number, BizRec>();
   orders = new Map<number, OrderRec>();
   deliveries = new Map<number, DeliveryRec>();
@@ -247,10 +272,36 @@ export class World extends EventEmitter {
   private tickInProgress = false;
   private fulfillLocks = new Set<number>();
   private contractLocks = new Set<number>();
+  private openLocks = new Set<number>(); // per-player lock for business opening
   // CUSTOMER_SALE ledger entries accumulate here (simulate() is synchronous)
   // and are persisted in batch by flush().
   private ledgerQueue: LedgerEntry[] = [];
 
+  /** All businesses owned by a player (may be several since V2.1). */
+  bizesByOwner(playerId: number): BizRec[] {
+    const list: BizRec[] = [];
+    for (const b of this.businesses.values()) if (b.ownerId === playerId) list.push(b);
+    return list;
+  }
+
+  /** Aggregate lifetime counters across all of a player's businesses. */
+  private bizTotals(playerId: number): {
+    revenue: number;
+    expenses: number;
+    milkProduced: number;
+    coffeeSold: number;
+  } {
+    const t = { revenue: 0, expenses: 0, milkProduced: 0, coffeeSold: 0 };
+    for (const b of this.bizesByOwner(playerId)) {
+      t.revenue += b.revenue;
+      t.expenses += b.expenses;
+      t.milkProduced += b.milkProduced;
+      t.coffeeSold += b.coffeeSold;
+    }
+    return t;
+  }
+
+  /** Legacy single-business accessor: the player's first business, if any. */
   bizByOwner(playerId: number): BizRec | undefined {
     for (const b of this.businesses.values()) if (b.ownerId === playerId) return b;
     return undefined;
@@ -266,6 +317,56 @@ export class World extends EventEmitter {
     const b = this.bizByOwner(playerId);
     if (!b) throw new GameError('err.need_business');
     return b;
+  }
+
+  /**
+   * Resolve which of a player's businesses an action targets. With an explicit
+   * `bizId` it must be owned by the player; otherwise, if the player owns
+   * exactly one business, that one is used (keeps single-business play simple).
+   */
+  private requireOwnedBiz(playerId: number, bizId?: number): BizRec {
+    if (bizId != null) {
+      const b = this.businesses.get(bizId);
+      if (!b || b.ownerId !== playerId) throw new GameError('err.not_your_business');
+      return b;
+    }
+    const list = this.bizesByOwner(playerId);
+    if (list.length === 0) throw new GameError('err.need_business');
+    if (list.length > 1) throw new GameError('err.select_business');
+    return list[0];
+  }
+
+  companyByOwner(playerId: number): CompanyRec | undefined {
+    return this.companies.get(playerId);
+  }
+
+  private capacityUsed(playerId: number): number {
+    let used = 0;
+    for (const b of this.bizesByOwner(playerId)) used += BUSINESS_CAPACITY[b.type];
+    return used;
+  }
+
+  private addCompanyXp(company: CompanyRec, amount: number): void {
+    if (amount <= 0) return;
+    company.xp += Math.round(amount);
+    const newLevel = companyLevelForXp(company.xp);
+    if (newLevel > company.level) {
+      company.level = newLevel;
+      this.emit('company_levelup', { ownerId: company.ownerId, level: newLevel });
+    }
+    company.dirty = true;
+  }
+
+  /** Company XP earned from business revenue (steady, non-exploitable). */
+  private addCompanyRevenueXp(playerId: number, revenue: number): void {
+    const company = this.companies.get(playerId);
+    if (!company || revenue <= 0) return;
+    company.revenueAccum += revenue;
+    const xp = Math.floor(company.revenueAccum / COMPANY_XP.revenuePerXp);
+    if (xp > 0) {
+      company.revenueAccum -= xp * COMPANY_XP.revenuePerXp;
+      this.addCompanyXp(company, xp);
+    }
   }
 
   // ---------------- loading & persistence ----------------
@@ -286,6 +387,19 @@ export class World extends EventEmitter {
         dirty: false,
       });
     }
+    const companyRows = await query('SELECT * FROM companies');
+    for (const r of companyRows.rows) {
+      this.companies.set(r.player_id, {
+        id: r.id,
+        ownerId: r.player_id,
+        name: r.name,
+        level: r.level,
+        xp: r.xp,
+        revenueAccum: 0,
+        createdAtMs: new Date(r.created_at).getTime(),
+        dirty: false,
+      });
+    }
     const bizRows = await query('SELECT * FROM businesses');
     const invRows = await query('SELECT * FROM inventories');
     for (const r of bizRows.rows) {
@@ -293,6 +407,7 @@ export class World extends EventEmitter {
       const biz: BizRec = {
         id: r.id,
         ownerId: r.player_id,
+        companyId: r.company_id ?? this.companies.get(r.player_id)?.id ?? 0,
         type: r.type,
         lotId: r.lot_id,
         level: r.level,
@@ -327,6 +442,7 @@ export class World extends EventEmitter {
       this.orders.set(r.id, {
         id: r.id,
         playerId: r.player_id,
+        businessId: r.business_id ?? this.bizByOwner(r.player_id)?.id ?? 0,
         side: r.side,
         product: r.product,
         qty: r.qty,
@@ -419,11 +535,12 @@ export class World extends EventEmitter {
   async flush(): Promise<void> {
     const dirtyPlayers = [...this.players.values()].filter((p) => p.dirty);
     const dirtyBiz = [...this.businesses.values()].filter((b) => b.dirty);
+    const dirtyCompanies = [...this.companies.values()].filter((c) => c.dirty);
     const ledger = this.ledgerQueue;
-    if (!dirtyPlayers.length && !dirtyBiz.length && !ledger.length) return;
+    if (!dirtyPlayers.length && !dirtyBiz.length && !dirtyCompanies.length && !ledger.length) return;
     this.ledgerQueue = [];
     try {
-      await this.flushTx(dirtyPlayers, dirtyBiz, ledger);
+      await this.flushTx(dirtyPlayers, dirtyBiz, dirtyCompanies, ledger);
     } catch (err) {
       // don't lose audit rows on a transient failure
       this.ledgerQueue.unshift(...ledger);
@@ -431,9 +548,13 @@ export class World extends EventEmitter {
     }
   }
 
-  private async flushTx(dirtyPlayers: PlayerRec[], dirtyBiz: BizRec[], ledger: LedgerEntry[]): Promise<void> {
+  private async flushTx(dirtyPlayers: PlayerRec[], dirtyBiz: BizRec[], dirtyCompanies: CompanyRec[], ledger: LedgerEntry[]): Promise<void> {
     await tx(async (c) => {
       for (const e of ledger) await c.query(LEDGER_SQL, ledgerParams(e));
+      for (const co of dirtyCompanies) {
+        await c.query('UPDATE companies SET name=$1, level=$2, xp=$3 WHERE id=$4', [co.name, co.level, co.xp, co.id]);
+        co.dirty = false;
+      }
       for (const p of dirtyPlayers) {
         await c.query(
           `UPDATE players SET cash=$1, xp=$2, level=$3, last_seen=to_timestamp($4/1000.0), away_snapshot=$5 WHERE id=$6`,
@@ -723,18 +844,18 @@ export class World extends EventEmitter {
     p.connections++;
     const now = Date.now();
     let report: AwayReport | null = null;
-    const biz = this.bizByOwner(playerId);
-    if (p.awaySnapshot && biz && p.connections === 1) {
+    const totals = this.bizTotals(playerId);
+    if (p.awaySnapshot && this.bizesByOwner(playerId).length > 0 && p.connections === 1) {
       const seconds = Math.floor((now - p.awaySnapshot.ts) / 1000);
       if (seconds > 60) {
         report = {
           seconds,
-          revenue: biz.revenue - p.awaySnapshot.revenue,
-          expenses: biz.expenses - p.awaySnapshot.expenses,
+          revenue: totals.revenue - p.awaySnapshot.revenue,
+          expenses: totals.expenses - p.awaySnapshot.expenses,
           profit:
-            biz.revenue - p.awaySnapshot.revenue - (biz.expenses - p.awaySnapshot.expenses),
-          milkProduced: biz.milkProduced - p.awaySnapshot.milkProduced,
-          coffeeSold: biz.coffeeSold - p.awaySnapshot.coffeeSold,
+            totals.revenue - p.awaySnapshot.revenue - (totals.expenses - p.awaySnapshot.expenses),
+          milkProduced: totals.milkProduced - p.awaySnapshot.milkProduced,
+          coffeeSold: totals.coffeeSold - p.awaySnapshot.coffeeSold,
         };
       }
     }
@@ -750,13 +871,13 @@ export class World extends EventEmitter {
     if (!p) return;
     p.connections = Math.max(0, p.connections - 1);
     if (p.connections === 0) {
-      const biz = this.bizByOwner(playerId);
+      const totals = this.bizTotals(playerId);
       p.awaySnapshot = {
         ts: Date.now(),
-        revenue: biz?.revenue ?? 0,
-        expenses: biz?.expenses ?? 0,
-        milkProduced: biz?.milkProduced ?? 0,
-        coffeeSold: biz?.coffeeSold ?? 0,
+        revenue: totals.revenue,
+        expenses: totals.expenses,
+        milkProduced: totals.milkProduced,
+        coffeeSold: totals.coffeeSold,
       };
       p.lastSeenMs = Date.now();
       p.dirty = true;
@@ -766,37 +887,60 @@ export class World extends EventEmitter {
 
   // ---------------- actions ----------------
 
-  async chooseBusiness(playerId: number, type: BusinessType): Promise<BizRec> {
+  /** Create (or return) the player's single company. */
+  private async ensureCompany(playerId: number): Promise<CompanyRec> {
+    let company = this.companies.get(playerId);
+    if (company) return company;
     const p = this.player(playerId);
-    if (this.bizByOwner(playerId)) throw new GameError('err.already_own_business');
-    if (!STARTING_PRODUCTS[type]) throw new GameError('err.unknown_business_type');
-    const taken = new Set([...this.businesses.values()].map((b) => b.lotId));
-    const lot = lotsOfKind(type).find((l) => !taken.has(l.id));
-    if (!lot) throw new GameError('err.no_free_lots');
-
-    const row = await tx(async (c) => {
-      const defaultPrice = type === 'coffee_shop' ? DEFAULT_COFFEE_PRICE : DEFAULT_BREAD_PRICE;
-      const ins = await c.query(
-        `INSERT INTO businesses (player_id, type, lot_id, price, reputation, price2, production)
-         VALUES ($1,$2,$3,$4,$5,$6,'milk') RETURNING id`,
-        [playerId, type, lot.id, defaultPrice, REP_START, DEFAULT_RETAIL_MILK_PRICE]
-      );
-      const bizId = ins.rows[0].id;
-      const products: ProductId[] = STARTING_PRODUCTS[type];
-      for (const product of products) {
-        await c.query(
-          'INSERT INTO inventories (business_id, product, qty, reserved) VALUES ($1,$2,0,0)',
-          [bizId, product]
-        );
-      }
-      return { id: bizId };
-    });
-
-    const biz: BizRec = {
-      id: row.id,
+    const res = await query(
+      `INSERT INTO companies (player_id, name) VALUES ($1,$2)
+       ON CONFLICT (player_id) DO UPDATE SET name = companies.name
+       RETURNING id, name, level, xp, created_at`,
+      [playerId, defaultCompanyName(p.name)]
+    );
+    const r = res.rows[0];
+    company = {
+      id: r.id,
       ownerId: playerId,
+      name: r.name,
+      level: r.level,
+      xp: r.xp,
+      revenueAccum: 0,
+      createdAtMs: new Date(r.created_at).getTime(),
+      dirty: false,
+    };
+    this.companies.set(playerId, company);
+    return company;
+  }
+
+  /** Persist a new business row + empty inventories inside `c`. */
+  private async insertBusinessRow(
+    c: import('pg').PoolClient,
+    playerId: number,
+    companyId: number,
+    type: BusinessType,
+    lotId: string
+  ): Promise<number> {
+    const defaultPrice = type === 'coffee_shop' ? DEFAULT_COFFEE_PRICE : DEFAULT_BREAD_PRICE;
+    const ins = await c.query(
+      `INSERT INTO businesses (player_id, company_id, type, lot_id, price, reputation, price2, production)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,'milk') RETURNING id`,
+      [playerId, companyId, type, lotId, defaultPrice, REP_START, DEFAULT_RETAIL_MILK_PRICE]
+    );
+    const bizId = ins.rows[0].id;
+    for (const product of STARTING_PRODUCTS[type]) {
+      await c.query('INSERT INTO inventories (business_id, product, qty, reserved) VALUES ($1,$2,0,0)', [bizId, product]);
+    }
+    return bizId;
+  }
+
+  private buildBizRec(id: number, playerId: number, companyId: number, type: BusinessType, lotId: string): BizRec {
+    const biz: BizRec = {
+      id,
+      ownerId: playerId,
+      companyId,
       type,
-      lotId: lot.id,
+      lotId,
       level: 1,
       price: type === 'coffee_shop' ? DEFAULT_COFFEE_PRICE : DEFAULT_BREAD_PRICE,
       price2: DEFAULT_RETAIL_MILK_PRICE,
@@ -815,16 +959,103 @@ export class World extends EventEmitter {
       tradeCount: 0,
       dirty: false,
     };
-    const products: ProductId[] = STARTING_PRODUCTS[type];
-    for (const product of products) biz.inv.set(product, { qty: 0, reserved: 0 });
-    this.businesses.set(biz.id, biz);
-    this.emit('biz_created', biz);
+    for (const product of STARTING_PRODUCTS[type]) biz.inv.set(product, { qty: 0, reserved: 0 });
     return biz;
   }
 
-  async buyNpc(playerId: number, product: ProductId, qty: number): Promise<void> {
+  async chooseBusiness(playerId: number, type: BusinessType): Promise<BizRec> {
+    this.player(playerId);
+    if (this.bizByOwner(playerId)) throw new GameError('err.already_own_business');
+    if (!STARTING_PRODUCTS[type]) throw new GameError('err.unknown_business_type');
+    const taken = new Set([...this.businesses.values()].map((b) => b.lotId));
+    const lot = lotsOfKind(type).find((l) => !taken.has(l.id));
+    if (!lot) throw new GameError('err.no_free_lots');
+
+    const company = await this.ensureCompany(playerId);
+    const bizId = await tx((c) => this.insertBusinessRow(c, playerId, company.id, type, lot.id));
+    const biz = this.buildBizRec(bizId, playerId, company.id, type, lot.id);
+    this.businesses.set(biz.id, biz);
+    this.emit('biz_created', biz);
+    this.emit('company', company);
+    return biz;
+  }
+
+  /**
+   * Open an ADDITIONAL business on a vacant lot. Atomic and idempotent under
+   * double-click: a per-player lock plus a lot-taken re-check guarantee cash is
+   * charged once, one business is created, one lot occupied, capacity updated
+   * once, and a single BUSINESS_OPENING ledger entry.
+   */
+  async openBusiness(playerId: number, lotId: string, type: BusinessType): Promise<BizRec> {
+    if (this.openLocks.has(playerId)) throw new GameError('err.busy_try_again');
     const p = this.player(playerId);
-    const biz = this.requireBiz(playerId);
+    if (!STARTING_PRODUCTS[type]) throw new GameError('err.unknown_business_type');
+    const lot = lotById(lotId);
+    if (!lot || (lot.kind !== 'farm' && lot.kind !== 'coffee_shop' && lot.kind !== 'bakery' && lot.kind !== 'mini_market')) {
+      throw new GameError('err.bad_lot');
+    }
+    if (lot.kind !== type) throw new GameError('err.lot_type_mismatch');
+    if ([...this.businesses.values()].some((b) => b.lotId === lotId)) throw new GameError('err.lot_taken');
+
+    const company = await this.ensureCompany(playerId);
+    // Capacity check.
+    const cap = companyCapacity(company.level);
+    const used = this.capacityUsed(playerId);
+    const need = BUSINESS_CAPACITY[type];
+    if (used + need > cap) throw new GameError('err.not_enough_capacity', { need, free: cap - used });
+    // Cost check (escalating with how many businesses already owned).
+    const count = this.bizesByOwner(playerId).length;
+    const cost = businessOpenCost(count);
+    if (p.cash < cost) throw new GameError('err.requires_cash', { cost });
+
+    this.openLocks.add(playerId);
+    p.cash -= cost;
+    p.dirty = true;
+    try {
+      const bizId = await tx(async (c) => {
+        // Re-check lot inside the transaction to defeat concurrent opens.
+        const taken = await c.query('SELECT 1 FROM businesses WHERE lot_id=$1', [lotId]);
+        if (taken.rowCount) throw new GameError('err.lot_taken');
+        const id = await this.insertBusinessRow(c, playerId, company.id, type, lotId);
+        await c.query('UPDATE players SET cash=$1 WHERE id=$2', [p.cash, p.id]);
+        await c.query(LEDGER_SQL, ledgerParams({
+          playerId, businessId: id, type: 'BUSINESS_OPENING', amount: -cost,
+          refType: 'business', refId: id, before: p.cash + cost, after: p.cash,
+        }));
+        return id;
+      });
+      const biz = this.buildBizRec(bizId, playerId, company.id, type, lotId);
+      this.businesses.set(biz.id, biz);
+      console.log(`[econ] BUSINESS_OPENING player=${playerId} biz=${bizId} type=${type} lot=${lotId} cost=$${cost}`);
+      this.emit('biz_created', biz);
+      this.emit('company', company);
+      return biz;
+    } catch (err) {
+      p.cash += cost; // revert on failure
+      throw err;
+    } finally {
+      this.openLocks.delete(playerId);
+    }
+  }
+
+  async renameCompany(playerId: number, name: string): Promise<CompanyRec> {
+    const company = await this.ensureCompany(playerId);
+    name = (name ?? '').replace(/\s+/g, ' ').trim().replace(/[<>]/g, '');
+    if (name.length < COMPANY_NAME_MIN || name.length > COMPANY_NAME_MAX) {
+      throw new GameError('err.company_name_len', { min: COMPANY_NAME_MIN, max: COMPANY_NAME_MAX });
+    }
+    company.name = name;
+    company.dirty = true;
+    await query('UPDATE companies SET name=$1 WHERE id=$2', [name, company.id]);
+    this.emit('company', company);
+    // Company name shows on every owned business's public card.
+    for (const b of this.bizesByOwner(playerId)) this.emit('biz_pub', b);
+    return company;
+  }
+
+  async buyNpc(playerId: number, product: ProductId, qty: number, bizId?: number): Promise<void> {
+    const p = this.player(playerId);
+    const biz = this.requireOwnedBiz(playerId, bizId);
     qty = Math.floor(qty);
     if (!Number.isFinite(qty) || qty < 1 || qty > MARKET_MAX_QTY) throw new GameError('err.invalid_qty');
     const unit = NPC_WHOLESALE_PRICES[product];
@@ -945,10 +1176,11 @@ export class World extends EventEmitter {
     side: 'buy' | 'sell',
     product: ProductId,
     qty: number,
-    price: number
+    price: number,
+    bizId?: number
   ): Promise<OrderRec> {
     const p = this.player(playerId);
-    const biz = this.requireBiz(playerId);
+    const biz = this.requireOwnedBiz(playerId, bizId);
     qty = Math.floor(qty);
     price = Math.floor(price);
     if (!TRADABLE.includes(product)) throw new GameError('err.not_tradable');
@@ -974,9 +1206,9 @@ export class World extends EventEmitter {
     try {
       const res = await tx(async (c) => {
         const ins = await c.query(
-          `INSERT INTO market_orders (player_id, side, product, qty, remaining, price)
-           VALUES ($1,$2,$3,$4,$4,$5) RETURNING id, created_at`,
-          [playerId, side, product, qty, price]
+          `INSERT INTO market_orders (player_id, business_id, side, product, qty, remaining, price)
+           VALUES ($1,$2,$3,$4,$5,$5,$6) RETURNING id, created_at`,
+          [playerId, biz.id, side, product, qty, price]
         );
         await c.query('UPDATE players SET cash=$1 WHERE id=$2', [p.cash, p.id]);
         const rec = inv(biz, product);
@@ -997,6 +1229,7 @@ export class World extends EventEmitter {
       const order: OrderRec = {
         id: res.id,
         playerId,
+        businessId: biz.id,
         side,
         product,
         qty,
@@ -1026,7 +1259,8 @@ export class World extends EventEmitter {
     const order = this.orders.get(orderId);
     if (!order || order.status !== 'open') throw new GameError('err.order_not_open');
     if (order.playerId !== playerId) throw new GameError('err.not_your_order');
-    const biz = this.requireBiz(playerId);
+    // Return escrowed goods to the exact business that placed the order.
+    const biz = this.businesses.get(order.businessId) ?? this.requireBiz(playerId);
 
     order.status = 'cancelled';
     if (order.side === 'sell') {
@@ -1067,17 +1301,18 @@ export class World extends EventEmitter {
    * Exactly-once: in-memory checks and mutations are synchronous, and a
    * per-order lock guards the async persistence window.
    */
-  async fulfillOrder(playerId: number, orderId: number, qty: number): Promise<TradeRow> {
+  async fulfillOrder(playerId: number, orderId: number, qty: number, bizId?: number): Promise<TradeRow> {
     if (this.fulfillLocks.has(orderId)) throw new GameError('err.order_processing');
     const fulfiller = this.player(playerId);
-    const fulfillerBiz = this.requireBiz(playerId);
+    const fulfillerBiz = this.requireOwnedBiz(playerId, bizId);
     const order = this.orders.get(orderId);
     if (!order || order.status !== 'open' || order.remaining <= 0) {
       throw new GameError('err.order_unavailable');
     }
     if (order.playerId === playerId) throw new GameError('err.own_order');
     const owner = this.player(order.playerId);
-    const ownerBiz = this.bizByOwner(order.playerId);
+    // The order was placed by a specific business; goods move to/from that one.
+    const ownerBiz = this.businesses.get(order.businessId) ?? this.bizByOwner(order.playerId);
     if (!ownerBiz) throw new GameError('err.counterparty_no_business');
     qty = Math.floor(qty);
     if (!Number.isFinite(qty) || qty < 1) throw new GameError('err.invalid_qty');
@@ -1122,6 +1357,12 @@ export class World extends EventEmitter {
     }
     this.addXp(buyer, XP.perTrade);
     this.addXp(seller, XP.perTrade);
+    // Company progression from meaningful trade activity (both parties).
+    const buyerCo = this.companies.get(buyer.id);
+    const sellerCo = this.companies.get(seller.id);
+    if (buyerCo) this.addCompanyXp(buyerCo, COMPANY_XP.perTrade);
+    if (sellerCo) this.addCompanyXp(sellerCo, COMPANY_XP.perTrade);
+    this.addCompanyRevenueXp(seller.id, amount);
 
     this.fulfillLocks.add(orderId);
     try {
@@ -1210,9 +1451,9 @@ export class World extends EventEmitter {
     }
   }
 
-  async upgrade(playerId: number): Promise<void> {
+  async upgrade(playerId: number, bizId?: number): Promise<void> {
     const p = this.player(playerId);
-    const biz = this.requireBiz(playerId);
+    const biz = this.requireOwnedBiz(playerId, bizId);
     if (biz.level >= MAX_LEVEL) throw new GameError('err.max_level');
     const cost = {
       farm: FARM_LEVELS[biz.level].upgradeCost,
@@ -1242,6 +1483,8 @@ export class World extends EventEmitter {
         }));
       });
       console.log(`[econ] BUSINESS_UPGRADE player=${playerId} biz=${biz.id} level=${biz.level} cost=$${cost}`);
+      const company = this.companies.get(playerId);
+      if (company) this.addCompanyXp(company, COMPANY_XP.perUpgrade);
       this.emit('upgraded', { biz });
     } catch (err) {
       p.cash += cost;
@@ -1266,9 +1509,10 @@ export class World extends EventEmitter {
     product: ProductId,
     quantity: number,
     unitPrice: number,
-    deliveries: number
+    deliveries: number,
+    buyerBizId?: number
   ): Promise<ContractRec> {
-    const buyerBiz = this.requireBiz(buyerId);
+    const buyerBiz = this.requireOwnedBiz(buyerId, buyerBizId);
     const sellerBiz = this.businesses.get(sellerBizId);
     if (!sellerBiz) throw new GameError('err.business_gone');
     if (sellerBiz.ownerId === buyerId) throw new GameError('err.contract_self');
@@ -1452,6 +1696,12 @@ export class World extends EventEmitter {
       });
 
       console.log(`[econ] CONTRACT_EXEC id=${c.id} ${c.quantity}x${c.product} @$${c.unitPrice} remaining=${c.remaining} delivery=${delivery.id}`);
+      // Company progression for both parties on each fulfilled delivery.
+      const sellerCo = this.companies.get(c.sellerId);
+      const buyerCo = this.companies.get(c.buyerId);
+      if (sellerCo) this.addCompanyXp(sellerCo, COMPANY_XP.perContract);
+      if (buyerCo) this.addCompanyXp(buyerCo, COMPANY_XP.perContract);
+      this.addCompanyRevenueXp(c.sellerId, amount);
       this.emit('delivery', delivery);
       this.emit('contract', c);
       if (c.status === 'completed') this.contracts.delete(c.id);
@@ -1502,6 +1752,8 @@ export class World extends EventEmitter {
       sellerId: c.sellerId,
       buyerName: buyer?.name ?? '???',
       sellerName: seller?.name ?? '???',
+      buyerCompany: this.companies.get(c.buyerId)?.name ?? (buyer ? defaultCompanyName(buyer.name) : '???'),
+      sellerCompany: this.companies.get(c.sellerId)?.name ?? (seller ? defaultCompanyName(seller.name) : '???'),
       buyerType: (buyerBiz?.type ?? 'farm') as any,
       sellerType: (sellerBiz?.type ?? 'farm') as any,
       product: c.product,
@@ -1520,12 +1772,15 @@ export class World extends EventEmitter {
   async contractsForPlayer(playerId: number, limit = 40): Promise<ContractPub[]> {
     const res = await query(
       `SELECT c.*, bp.username AS buyer_name, sp.username AS seller_name,
-              bb.type AS buyer_type, sb.type AS seller_type
+              bb.type AS buyer_type, sb.type AS seller_type,
+              bco.name AS buyer_company, sco.name AS seller_company
        FROM contracts c
        JOIN players bp ON bp.id = c.buyer_player_id
        JOIN players sp ON sp.id = c.seller_player_id
        JOIN businesses bb ON bb.id = c.buyer_business_id
        JOIN businesses sb ON sb.id = c.seller_business_id
+       LEFT JOIN companies bco ON bco.player_id = c.buyer_player_id
+       LEFT JOIN companies sco ON sco.player_id = c.seller_player_id
        WHERE c.buyer_player_id=$1 OR c.seller_player_id=$1
        ORDER BY c.created_at DESC LIMIT $2`,
       [playerId, limit]
@@ -1536,6 +1791,8 @@ export class World extends EventEmitter {
       sellerId: r.seller_player_id,
       buyerName: r.buyer_name,
       sellerName: r.seller_name,
+      buyerCompany: r.buyer_company ?? `${r.buyer_name} Co.`,
+      sellerCompany: r.seller_company ?? `${r.seller_name} Co.`,
       buyerType: r.buyer_type,
       sellerType: r.seller_type,
       product: r.product,
@@ -1550,8 +1807,8 @@ export class World extends EventEmitter {
     }));
   }
 
-  setPrice(playerId: number, price: number, product?: ProductId): void {
-    const biz = this.requireBiz(playerId);
+  setPrice(playerId: number, price: number, product?: ProductId, bizId?: number): void {
+    const biz = this.requireOwnedBiz(playerId, bizId);
     if (biz.type === 'farm') throw new GameError('err.farms_use_market');
     price = Math.floor(price);
     if (!Number.isFinite(price) || price < MIN_COFFEE_PRICE || price > MAX_COFFEE_PRICE) {
@@ -1566,8 +1823,8 @@ export class World extends EventEmitter {
     this.emit('upgraded', { biz }); // reuse: broadcast public/private refresh
   }
 
-  setProduction(playerId: number, product: ProductId): void {
-    const biz = this.requireBiz(playerId);
+  setProduction(playerId: number, product: ProductId, bizId?: number): void {
+    const biz = this.requireOwnedBiz(playerId, bizId);
     if (biz.type !== 'farm') throw new GameError('err.only_farms_production');
     if (product !== 'milk' && product !== 'wheat') throw new GameError('err.farm_product_choice');
     if (biz.production === product) return;
@@ -1577,23 +1834,24 @@ export class World extends EventEmitter {
     this.emit('upgraded', { biz });
   }
 
-  async resetBusiness(playerId: number): Promise<void> {
-    const biz = this.bizByOwner(playerId);
-    if (!biz) return;
-    // Cancel this player's open orders first (refund escrow).
+  async resetBusiness(playerId: number, bizId?: number): Promise<void> {
+    const biz = bizId != null ? this.businesses.get(bizId) : this.bizByOwner(playerId);
+    if (!biz || biz.ownerId !== playerId) return;
+    // Cancel this business's open orders first (refund escrow).
     for (const o of [...this.orders.values()]) {
-      if (o.playerId === playerId && o.status === 'open') {
+      if (o.businessId === biz.id && o.status === 'open') {
         await this.cancelOrder(playerId, o.id);
       }
     }
     this.businesses.delete(biz.id);
     await query('DELETE FROM businesses WHERE id=$1', [biz.id]);
     this.emit('biz_removed', { bizId: biz.id, lotId: biz.lotId });
+    this.emit('my_biz_removed', { ownerId: playerId, bizId: biz.id });
   }
 
   // ---------------- dev tools ----------------
 
-  async devCommand(playerId: number, cmd: string, value?: number): Promise<string> {
+  async devCommand(playerId: number, cmd: string, value?: number, bizId?: number): Promise<string> {
     const p = this.player(playerId);
     const v = Math.floor(value ?? 0);
     switch (cmd) {
@@ -1605,17 +1863,23 @@ export class World extends EventEmitter {
       case 'add_beans':
       case 'add_wheat':
       case 'add_bread': {
-        const biz = this.requireBiz(playerId);
+        const biz = this.requireOwnedBiz(playerId, bizId);
         const product = cmd.slice(4) as ProductId;
         inv(biz, product).qty += v > 0 ? v : 50;
         biz.dirty = true;
         return `+${v > 0 ? v : 50} ${PRODUCTS[product].name}`;
       }
+      case 'company_xp': {
+        const company = await this.ensureCompany(playerId);
+        this.addCompanyXp(company, v > 0 ? v : 1000);
+        this.emit('company', company);
+        return `company xp +${v > 0 ? v : 1000} (lvl ${company.level})`;
+      }
       case 'speed':
         this.timeScale = Math.min(60, Math.max(1, v || 1));
         return `time scale x${this.timeScale}`;
       case 'reset_business':
-        await this.resetBusiness(playerId);
+        await this.resetBusiness(playerId, bizId);
         return 'business reset';
       default:
         throw new GameError('err.unknown_dev_cmd', { cmd });
@@ -1642,10 +1906,13 @@ export class World extends EventEmitter {
 
   toBizPub(b: BizRec): BizPub {
     const owner = this.players.get(b.ownerId);
+    const company = this.companies.get(b.ownerId);
     return {
       id: b.id,
       ownerId: b.ownerId,
       ownerName: owner?.name ?? '???',
+      companyId: company?.id ?? b.companyId,
+      companyName: company?.name ?? (owner ? defaultCompanyName(owner.name) : '???'),
       type: b.type,
       lotId: b.lotId,
       level: b.level,
@@ -1653,6 +1920,23 @@ export class World extends EventEmitter {
       reputation: Math.round(b.reputation * 100) / 100,
       supplies: SELLER_SUPPLIES[b.type] ?? [],
       tradeCount: b.tradeCount,
+    };
+  }
+
+  toCompanyPriv(company: CompanyRec): CompanyPriv {
+    const owner = this.players.get(company.ownerId);
+    const next = company.level < MAX_COMPANY_LEVEL ? COMPANY_LEVELS[company.level + 1].xp : null;
+    return {
+      id: company.id,
+      ownerId: company.ownerId,
+      ownerName: owner?.name ?? '???',
+      name: company.name,
+      level: company.level,
+      xp: company.xp,
+      xpForNext: next,
+      capacity: companyCapacity(company.level),
+      capacityUsed: this.capacityUsed(company.ownerId),
+      businessCount: this.bizesByOwner(company.ownerId).length,
     };
   }
 

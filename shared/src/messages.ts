@@ -6,20 +6,25 @@
 import type { BusinessType, ProductId } from './defs.js';
 
 // ---------- client -> server ----------
+// Actions that target one of the player's businesses carry an optional
+// `bizId`. If omitted and the player owns exactly one business, the server
+// uses that (keeps single-business play simple).
 export type ClientMsg =
   | { t: 'choose_business'; type: BusinessType }
-  | { t: 'buy_npc'; product: ProductId; qty: number }
-  | { t: 'order_create'; side: 'buy' | 'sell'; product: ProductId; qty: number; price: number }
+  | { t: 'open_business'; lotId: string; type: BusinessType }
+  | { t: 'rename_company'; name: string }
+  | { t: 'buy_npc'; product: ProductId; qty: number; bizId?: number }
+  | { t: 'order_create'; side: 'buy' | 'sell'; product: ProductId; qty: number; price: number; bizId?: number }
   | { t: 'order_cancel'; orderId: number }
-  | { t: 'order_fulfill'; orderId: number; qty: number }
-  | { t: 'upgrade' }
-  | { t: 'set_price'; price: number; product?: ProductId }
-  | { t: 'set_production'; product: ProductId }
-  | { t: 'contract_propose'; sellerBizId: number; product: ProductId; quantity: number; unitPrice: number; deliveries: number }
+  | { t: 'order_fulfill'; orderId: number; qty: number; bizId?: number }
+  | { t: 'upgrade'; bizId?: number }
+  | { t: 'set_price'; price: number; product?: ProductId; bizId?: number }
+  | { t: 'set_production'; product: ProductId; bizId?: number }
+  | { t: 'contract_propose'; sellerBizId: number; product: ProductId; quantity: number; unitPrice: number; deliveries: number; buyerBizId?: number }
   | { t: 'contract_accept'; contractId: number }
   | { t: 'contract_reject'; contractId: number }
   | { t: 'contract_cancel'; contractId: number }
-  | { t: 'dev'; cmd: string; value?: number }
+  | { t: 'dev'; cmd: string; value?: number; bizId?: number }
   | { t: 'ping' };
 
 // ---------- server -> client ----------
@@ -71,6 +76,8 @@ export interface BizPub {
   id: number;
   ownerId: number;
   ownerName: string;
+  companyId: number;
+  companyName: string;
   type: BusinessType;
   lotId: string;
   level: number;
@@ -78,6 +85,22 @@ export interface BizPub {
   reputation: number;   // public: star rating
   supplies: ProductId[]; // products this business can supply via contract
   tradeCount: number;    // successful player trades + contract deliveries
+}
+
+// A player owns exactly one company; a company owns one or more businesses.
+export interface CompanyPub {
+  id: number;
+  ownerId: number;
+  ownerName: string;
+  name: string;
+  level: number;
+}
+export interface CompanyPriv extends CompanyPub {
+  xp: number;
+  xpForNext: number | null;   // total XP needed for next level (null at max)
+  capacity: number;           // total management capacity
+  capacityUsed: number;       // sum of owned business capacities
+  businessCount: number;
 }
 
 export interface BizPriv extends BizPub {
@@ -134,6 +157,8 @@ export interface ContractPub {
   sellerId: number;
   buyerName: string;
   sellerName: string;
+  buyerCompany: string;
+  sellerCompany: string;
   buyerType: BusinessType;
   sellerType: BusinessType;
   product: ProductId;
@@ -160,7 +185,8 @@ export type ServerMsg =
   | {
       t: 'welcome';
       you: PlayerPriv;
-      biz: BizPriv | null;
+      company: CompanyPriv | null;
+      myBusinesses: BizPriv[];
       businesses: BizPub[];
       orders: OrderPub[];
       deliveries: DeliveryPub[];
@@ -171,8 +197,10 @@ export type ServerMsg =
       serverTime: number;
     }
   | { t: 'you'; you: PlayerPriv }
+  | { t: 'company'; company: CompanyPriv }  // your company detail
   | { t: 'biz'; biz: BizPub }             // someone else's business upsert
-  | { t: 'my_biz'; biz: BizPriv }          // your business detail
+  | { t: 'my_biz'; biz: BizPriv }          // one of your businesses' detail
+  | { t: 'my_biz_removed'; bizId: number }
   | { t: 'order'; order: OrderPub }        // upsert (remaining=0 -> remove)
   | { t: 'order_removed'; orderId: number }
   | { t: 'delivery'; delivery: DeliveryPub }

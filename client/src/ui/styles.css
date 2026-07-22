@@ -83,6 +83,46 @@ button { font-family: inherit; }
 .xpbar { width: 76px; height: 5px; background: #e2e8f0; border-radius: 3px; margin-top: 3px; overflow: hidden; }
 .xpbar > div { height: 100%; background: #7c3aed; border-radius: 3px; }
 
+/* ---------- company bar (V2.1) ---------- */
+.company-bar {
+  position: absolute; top: 70px; left: 50%; transform: translateX(-50%);
+  display: flex; gap: 8px; align-items: center; pointer-events: auto;
+  background: rgba(255, 255, 255, 0.92); border-radius: 12px; padding: 6px 10px;
+  box-shadow: 0 6px 18px rgba(15, 23, 42, 0.15); max-width: 94vw; flex-wrap: wrap;
+}
+.company-bar:empty { display: none; }
+.company-name {
+  border: none; background: #f1f5f9; padding: 5px 10px; border-radius: 9px;
+  font-size: 13px; font-weight: 800; color: #0f172a; cursor: pointer; max-width: 200px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.company-name:hover { background: #e2e8f0; }
+.company-meta { font-size: 12px; font-weight: 700; color: #64748b; white-space: nowrap; }
+.biz-chips { display: flex; gap: 4px; }
+.biz-chip {
+  border: 1.5px solid #dbe3ee; background: #fff; width: 34px; height: 32px; border-radius: 9px;
+  font-size: 16px; cursor: pointer; display: flex; align-items: center; justify-content: center;
+}
+.biz-chip:hover { border-color: #1d4ed8; }
+.biz-chip.active { background: #1d4ed8; border-color: #1d4ed8; }
+.biz-chip.open { font-weight: 800; color: #1d4ed8; }
+.biz-chip.dim { opacity: 0.45; }
+
+/* ---------- open-business overlay ---------- */
+.open-list { display: flex; flex-direction: column; gap: 8px; max-height: 46vh; overflow-y: auto; margin: 10px 0; }
+.open-lot {
+  display: flex; align-items: center; gap: 12px; text-align: left; cursor: pointer;
+  border: 1.5px solid #dbe3ee; background: #fff; border-radius: 12px; padding: 10px 14px;
+}
+.open-lot:hover:not(.disabled) { border-color: #1d4ed8; transform: translateY(-1px); }
+.open-lot.active { border-color: #1d4ed8; box-shadow: 0 0 0 2px rgba(29,78,216,0.15); }
+.open-lot.disabled { opacity: 0.5; cursor: not-allowed; }
+.open-lot .icon { font-size: 26px; }
+.open-lot .ol-main { flex: 1; font-size: 14px; }
+.open-lot .ol-main .cap { font-size: 11px; color: #94a3b8; }
+.open-lot .ol-meta { font-size: 12px; color: #64748b; }
+.open-lot .neg { color: #dc2626; font-weight: 700; }
+
 .nav {
   position: absolute; bottom: 16px; left: 50%; transform: translateX(-50%);
   display: flex; gap: 8px; pointer-events: auto;

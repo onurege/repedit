@@ -185,3 +185,59 @@ export const CONTRACT_MAX_DELIVERIES = 30;
 // A "game day" between recurring deliveries, in real seconds.
 export const CONTRACT_FREQUENCY_SECS = 45;
 export const REP_CONTRACT_FULFILLED = 0.03; // small bump for the supplier on success
+
+// ============================================================
+// V2.1 — Companies & multi-business
+// ============================================================
+// Each business consumes a fixed amount of the company's management capacity.
+// This is the ONLY specialization constraint: it forces an opportunity cost
+// between vertical integration and specialising + trading with other players.
+export const BUSINESS_CAPACITY: Record<BusinessType, number> = {
+  farm: 2,
+  coffee_shop: 3,
+  bakery: 3,
+  mini_market: 3,
+};
+
+// Company level unlocks more management capacity. Deliberately simple.
+export const COMPANY_LEVELS: Record<number, { capacity: number; xp: number }> = {
+  1: { capacity: 4, xp: 0 },
+  2: { capacity: 6, xp: 800 },
+  3: { capacity: 8, xp: 2400 },
+  4: { capacity: 10, xp: 5000 },
+  5: { capacity: 12, xp: 9000 },
+};
+export const MAX_COMPANY_LEVEL = 5;
+
+export function companyCapacity(level: number): number {
+  return (COMPANY_LEVELS[level] ?? COMPANY_LEVELS[MAX_COMPANY_LEVEL]).capacity;
+}
+export function companyLevelForXp(xp: number): number {
+  let lvl = 1;
+  while (lvl < MAX_COMPANY_LEVEL && xp >= COMPANY_LEVELS[lvl + 1].xp) lvl++;
+  return lvl;
+}
+
+// Company XP is earned from meaningful business activity (not routine sales),
+// so it can't be trivially farmed and mainly gates capacity.
+export const COMPANY_XP = {
+  perUpgrade: 200,     // a business upgrade
+  perTrade: 60,        // each side of a marketplace trade
+  perContract: 60,     // each contract delivery
+  revenuePerXp: 500,   // +1 company XP per $500 of business revenue
+};
+
+// Opening additional businesses costs escalating money (progression gate +
+// economic sink). Argument is how many businesses the company already owns.
+export function businessOpenCost(currentCount: number): number {
+  const table = [15000, 40000, 90000]; // 2nd, 3rd, 4th
+  if (currentCount >= 1 && currentCount <= table.length) return table[currentCount - 1];
+  return table[table.length - 1] + (currentCount - table.length) * 70000;
+}
+
+export const COMPANY_NAME_MIN = 2;
+export const COMPANY_NAME_MAX = 24;
+
+export function defaultCompanyName(username: string): string {
+  return `${username} Co.`.slice(0, COMPANY_NAME_MAX);
+}

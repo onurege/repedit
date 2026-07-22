@@ -52,8 +52,11 @@ export class Net {
     const p = this.world.players.get(playerId);
     if (!p) return;
     this.sendToPlayer(playerId, { t: 'you', you: this.world.toPlayerPriv(p) });
-    const biz = this.world.bizByOwner(playerId);
-    if (biz) this.sendToPlayer(playerId, { t: 'my_biz', biz: this.world.toBizPriv(biz) });
+    const company = this.world.companyByOwner(playerId);
+    if (company) this.sendToPlayer(playerId, { t: 'company', company: this.world.toCompanyPriv(company) });
+    for (const biz of this.world.bizesByOwner(playerId)) {
+      this.sendToPlayer(playerId, { t: 'my_biz', biz: this.world.toBizPriv(biz) });
+    }
   }
 
   private wireWorldEvents(): void {
@@ -77,6 +80,21 @@ export class Net {
     w.on('biz_created', (biz: BizRec) => {
       this.broadcast({ t: 'biz', biz: w.toBizPub(biz) });
       this.pushOwnState(biz.ownerId);
+    });
+    w.on('company', (company: { ownerId: number }) => {
+      const rec = w.companyByOwner(company.ownerId);
+      if (rec) this.sendToPlayer(company.ownerId, { t: 'company', company: w.toCompanyPriv(rec) });
+    });
+    w.on('company_levelup', ({ ownerId, level }: { ownerId: number; level: number }) => {
+      const rec = w.companyByOwner(ownerId);
+      if (rec) this.sendToPlayer(ownerId, { t: 'company', company: w.toCompanyPriv(rec) });
+      this.sendToPlayer(ownerId, { t: 'toast', code: 'toast.company_levelup', params: { level }, kind: 'success' });
+    });
+    w.on('biz_pub', (biz: BizRec) => {
+      this.broadcast({ t: 'biz', biz: w.toBizPub(biz) });
+    });
+    w.on('my_biz_removed', ({ ownerId, bizId }: { ownerId: number; bizId: number }) => {
+      this.sendToPlayer(ownerId, { t: 'my_biz_removed', bizId });
     });
     w.on('upgraded', ({ biz }: { biz: BizRec }) => {
       this.broadcast({ t: 'biz', biz: w.toBizPub(biz) });
@@ -148,11 +166,12 @@ export class Net {
       const awayReport = this.world.connect(playerId);
 
       const p = this.world.players.get(playerId)!;
-      const biz = this.world.bizByOwner(playerId);
+      const company = this.world.companyByOwner(playerId);
       this.send(ws, {
         t: 'welcome',
         you: this.world.toPlayerPriv(p),
-        biz: biz ? this.world.toBizPriv(biz) : null,
+        company: company ? this.world.toCompanyPriv(company) : null,
+        myBusinesses: this.world.bizesByOwner(playerId).map((b) => this.world.toBizPriv(b)),
         businesses: [...this.world.businesses.values()].map((b) => this.world.toBizPub(b)),
         orders: [...this.world.orders.values()].map((o) => this.world.toOrderPub(o)),
         deliveries: [...this.world.deliveries.values()].map((d) => this.world.toDeliveryPub(d)),
@@ -201,12 +220,24 @@ export class Net {
           this.send(conn.ws, { t: 'toast', code: `toast.welcome.${msg.type}`, kind: 'success' });
           break;
         }
+        case 'open_business': {
+          const biz = await world.openBusiness(pid, msg.lotId, msg.type);
+          this.pushOwnState(pid);
+          this.send(conn.ws, { t: 'toast', code: `toast.business_opened.${biz.type}`, kind: 'success' });
+          break;
+        }
+        case 'rename_company': {
+          await world.renameCompany(pid, msg.name);
+          this.pushOwnState(pid);
+          this.send(conn.ws, { t: 'toast', code: 'toast.company_renamed', kind: 'success' });
+          break;
+        }
         case 'buy_npc':
-          await world.buyNpc(pid, msg.product, msg.qty);
+          await world.buyNpc(pid, msg.product, msg.qty, msg.bizId);
           this.pushOwnState(pid);
           break;
         case 'order_create':
-          await world.createOrder(pid, msg.side, msg.product, msg.qty, msg.price);
+          await world.createOrder(pid, msg.side, msg.product, msg.qty, msg.price, msg.bizId);
           this.pushOwnState(pid);
           this.send(conn.ws, { t: 'toast', code: 'toast.order_placed', kind: 'success' });
           break;
@@ -215,7 +246,7 @@ export class Net {
           this.pushOwnState(pid);
           break;
         case 'order_fulfill': {
-          const trade = await world.fulfillOrder(pid, msg.orderId, msg.qty);
+          const trade = await world.fulfillOrder(pid, msg.orderId, msg.qty, msg.bizId);
           this.pushOwnState(pid);
           this.pushOwnState(trade.buyerName === '' ? pid : pid); // own state pushed; counterparty below
           for (const p of world.players.values()) {
@@ -230,19 +261,20 @@ export class Net {
           break;
         }
         case 'upgrade':
-          await world.upgrade(pid);
+          await world.upgrade(pid, msg.bizId);
+          this.pushOwnState(pid);
           this.send(conn.ws, { t: 'toast', code: 'toast.upgrade_complete', kind: 'success' });
           break;
         case 'set_price':
-          world.setPrice(pid, msg.price, msg.product);
+          world.setPrice(pid, msg.price, msg.product, msg.bizId);
           this.pushOwnState(pid);
           break;
         case 'set_production':
-          world.setProduction(pid, msg.product);
+          world.setProduction(pid, msg.product, msg.bizId);
           this.pushOwnState(pid);
           break;
         case 'contract_propose': {
-          const c = await world.proposeContract(pid, msg.sellerBizId, msg.product, msg.quantity, msg.unitPrice, msg.deliveries);
+          const c = await world.proposeContract(pid, msg.sellerBizId, msg.product, msg.quantity, msg.unitPrice, msg.deliveries, msg.buyerBizId);
           this.send(conn.ws, { t: 'toast', code: 'toast.contract_proposed', params: { name: world.players.get(c.sellerId)?.name ?? '' }, kind: 'success' });
           break;
         }
@@ -262,7 +294,7 @@ export class Net {
           break;
         case 'dev': {
           if (!config.devTools) throw new GameError('err.dev_disabled');
-          const result = await world.devCommand(pid, msg.cmd, msg.value);
+          const result = await world.devCommand(pid, msg.cmd, msg.value, msg.bizId);
           this.pushOwnState(pid);
           this.send(conn.ws, { t: 'toast', code: 'toast.dev', params: { result }, kind: 'info' });
           if (msg.cmd === 'reset_business') this.broadcastBizList();

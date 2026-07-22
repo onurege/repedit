@@ -7,8 +7,10 @@
 import {
   PRODUCTS, NPC_WHOLESALE_PRICES, FARM_LEVELS, SHOP_LEVELS, BAKERY_LEVELS, MARKET_LEVELS,
   MAX_LEVEL, xpForLevel, MAX_PLAYER_LEVEL, contractableProducts, BAD_STATUSES,
-  CONTRACT_FREQUENCY_SECS,
+  CONTRACT_FREQUENCY_SECS, LOTS, BUSINESS_CAPACITY, businessOpenCost,
+  companyCapacity, COMPANY_NAME_MIN, COMPANY_NAME_MAX,
   type BizPub, type OrderPub, type AwayReport, type ProductId, type ContractPub,
+  type BusinessType,
 } from '@district/shared';
 import { client } from '../net.js';
 import { sfx, unlockAudio } from '../audio.js';
@@ -47,6 +49,12 @@ function statusIsBad(status: string): boolean {
 /** Localized product name (the shared PRODUCTS table stays English/data-only). */
 function pName(id: ProductId): string {
   return t(`product.${id}`);
+}
+
+/** Escape user-supplied text (company names) before interpolating into HTML. */
+function escapeHtml(s: string): string {
+  return s.replace(/[&<>"']/g, (c) =>
+    ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]!));
 }
 
 export class UI {
@@ -314,6 +322,7 @@ export class UI {
         <div class="sep"></div>
         <div class="stat"><span class="k">${t('hud.online')}</span><span class="v" id="st-online">1</span></div>
       </div>
+      <div class="company-bar" id="company-bar"></div>
       <div class="nav">
         <button id="nav-city">${t('nav.city')}</button>
         <button id="nav-biz">${t('nav.business')}</button>
@@ -445,8 +454,160 @@ export class UI {
       '★ ' + (biz ? biz.reputation.toFixed(1) : you.reputation.toFixed(1));
     (document.getElementById('st-online') as HTMLElement).textContent = String(client.online);
     this.updateContractBadge();
+    this.renderCompanyBar();
     this.renderObjectives();
     if (this.panelKind !== 'none') this.renderPanel();
+  }
+
+  // ================= COMPANY BAR / MY BUSINESSES =================
+
+  private lastCompanyHTML = '';
+
+  private renderCompanyBar(): void {
+    const bar = document.getElementById('company-bar');
+    if (!bar) return;
+    const company = client.company;
+    const mine = [...client.myBusinesses.values()];
+    if (!company || mine.length === 0) {
+      if (this.lastCompanyHTML !== '') { bar.innerHTML = ''; this.lastCompanyHTML = ''; }
+      return;
+    }
+    const used = mine.reduce((s, b) => s + (BUSINESS_CAPACITY[b.type] ?? 0), 0);
+    const cap = companyCapacity(company.level);
+    const chips = mine
+      .map((b) => {
+        const sel = b.id === client.selectedBizId;
+        return `<button class="biz-chip ${sel ? 'active' : ''}" data-biz-chip="${b.id}" title="${bizName(b.type)}">${BIZ_ICON[b.type] ?? '🏪'}</button>`;
+      })
+      .join('');
+    const canOpen = used < cap; // at least the cheapest (farm=2) might still not fit, checked on open
+    const html = `
+      <button class="company-name" id="co-name" title="${t('company.rename_hint')}">🏢 ${escapeHtml(company.name)}</button>
+      <span class="company-meta">${t('company.level', { level: company.level })} · ${t('company.capacity', { used, cap })}</span>
+      <span class="biz-chips">${chips}</span>
+      <button class="biz-chip open ${canOpen ? '' : 'dim'}" id="co-open" title="${t('company.open_business')}">＋</button>`;
+    if (html !== this.lastCompanyHTML) {
+      this.lastCompanyHTML = html;
+      bar.innerHTML = html;
+      bar.querySelectorAll('[data-biz-chip]').forEach((el) =>
+        el.addEventListener('click', () => {
+          const id = parseInt((el as HTMLElement).dataset.bizChip!, 10);
+          sfx.click();
+          client.selectBiz(id);
+          const b = client.myBusinesses.get(id);
+          if (b) {
+            this.openPanel('business');
+            this.onFocusLot?.(b.lotId);
+          }
+        })
+      );
+      bar.querySelector('#co-open')!.addEventListener('click', () => {
+        sfx.click();
+        this.showOpenBusiness();
+      });
+      bar.querySelector('#co-name')!.addEventListener('click', () => {
+        sfx.click();
+        this.showRenameCompany();
+      });
+    }
+  }
+
+  /** Overlay: pick a vacant lot to open a new business (type set by the lot). */
+  showOpenBusiness(preLotId?: string): void {
+    document.getElementById('open-overlay')?.remove();
+    const company = client.company;
+    if (!company) return;
+    const mine = [...client.myBusinesses.values()];
+    const used = mine.reduce((s, b) => s + (BUSINESS_CAPACITY[b.type] ?? 0), 0);
+    const cap = companyCapacity(company.level);
+    const cost = businessOpenCost(mine.length);
+    const cash = client.you?.cash ?? 0;
+    const occupied = new Set([...client.businesses.values()].map((b) => b.lotId));
+    const vacant = LOTS.filter((l) => l.kind !== 'wholesale' && !occupied.has(l.id));
+
+    const rows = vacant
+      .map((l) => {
+        const type = l.kind as BusinessType;
+        const need = BUSINESS_CAPACITY[type];
+        const fitsCap = used + need <= cap;
+        const disabled = !fitsCap || cash < cost;
+        return `<button class="open-lot ${disabled ? 'disabled' : ''}" data-lot="${l.id}" data-type="${type}" ${disabled ? 'disabled' : ''}>
+          <span class="icon">${BIZ_ICON[type] ?? '🏪'}</span>
+          <span class="ol-main"><b>${bizName(type)}</b><br/><span class="cap">${l.id}</span></span>
+          <span class="ol-meta">${t('company.needs_cap', { need })}${fitsCap ? '' : ` <span class="neg">${t('company.no_cap')}</span>`}</span>
+        </button>`;
+      })
+      .join('');
+
+    const overlay = document.createElement('div');
+    overlay.className = 'overlay modal';
+    overlay.id = 'open-overlay';
+    overlay.innerHTML = `
+      <div class="card" style="width:min(560px,94vw)">
+        <h1>${t('company.open_title')}</h1>
+        <div class="tagline">${t('company.open_tagline', { cost: fmt(cost), used, cap })}</div>
+        <div class="open-list">${rows || `<p class="hint">${t('company.no_lots')}</p>`}</div>
+        <div class="hint">${cash < cost ? `<span class="neg">${t('company.need_cash', { cost: fmt(cost) })}</span>` : t('company.open_hint')}</div>
+        <button class="btn ghost" id="open-cancel" style="margin-top:8px">${t('company.cancel')}</button>
+      </div>`;
+    document.body.appendChild(overlay);
+    overlay.querySelectorAll('[data-lot]').forEach((el) =>
+      el.addEventListener('click', () => {
+        const lotId = (el as HTMLElement).dataset.lot!;
+        const type = (el as HTMLElement).dataset.type as BusinessType;
+        sfx.click();
+        client.send({ t: 'open_business', lotId, type });
+        overlay.remove();
+      })
+    );
+    overlay.querySelector('#open-cancel')!.addEventListener('click', () => {
+      sfx.click();
+      overlay.remove();
+    });
+    if (preLotId) {
+      const btn = overlay.querySelector(`[data-lot="${preLotId}"]`) as HTMLElement | null;
+      btn?.scrollIntoView({ block: 'center' });
+      btn?.classList.add('active');
+    }
+  }
+
+  /** Overlay: rename the company with light client-side validation. */
+  showRenameCompany(): void {
+    document.getElementById('rename-overlay')?.remove();
+    const company = client.company;
+    if (!company) return;
+    const overlay = document.createElement('div');
+    overlay.className = 'overlay modal';
+    overlay.id = 'rename-overlay';
+    overlay.innerHTML = `
+      <div class="card" style="width:min(420px,94vw)">
+        <h1>${t('company.rename_title')}</h1>
+        <div class="field"><label>${t('company.name_label')}</label>
+          <input id="co-rename-input" maxlength="${COMPANY_NAME_MAX}" value="${escapeHtml(company.name)}" /></div>
+        <div class="auth-error" id="co-rename-err"></div>
+        <div class="mkt-row">
+          <button class="btn primary" id="co-rename-go">${t('company.save')}</button>
+          <button class="btn ghost" id="co-rename-cancel">${t('company.cancel')}</button>
+        </div>
+      </div>`;
+    document.body.appendChild(overlay);
+    const input = overlay.querySelector('#co-rename-input') as HTMLInputElement;
+    const err = overlay.querySelector('#co-rename-err') as HTMLElement;
+    const submit = () => {
+      const name = input.value.trim();
+      if (name.length < COMPANY_NAME_MIN || name.length > COMPANY_NAME_MAX) {
+        err.textContent = t('err.company_name_len', { min: COMPANY_NAME_MIN, max: COMPANY_NAME_MAX });
+        sfx.error();
+        return;
+      }
+      client.send({ t: 'rename_company', name });
+      overlay.remove();
+    };
+    overlay.querySelector('#co-rename-go')!.addEventListener('click', submit);
+    overlay.querySelector('#co-rename-cancel')!.addEventListener('click', () => overlay.remove());
+    input.addEventListener('keydown', (e) => { if ((e as KeyboardEvent).key === 'Enter') submit(); });
+    input.focus();
+    input.select();
   }
 
   // ================= PANEL RENDERING =================
@@ -850,8 +1011,8 @@ export class UI {
     }
 
     this.setBody(body, `
-      <div class="kv"><span class="k">${t('info.company')}</span><span class="v">${bizTitle(biz.type, biz.ownerName)}</span></div>
-      <div class="kv"><span class="k">${t('info.owner')}</span><span class="v">${biz.ownerName} ${t(online ? 'info.online' : 'info.offline')}</span></div>
+      <div class="kv"><span class="k">${t('info.company')}</span><span class="v">🏢 ${escapeHtml(biz.companyName ?? '')}</span></div>
+      <div class="kv"><span class="k">${t('info.owner')}</span><span class="v">${escapeHtml(biz.ownerName)} ${t(online ? 'info.online' : 'info.offline')}</span></div>
       <div class="kv"><span class="k">${t('info.type')}</span><span class="v">${bizName(biz.type)}</span></div>
       <div class="kv"><span class="k">${t('biz.level')}</span><span class="v">${biz.level} / ${MAX_LEVEL}</span></div>
       <div class="kv"><span class="k">${t('biz.reputation')}</span><span class="v">★ ${(biz.reputation ?? 3).toFixed(2)}</span></div>
@@ -890,7 +1051,9 @@ export class UI {
     const p = PRODUCTS[c.product];
     const iAmBuyer = c.buyerId === client.you?.id;
     const counterparty = iAmBuyer ? c.sellerName : c.buyerName;
-    const dir = t(iAmBuyer ? 'contract.dir.from' : 'contract.dir.to', { name: counterparty });
+    const counterCompany = iAmBuyer ? c.sellerCompany : c.buyerCompany;
+    const label = counterCompany ? `${counterparty} · 🏢 ${counterCompany}` : counterparty;
+    const dir = t(iAmBuyer ? 'contract.dir.from' : 'contract.dir.to', { name: label });
     const total = c.quantity * c.unitPrice;
     let actions = '';
     if (role === 'incoming') {

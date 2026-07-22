@@ -1,4 +1,44 @@
-# RELEASE CANDIDATE (current)
+# V2.1 — COMPANY FOUNDATION & MULTI-BUSINESS EXPANSION (current)
+
+Introduces a persistent **Company** that every player owns exactly one of; a
+company owns one or more businesses (still only the existing four types —
+Farm, Coffee Shop, Bakery, Mini Market). Existing players are migrated safely:
+each gets a company (named `<username> Co.`), their existing business attaches
+to it, and all cash, inventory, levels, contracts, orders, ledger and
+reputation are preserved. The player's cash is reused as the company treasury.
+
+- **Multiple businesses per company**: a player starts with one business and
+  can later OPEN a NEW BUSINESS by picking a vacant lot (the lot's kind sets
+  the type) and paying an escalating opening cost ($15k / $40k / $90k / …),
+  recorded as a `BUSINESS_OPENING` ledger entry. Opening is atomic and guarded
+  against double-open (per-player lock + in-transaction lot re-check).
+- **Management Capacity** — the one specialization constraint that protects the
+  player-driven economy. Each business consumes capacity (Farm 2, Coffee Shop /
+  Bakery / Mini Market 3); company capacity grows with company level
+  (L1 4, L2 6, L3 8, L4 10, L5 12). Opening a business that would exceed
+  capacity is rejected with no cash lost.
+- **Company progression** is separate from business XP: earned from meaningful
+  activity (upgrades, trades, contract deliveries, revenue) and mainly unlocks
+  capacity — deliberately hard to farm.
+- **Inventory stays per-business** (no shared company pool; no internal
+  transfer). Orders and contracts are business-scoped; actions target the
+  currently-selected business, defaulting to the only one for single-business
+  play.
+- **UI**: company identity in the HUD (name · level · capacity used/total), a
+  compact MY BUSINESSES switcher (click a chip to focus the building and open
+  its management panel), an open-new-business flow (also reachable by clicking a
+  vacant lot), rename-company with validation, and the owning company shown in
+  public inspection and on contracts.
+
+Everything else — production, NPC sales, wholesaler, marketplace, trades,
+deliveries, contracts, ledger, offline progression, reconnect, upgrades,
+public inspection — is preserved. All 60 unit tests (incl. 11 new company
+tests) and four browser E2Es (golden-path, supply-chain, contract, and the new
+V2.1 company flow) pass; production build succeeds.
+
+---
+
+# RELEASE CANDIDATE
 
 All gameplay phases (1, 1.5, 2, 3) are complete and the game has had a
 visual-polish & game-feel pass to make it read as a finished browser tycoon

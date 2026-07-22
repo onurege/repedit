@@ -14,6 +14,7 @@ import type {
   TradeRow,
   AwayReport,
   ContractPub,
+  CompanyPriv,
 } from '@district/shared';
 import { t } from './i18n.js';
 
@@ -32,7 +33,9 @@ type Handler = (...args: any[]) => void;
 
 export class GameClient {
   you: PlayerPriv | null = null;
-  myBiz: BizPriv | null = null;
+  company: CompanyPriv | null = null;
+  myBusinesses = new Map<number, BizPriv>();
+  selectedBizId: number | null = null;
   businesses = new Map<number, BizPub>();
   orders = new Map<number, OrderPub>();
   deliveries = new Map<number, DeliveryPub>();
@@ -47,6 +50,23 @@ export class GameClient {
   private handlers = new Map<string, Set<Handler>>();
   private reconnectDelay = 1000;
   private shouldReconnect = false;
+
+  /** The business the UI currently acts on (selected chip, or the first one). */
+  get myBiz(): BizPriv | null {
+    if (this.selectedBizId != null) {
+      const b = this.myBusinesses.get(this.selectedBizId);
+      if (b) return b;
+    }
+    return this.myBusinesses.values().next().value ?? null;
+  }
+
+  /** Switch which owned business subsequent actions target. */
+  selectBiz(id: number): void {
+    if (this.myBusinesses.has(id)) {
+      this.selectedBizId = id;
+      this.emit('update');
+    }
+  }
 
   on(event: string, fn: Handler): void {
     if (!this.handlers.has(event)) this.handlers.set(event, new Set());
@@ -113,7 +133,19 @@ export class GameClient {
     ws.onerror = () => ws.close();
   }
 
+  // Actions that target one of my businesses default to the selected one, so
+  // the whole UI acts on the currently-focused business without every call
+  // site having to thread a bizId.
+  private static BIZ_TARGETED = new Set([
+    'buy_npc', 'order_create', 'order_fulfill', 'upgrade', 'set_price', 'set_production', 'dev',
+  ]);
+
   send(msg: ClientMsg): void {
+    const m = msg as any;
+    if (this.selectedBizId != null) {
+      if (GameClient.BIZ_TARGETED.has(msg.t) && m.bizId == null) m.bizId = this.selectedBizId;
+      if (msg.t === 'contract_propose' && m.buyerBizId == null) m.buyerBizId = this.selectedBizId;
+    }
     if (this.ws?.readyState === WebSocket.OPEN) this.ws.send(JSON.stringify(msg));
   }
 
@@ -121,7 +153,11 @@ export class GameClient {
     switch (msg.t) {
       case 'welcome': {
         this.you = msg.you;
-        this.myBiz = msg.biz;
+        this.company = msg.company;
+        this.myBusinesses = new Map(msg.myBusinesses.map((b) => [b.id, b]));
+        if (this.selectedBizId == null || !this.myBusinesses.has(this.selectedBizId)) {
+          this.selectedBizId = this.myBusinesses.keys().next().value ?? null;
+        }
         this.businesses = new Map(msg.businesses.map((b) => [b.id, b]));
         this.orders = new Map(msg.orders.map((o) => [o.id, o]));
         this.deliveries = new Map(msg.deliveries.map((d) => [d.id, d]));
@@ -139,19 +175,37 @@ export class GameClient {
         this.you = msg.you;
         this.emit('update');
         break;
-      case 'my_biz':
-        this.myBiz = msg.biz;
-        this.businesses.set(msg.biz.id, msg.biz);
+      case 'company':
+        this.company = msg.company;
         this.emit('update');
         break;
-      case 'biz':
+      case 'my_biz':
+        this.myBusinesses.set(msg.biz.id, msg.biz);
         this.businesses.set(msg.biz.id, msg.biz);
-        if (this.myBiz && msg.biz.id === this.myBiz.id) {
-          Object.assign(this.myBiz, { level: msg.biz.level, status: msg.biz.status });
+        if (this.selectedBizId == null) this.selectedBizId = msg.biz.id;
+        this.emit('update');
+        break;
+      case 'my_biz_removed':
+        this.myBusinesses.delete(msg.bizId);
+        if (this.selectedBizId === msg.bizId) {
+          this.selectedBizId = this.myBusinesses.keys().next().value ?? null;
+        }
+        this.emit('update');
+        break;
+      case 'biz': {
+        this.businesses.set(msg.biz.id, msg.biz);
+        const mine = this.myBusinesses.get(msg.biz.id);
+        if (mine) {
+          Object.assign(mine, {
+            level: msg.biz.level, status: msg.biz.status,
+            reputation: msg.biz.reputation, tradeCount: msg.biz.tradeCount,
+            companyName: msg.biz.companyName,
+          });
         }
         this.emit('biz', msg.biz);
         this.emit('update');
         break;
+      }
       case 'order':
         if (msg.order.remaining > 0) this.orders.set(msg.order.id, msg.order);
         else this.orders.delete(msg.order.id);

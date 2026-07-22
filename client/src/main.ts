@@ -49,11 +49,19 @@ rig.onSelect = (x, y) => {
     ui.openWholesale();
     rig.focusOn(city.lotWorldPos(sel.lotId));
   } else if (sel.kind === 'business') {
-    if (client.myBiz && sel.bizId === client.myBiz.id) {
+    if (sel.bizId != null && client.myBusinesses.has(sel.bizId)) {
+      client.selectBiz(sel.bizId);
       ui.openBusiness();
+      rig.focusOn(city.lotWorldPos(sel.lotId));
     } else if (sel.bizId != null) {
       ui.openInfo(sel.bizId);
       rig.focusOn(city.lotWorldPos(sel.lotId));
+    }
+  } else if (sel.kind === 'vacant') {
+    // Clicking an empty lot offers to open a new business there (V2.1).
+    if (client.company) {
+      rig.focusOn(city.lotWorldPos(sel.lotId));
+      ui.showOpenBusiness(sel.lotId);
     }
   }
 };
