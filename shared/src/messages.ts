@@ -15,6 +15,10 @@ export type ClientMsg =
   | { t: 'upgrade' }
   | { t: 'set_price'; price: number; product?: ProductId }
   | { t: 'set_production'; product: ProductId }
+  | { t: 'contract_propose'; sellerBizId: number; product: ProductId; quantity: number; unitPrice: number; deliveries: number }
+  | { t: 'contract_accept'; contractId: number }
+  | { t: 'contract_reject'; contractId: number }
+  | { t: 'contract_cancel'; contractId: number }
   | { t: 'dev'; cmd: string; value?: number }
   | { t: 'ping' };
 
@@ -50,6 +54,9 @@ export interface BizPub {
   lotId: string;
   level: number;
   status: string; // PRODUCING | STORAGE FULL | OPEN | OUT OF STOCK ...
+  reputation: number;   // public: star rating
+  supplies: ProductId[]; // products this business can supply via contract
+  tradeCount: number;    // successful player trades + contract deliveries
 }
 
 export interface BizPriv extends BizPub {
@@ -98,6 +105,27 @@ export interface TradeRow {
   at: number;
 }
 
+export type ContractStatus = 'proposed' | 'active' | 'completed' | 'rejected' | 'cancelled';
+
+export interface ContractPub {
+  id: number;
+  buyerId: number;
+  sellerId: number;
+  buyerName: string;
+  sellerName: string;
+  buyerType: BusinessType;
+  sellerType: BusinessType;
+  product: ProductId;
+  quantity: number;
+  unitPrice: number;
+  deliveries: number;      // total agreed deliveries
+  remaining: number;
+  status: ContractStatus;
+  lastResult: string | null;
+  nextExecutionAt: number | null; // epoch ms
+  createdAt: number;
+}
+
 export interface AwayReport {
   seconds: number;
   revenue: number;
@@ -116,6 +144,7 @@ export type ServerMsg =
       orders: OrderPub[];
       deliveries: DeliveryPub[];
       players: PlayerPub[];
+      contracts: ContractPub[];
       online: number;
       devTools: boolean;
       serverTime: number;
@@ -132,6 +161,8 @@ export type ServerMsg =
   | { t: 'trade'; trade: TradeRow }
   | { t: 'trades'; trades: TradeRow[] }
   | { t: 'players'; players: PlayerPub[]; online: number }
+  | { t: 'contract'; contract: ContractPub }
+  | { t: 'contracts'; contracts: ContractPub[] }
   | { t: 'away'; report: AwayReport }
   | { t: 'toast'; msg: string; kind?: 'info' | 'success' | 'error' }
   | { t: 'error'; msg: string }

@@ -1,5 +1,28 @@
 # DECISIONS — architectural & gameplay record
 
+## Phase 3 — supply contracts
+
+- **Contracts reuse the delivery + ledger + exactly-once discipline** from
+  marketplace fulfillment: execution mutates memory synchronously, persists in
+  one DB transaction guarded by `WHERE status='active' AND remaining_deliveries=$prev`,
+  plus an in-memory `contractLocks` set — so concurrent/duplicate execution
+  cannot double-pay, double-remove stock, double-deliver, or double-log.
+- **Buyer pays at execution time (no escrow).** Simpler than the marketplace's
+  buy-order escrow and adequate because execution validates funds first and
+  skips safely (MISSED — BUYER FUNDS) rather than going negative.
+- **Server-driven execution in the tick loop** (and a catch-up sweep on load)
+  means contracts run while both players are offline; no browser session needed.
+- **Contracts are private to their two parties** (not broadcast): live updates
+  go only to buyer+seller; the welcome snapshot queries the DB for that player's
+  contracts including terminal history. Only proposed/active are held in memory.
+- **`~45s "game day"` interval in wall-clock**, independent of dev time-scale,
+  so time-warp accelerates production but not contract cadence.
+- **Public inspection fields** (reputation, supplies, trade count) were added to
+  the already-broadcast `BizPub` rather than a new request; `tradeCount` is
+  seeded from the `trades` table at load and incremented in memory (contract
+  deliveries since restart are counted live).
+- New ledger types `CONTRACT_SELL` / `CONTRACT_BUY` reuse the existing schema.
+
 ## Architecture
 
 - **Realtime layer: hand-rolled WebSocket (`ws`) instead of Colyseus.**

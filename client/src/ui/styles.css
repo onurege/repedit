@@ -91,6 +91,7 @@ button { font-family: inherit; }
 }
 .nav button:hover { background: #eef2f7; }
 .nav button.active { background: #1d4ed8; color: #fff; }
+.badge { display: inline-block; min-width: 16px; padding: 0 4px; margin-left: 2px; border-radius: 8px; background: #e4572e; color: #fff; font-size: 11px; font-weight: 800; text-align: center; }
 
 /* ---------- side panel ---------- */
 .panel {

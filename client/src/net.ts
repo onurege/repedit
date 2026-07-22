@@ -13,6 +13,7 @@ import type {
   DeliveryPub,
   TradeRow,
   AwayReport,
+  ContractPub,
 } from '@district/shared';
 
 const SERVER_URL: string =
@@ -30,6 +31,7 @@ export class GameClient {
   online = 0;
   devTools = false;
   trades: TradeRow[] = [];
+  contracts = new Map<number, ContractPub>();
   connected = false;
 
   private ws: WebSocket | null = null;
@@ -114,6 +116,7 @@ export class GameClient {
         this.businesses = new Map(msg.businesses.map((b) => [b.id, b]));
         this.orders = new Map(msg.orders.map((o) => [o.id, o]));
         this.deliveries = new Map(msg.deliveries.map((d) => [d.id, d]));
+        this.contracts = new Map(msg.contracts.map((c) => [c.id, c]));
         this.players = msg.players;
         this.online = msg.online;
         this.devTools = msg.devTools;
@@ -147,6 +150,21 @@ export class GameClient {
         break;
       case 'order_removed':
         this.orders.delete(msg.orderId);
+        this.emit('update');
+        break;
+      case 'contract': {
+        const prev = this.contracts.get(msg.contract.id);
+        const terminal = ['completed', 'rejected', 'cancelled'].includes(msg.contract.status);
+        this.contracts.set(msg.contract.id, msg.contract);
+        this.emit('contract', msg.contract, prev);
+        this.emit('update');
+        if (terminal) {
+          // keep terminal contracts client-side for the History view
+        }
+        break;
+      }
+      case 'contracts':
+        for (const c of msg.contracts) this.contracts.set(c.id, c);
         this.emit('update');
         break;
       case 'delivery':

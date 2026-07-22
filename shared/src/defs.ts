@@ -150,3 +150,38 @@ export const NPC_DELIVERY_SECONDS = 8;   // wholesale -> business (path-based, m
 export const MARKET_MIN_PRICE = 1;
 export const MARKET_MAX_PRICE = 500;
 export const MARKET_MAX_QTY = 10000;
+
+// ---- Supply contracts (Phase 3) ----
+// A business can SUPPLY these tradable products (things it produces),
+// and can CONSUME these as recurring inputs. A contract for `product`
+// is valid iff the seller supplies it and the buyer consumes it.
+export const SELLER_SUPPLIES: Record<BusinessType, ProductId[]> = {
+  farm: ['milk', 'wheat'],
+  bakery: ['bread'],
+  coffee_shop: [],
+  mini_market: [],
+};
+export const BUYER_CONSUMES: Record<BusinessType, ProductId[]> = {
+  coffee_shop: ['milk'],
+  bakery: ['wheat'],
+  mini_market: ['bread', 'milk'],
+  farm: [],
+};
+
+/** Products a buyer business could contract to receive from a seller business. */
+export function contractableProducts(
+  sellerType: BusinessType,
+  buyerType: BusinessType
+): ProductId[] {
+  const supplies = SELLER_SUPPLIES[sellerType] ?? [];
+  const consumes = BUYER_CONSUMES[buyerType] ?? [];
+  return supplies.filter((p) => consumes.includes(p));
+}
+
+export const CONTRACT_MIN_QTY = 1;
+export const CONTRACT_MAX_QTY = 2000;
+export const CONTRACT_MIN_DELIVERIES = 1;
+export const CONTRACT_MAX_DELIVERIES = 30;
+// A "game day" between recurring deliveries, in real seconds.
+export const CONTRACT_FREQUENCY_SECS = 45;
+export const REP_CONTRACT_FULFILLED = 0.03; // small bump for the supplier on success

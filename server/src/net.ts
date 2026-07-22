@@ -109,6 +109,17 @@ export class Net {
     w.on('trade', (trade: any) => {
       this.broadcast({ t: 'trade', trade });
     });
+    w.on('contract', (c: any) => {
+      // Contracts are private to their two parties.
+      const pub = w.toContractPub(c);
+      this.sendToPlayer(c.buyerId, { t: 'contract', contract: pub });
+      this.sendToPlayer(c.sellerId, { t: 'contract', contract: pub });
+      // A successful execution changes both businesses' public tradeCount.
+      const bBiz = w.businesses.get(c.buyerBizId);
+      if (bBiz) this.broadcast({ t: 'biz', biz: w.toBizPub(bBiz) });
+      const sBiz = w.businesses.get(c.sellerBizId);
+      if (sBiz) this.broadcast({ t: 'biz', biz: w.toBizPub(sBiz) });
+    });
     w.on('level_up', ({ playerId, level }: { playerId: number; level: number }) => {
       this.sendToPlayer(playerId, { t: 'level_up', level });
       this.broadcastPlayers();
@@ -146,11 +157,13 @@ export class Net {
         orders: [...this.world.orders.values()].map((o) => this.world.toOrderPub(o)),
         deliveries: [...this.world.deliveries.values()].map((d) => this.world.toDeliveryPub(d)),
         players: [...this.world.players.values()].map((pp) => this.world.toPlayerPub(pp)),
+        contracts: [],
         online: this.world.onlineCount(),
         devTools: config.devTools,
         serverTime: Date.now(),
       });
       this.world.recentTrades().then((trades) => this.send(ws, { t: 'trades', trades }));
+      this.world.contractsForPlayer(playerId).then((contracts) => this.send(ws, { t: 'contracts', contracts }));
       if (awayReport) this.send(ws, { t: 'away', report: awayReport });
       this.broadcastPlayers();
 
@@ -232,6 +245,25 @@ export class Net {
         case 'set_production':
           world.setProduction(pid, msg.product);
           this.pushOwnState(pid);
+          break;
+        case 'contract_propose': {
+          const c = await world.proposeContract(pid, msg.sellerBizId, msg.product, msg.quantity, msg.unitPrice, msg.deliveries);
+          this.send(conn.ws, { t: 'toast', msg: `Contract proposed to ${world.players.get(c.sellerId)?.name ?? 'supplier'}.`, kind: 'success' });
+          break;
+        }
+        case 'contract_accept': {
+          const c = await world.acceptContract(pid, msg.contractId);
+          this.sendToPlayer(c.buyerId, { t: 'toast', msg: 'Your supply contract was accepted!', kind: 'success' });
+          this.send(conn.ws, { t: 'toast', msg: 'Contract active. Deliveries will begin.', kind: 'success' });
+          break;
+        }
+        case 'contract_reject':
+          await world.rejectContract(pid, msg.contractId);
+          this.send(conn.ws, { t: 'toast', msg: 'Contract rejected.', kind: 'info' });
+          break;
+        case 'contract_cancel':
+          await world.cancelContract(pid, msg.contractId);
+          this.send(conn.ws, { t: 'toast', msg: 'Contract cancelled.', kind: 'info' });
           break;
         case 'dev': {
           if (!config.devTools) throw new GameError('Dev tools are disabled.');

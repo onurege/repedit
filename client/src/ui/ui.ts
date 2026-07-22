@@ -2,8 +2,8 @@
 // panels, onboarding objectives, toasts, away report, reconnect overlay.
 import {
   PRODUCTS, NPC_WHOLESALE_PRICES, FARM_LEVELS, SHOP_LEVELS, BAKERY_LEVELS, MARKET_LEVELS,
-  MAX_LEVEL, xpForLevel, MAX_PLAYER_LEVEL,
-  type BizPub, type OrderPub, type AwayReport, type ProductId,
+  MAX_LEVEL, xpForLevel, MAX_PLAYER_LEVEL, contractableProducts,
+  type BizPub, type OrderPub, type AwayReport, type ProductId, type ContractPub,
 } from '@district/shared';
 
 const BIZ_LABEL: Record<string, { icon: string; name: string }> = {
@@ -15,7 +15,7 @@ const BIZ_LABEL: Record<string, { icon: string; name: string }> = {
 import { client } from '../net.js';
 import { sfx, unlockAudio } from '../audio.js';
 
-type PanelKind = 'none' | 'business' | 'market' | 'wholesale' | 'dev' | 'info';
+type PanelKind = 'none' | 'business' | 'market' | 'wholesale' | 'dev' | 'info' | 'contracts';
 
 const fmt = (n: number) => '$' + Math.round(n).toLocaleString('en-US');
 
@@ -26,6 +26,7 @@ export class UI {
   private panelKind: PanelKind = 'none';
   private panelTab = '';
   private infoBizId: number | null = null;
+  private proposeFor: number | null = null;
   private flags: Record<string, boolean> = {};
   private objectivesHidden = false;
 
@@ -44,6 +45,18 @@ export class UI {
     });
     client.on('connection', (ok: boolean) => {
       document.getElementById('reconnect')!.classList.toggle('visible', !ok && !!client.token);
+    });
+    client.on('contract', (c: ContractPub, prev: ContractPub | undefined) => {
+      const me = client.you?.id;
+      // A new proposal arrived for me as supplier.
+      if (c.status === 'proposed' && c.sellerId === me && !prev) {
+        sfx.levelUp();
+        this.toast(`📜 ${c.buyerName} proposes a supply contract: ${c.quantity} × ${PRODUCTS[c.product].name} @ ${fmt(c.unitPrice)}`, 'info');
+      }
+      if (prev && prev.status !== c.status) {
+        if (c.status === 'active' && c.buyerId === me) this.toast('Your supply contract is now active! 🤝', 'success');
+        if (c.status === 'completed') this.toast(`Contract completed: ${c.quantity} × ${PRODUCTS[c.product].name}.`, 'success');
+      }
     });
   }
 
@@ -187,6 +200,7 @@ export class UI {
         <button id="nav-city">🏙️ City</button>
         <button id="nav-biz">🏪 Business</button>
         <button id="nav-market">📦 Market</button>
+        <button id="nav-contracts">📜 Contracts <span id="nav-contracts-badge"></span></button>
         <button id="nav-dev" style="display:none">🛠️ Dev</button>
       </div>
       <div class="panel" id="panel">
@@ -218,6 +232,10 @@ export class UI {
       sfx.click();
       this.openPanel('market');
       this.setFlag('opened_market');
+    });
+    document.getElementById('nav-contracts')!.addEventListener('click', () => {
+      sfx.click();
+      this.openPanel('contracts');
     });
     document.getElementById('nav-dev')!.addEventListener('click', () => {
       sfx.click();
@@ -272,7 +290,18 @@ export class UI {
     document.getElementById('nav-city')!.classList.toggle('active', this.panelKind === 'none');
     document.getElementById('nav-biz')!.classList.toggle('active', this.panelKind === 'business');
     document.getElementById('nav-market')!.classList.toggle('active', this.panelKind === 'market');
+    document.getElementById('nav-contracts')!.classList.toggle('active', this.panelKind === 'contracts');
     document.getElementById('nav-dev')!.classList.toggle('active', this.panelKind === 'dev');
+  }
+
+  private updateContractBadge(): void {
+    const badge = document.getElementById('nav-contracts-badge');
+    if (!badge) return;
+    const incoming = [...client.contracts.values()].filter(
+      (c) => c.status === 'proposed' && c.sellerId === client.you?.id
+    ).length;
+    badge.textContent = incoming ? String(incoming) : '';
+    badge.className = incoming ? 'badge' : '';
   }
 
   // ================= REFRESH =================
@@ -296,6 +325,7 @@ export class UI {
     (document.getElementById('st-rep') as HTMLElement).textContent =
       '★ ' + (biz ? biz.reputation.toFixed(1) : you.reputation.toFixed(1));
     (document.getElementById('st-online') as HTMLElement).textContent = String(client.online);
+    this.updateContractBadge();
     this.renderObjectives();
     if (this.panelKind !== 'none') this.renderPanel();
   }
@@ -341,6 +371,9 @@ export class UI {
         break;
       case 'info':
         this.renderInfoPanel(title, tabs, body);
+        break;
+      case 'contracts':
+        this.renderContractsPanel(title, tabs, body);
         break;
     }
   }
@@ -654,15 +687,150 @@ export class UI {
       this.setBody(body, '<p class="hint">This lot is vacant.</p>');
       return;
     }
-    const isFarm = biz.type === 'farm';
-    title.textContent = `${isFarm ? '🐄' : '☕'} ${biz.ownerName}'s ${isFarm ? 'Farm' : 'Coffee Shop'}`;
+    const meta = BIZ_LABEL[biz.type] ?? BIZ_LABEL.farm;
+    title.textContent = `${meta.icon} ${biz.ownerName}'s ${meta.name}`;
     const online = client.players.find((p) => p.id === biz.ownerId)?.online;
+    const supplies = biz.supplies ?? [];
+    const suppliesTxt = supplies.length
+      ? supplies.map((p) => `${PRODUCTS[p].emoji} ${PRODUCTS[p].name}`).join(', ')
+      : 'Retailer (no supply)';
+
+    // Can MY business form a supply contract to buy from this one?
+    const myBiz = client.myBiz;
+    const canContract =
+      !!myBiz && biz.ownerId !== client.you?.id &&
+      contractableProducts(biz.type, myBiz.type).length > 0;
+    const compatProducts = myBiz ? contractableProducts(biz.type, myBiz.type) : [];
+
+    const proposeOpen = this.proposeFor === biz.id;
+    let proposeBlock = '';
+    if (canContract) {
+      proposeBlock = proposeOpen
+        ? `<div class="mkt-form">
+            <h4>Propose supply contract</h4>
+            <div class="mkt-row">
+              <select id="ct-product">${compatProducts.map((p) => `<option value="${p}">${PRODUCTS[p].emoji} ${PRODUCTS[p].name}</option>`).join('')}</select>
+            </div>
+            <div class="mkt-row">
+              <span style="font-size:12px">Qty</span><input id="ct-qty" type="number" min="1" value="50" style="width:70px" />
+              <span style="font-size:12px">@ $</span><input id="ct-price" type="number" min="1" value="8" style="width:60px" />
+              <span style="font-size:12px">/unit</span>
+            </div>
+            <div class="mkt-row">
+              <span style="font-size:12px">Deliveries</span><input id="ct-deliv" type="number" min="1" max="30" value="5" style="width:60px" />
+              <span class="hint" style="margin:0">one per game day (~45s)</span>
+            </div>
+            <div class="mkt-row">
+              <button class="btn small success" id="ct-send">Send proposal</button>
+              <button class="btn small ghost" id="ct-cancel">Cancel</button>
+            </div>
+          </div>`
+        : `<button class="btn primary" id="ct-open" style="width:100%;margin-top:10px">📜 Propose Supply Contract</button>`;
+    }
+
     this.setBody(body, `
-      <div class="kv"><span class="k">Owner</span><span class="v">${biz.ownerName} ${online ? '🟢' : '⚪'}</span></div>
-      <div class="kv"><span class="k">Type</span><span class="v">${isFarm ? 'Dairy Farm' : 'Coffee Shop'}</span></div>
+      <div class="kv"><span class="k">Company</span><span class="v">${biz.ownerName}'s ${meta.name}</span></div>
+      <div class="kv"><span class="k">Owner</span><span class="v">${biz.ownerName} ${online ? '🟢 online' : '⚪ offline'}</span></div>
+      <div class="kv"><span class="k">Type</span><span class="v">${meta.name}</span></div>
       <div class="kv"><span class="k">Level</span><span class="v">${biz.level} / ${MAX_LEVEL}</span></div>
+      <div class="kv"><span class="k">Reputation</span><span class="v">★ ${(biz.reputation ?? 3).toFixed(2)}</span></div>
+      <div class="kv"><span class="k">Supplies</span><span class="v">${suppliesTxt}</span></div>
+      <div class="kv"><span class="k">Successful trades</span><span class="v">${biz.tradeCount ?? 0}</span></div>
       <div class="kv"><span class="k">Status</span><span class="v">${biz.status || '—'}</span></div>
-      <div class="hint">${isFarm ? 'Farms sell milk on the marketplace — check the Market for their offers.' : 'Coffee shops buy milk — check the Market for their buy orders.'}</div>`);
+      ${proposeBlock}
+      ${!canContract ? `<div class="hint">${myBiz ? 'Your business type cannot form a supply contract with this one.' : 'Choose a business to trade with others.'}</div>` : ''}
+    `, (b) => {
+      b.querySelector('#ct-open')?.addEventListener('click', () => {
+        this.proposeFor = biz.id;
+        this.lastBodyHTML = '';
+        sfx.click();
+        this.renderPanel();
+      });
+      b.querySelector('#ct-cancel')?.addEventListener('click', () => {
+        this.proposeFor = null;
+        this.lastBodyHTML = '';
+        sfx.click();
+        this.renderPanel();
+      });
+      b.querySelector('#ct-send')?.addEventListener('click', () => {
+        const product = (b.querySelector('#ct-product') as HTMLSelectElement).value as ProductId;
+        const quantity = parseInt((b.querySelector('#ct-qty') as HTMLInputElement).value, 10);
+        const unitPrice = parseInt((b.querySelector('#ct-price') as HTMLInputElement).value, 10);
+        const deliveries = parseInt((b.querySelector('#ct-deliv') as HTMLInputElement).value, 10);
+        client.send({ t: 'contract_propose', sellerBizId: biz.id, product, quantity, unitPrice, deliveries });
+        this.proposeFor = null;
+        this.lastBodyHTML = '';
+        sfx.click();
+      });
+    });
+  }
+
+  private contractRow(c: ContractPub, role: 'incoming' | 'outgoing' | 'active' | 'history'): string {
+    const p = PRODUCTS[c.product];
+    const counterparty = c.buyerId === client.you?.id ? c.sellerName : c.buyerName;
+    const dir = c.buyerId === client.you?.id ? `from ${counterparty}` : `to ${counterparty}`;
+    const total = c.quantity * c.unitPrice;
+    let actions = '';
+    if (role === 'incoming') {
+      actions = `<button class="btn small success" data-ct-accept="${c.id}">Accept</button>
+                 <button class="btn small warn" data-ct-reject="${c.id}">Reject</button>`;
+    } else if (role === 'outgoing') {
+      actions = `<span class="who">awaiting supplier</span><button class="btn small ghost" data-ct-cancel="${c.id}">Withdraw</button>`;
+    } else if (role === 'active') {
+      const next = c.nextExecutionAt ? Math.max(0, Math.round((c.nextExecutionAt - Date.now()) / 1000)) : null;
+      actions = `<span class="who">${c.remaining} left${next != null ? ` · next ~${next}s` : ''}</span><button class="btn small ghost" data-ct-cancel="${c.id}">Cancel</button>`;
+    } else {
+      actions = `<span class="who">${c.status.toUpperCase()}</span>`;
+    }
+    const statusNote = c.lastResult && role !== 'incoming' && role !== 'outgoing'
+      ? `<br/><span class="who" style="color:${/MISSED/.test(c.lastResult) ? '#dc2626' : '#16a34a'}">${c.lastResult}</span>` : '';
+    return `<div class="order">
+      <span class="grow">${p.emoji} <b>${c.quantity}</b> ${p.name} @ <b>${fmt(c.unitPrice)}</b> ${dir}<br/>
+        <span class="who">${c.deliveries} deliveries · total ${fmt(total * c.deliveries)}</span>${statusNote}</span>
+      <span style="display:flex;flex-direction:column;gap:4px;align-items:flex-end">${actions}</span>
+    </div>`;
+  }
+
+  private renderContractsPanel(title: HTMLElement, tabs: HTMLElement, body: HTMLElement): void {
+    title.textContent = '📜 Supply Contracts';
+    const tab = this.tabBar(tabs, ['Incoming', 'Outgoing', 'Active', 'History']);
+    const me = client.you?.id;
+    const all = [...client.contracts.values()];
+    let rows = '';
+    let empty = '';
+    if (tab === 'Incoming') {
+      const list = all.filter((c) => c.status === 'proposed' && c.sellerId === me);
+      rows = list.map((c) => this.contractRow(c, 'incoming')).join('');
+      empty = 'No incoming proposals. Others can propose contracts by clicking your business.';
+    } else if (tab === 'Outgoing') {
+      const list = all.filter((c) => c.status === 'proposed' && c.buyerId === me);
+      rows = list.map((c) => this.contractRow(c, 'outgoing')).join('');
+      empty = 'No pending proposals. Click another player\'s business to propose one.';
+    } else if (tab === 'Active') {
+      const list = all.filter((c) => c.status === 'active');
+      rows = list.map((c) => this.contractRow(c, 'active')).join('');
+      empty = 'No active contracts yet.';
+    } else {
+      const list = all
+        .filter((c) => ['completed', 'rejected', 'cancelled'].includes(c.status))
+        .sort((a, b) => b.createdAt - a.createdAt);
+      rows = list.map((c) => this.contractRow(c, 'history')).join('');
+      empty = 'No past contracts.';
+    }
+    this.setBody(body, rows || `<p class="hint">${empty}</p>`, (b) => {
+      b.querySelectorAll('[data-ct-accept]').forEach((el) => el.addEventListener('click', () => {
+        client.send({ t: 'contract_accept', contractId: parseInt((el as HTMLElement).dataset.ctAccept!, 10) });
+        sfx.click();
+      }));
+      b.querySelectorAll('[data-ct-reject]').forEach((el) => el.addEventListener('click', () => {
+        client.send({ t: 'contract_reject', contractId: parseInt((el as HTMLElement).dataset.ctReject!, 10) });
+        sfx.click();
+      }));
+      b.querySelectorAll('[data-ct-cancel]').forEach((el) => el.addEventListener('click', () => {
+        client.send({ t: 'contract_cancel', contractId: parseInt((el as HTMLElement).dataset.ctCancel!, 10) });
+        sfx.click();
+      }));
+    });
   }
 
   private renderDevPanel(title: HTMLElement, tabs: HTMLElement, body: HTMLElement): void {
@@ -672,7 +840,9 @@ export class UI {
       <div class="hint" style="margin-bottom:10px">Development-only helpers (disabled in production builds).</div>
       <div class="mkt-row"><button class="btn small ghost" data-dev="add_money" data-val="5000">+ $5,000</button>
       <button class="btn small ghost" data-dev="add_milk" data-val="100">+ 100 Milk</button>
-      <button class="btn small ghost" data-dev="add_beans" data-val="100">+ 100 Beans</button></div>
+      <button class="btn small ghost" data-dev="add_beans" data-val="100">+ 100 Beans</button>
+      <button class="btn small ghost" data-dev="add_wheat" data-val="100">+ 100 Wheat</button>
+      <button class="btn small ghost" data-dev="add_bread" data-val="100">+ 100 Bread</button></div>
       <div class="mkt-row"><span style="font-size:13px">Game speed:</span>
       <button class="btn small ghost" data-dev="speed" data-val="1">×1</button>
       <button class="btn small ghost" data-dev="speed" data-val="5">×5</button>

@@ -1,4 +1,26 @@
-# PHASE 2 — BUSINESS NETWORK (current)
+# PHASE 3 — PLAYER BUSINESS RELATIONSHIPS (current)
+
+Phases 1, 1.5 and 2 are complete. Phase 3 adds **recurring supply contracts**
+plus a small **public business inspection** panel — reusing the existing
+marketplace economy, delivery system, ledger, persistence and reputation.
+
+A buyer inspects a compatible seller's business and proposes a fixed contract
+(product, quantity, unit price, number of deliveries). The seller ACCEPTs or
+REJECTs. An ACTIVE contract executes server-side once per "game day" (~45s):
+it validates seller stock and buyer funds, moves money and goods exactly once
+(guarded like marketplace fulfillment), creates a normal delivery van, and
+decrements remaining deliveries until COMPLETED. Insufficient stock/funds are
+skipped safely (MISSED — SUPPLIER STOCK / BUYER FUNDS) and rescheduled, never
+moving money or goods. Contracts persist across restarts and execute while
+players are offline. Only fixed contracts — no negotiation, penalties, or
+dynamic pricing.
+
+Compatibility: Bakery↔Farm (wheat), Coffee Shop↔Farm (milk),
+Mini Market↔Farm (milk), Mini Market↔Bakery (bread).
+
+---
+
+# PHASE 2 — BUSINESS NETWORK (complete)
 
 Phase 1 (Playable Economy MVP) and Phase 1.5 (hardening) are complete.
 Phase 2 adds exactly two business types (**Bakery**, **Mini Market**) and two

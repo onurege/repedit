@@ -14,13 +14,12 @@ offline progression, full persistence. **This phase is implemented.**
 - Chain: Farm → Bakery → Mini Market → NPC customers — **implemented**
 - Deferred to later: Restaurant, employees, deeper supply chains
 
-## PHASE 3 — Player Economy
+## PHASE 3 — Player Economy  ✅ (current)
 
-- Supply contracts between players (recurring, reputation-backed)
-- Player-owned logistics companies
-- Dynamic pricing pressure / demand simulation
-- Company profiles and trade analytics
-- Richer marketplace functionality
+- Recurring supply contracts between players — **implemented**
+- Public business inspection / company identity — **implemented**
+- Deferred to later: player-owned logistics, dynamic pricing, trade analytics,
+  contract negotiation/penalties
 
 ## PHASE 4 — Living City
 

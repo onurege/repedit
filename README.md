@@ -90,9 +90,15 @@ Browser E2E (golden path — two players trading through the real UI). Requires
 the dev stack running and Playwright's Chromium (`npx playwright install chromium`):
 
 ```bash
-npm run dev     # in one terminal
-npm run e2e     # in another
+npm run dev            # in one terminal
+npm run e2e            # golden path: Farm ↔ Coffee Shop milk trade
+npm run e2e:chain      # Phase 2: Farm → Bakery → Mini Market chain
+npm run e2e:contract   # Phase 3: recurring supply contract (Farm → Bakery)
 ```
+
+Each E2E creates fresh persistent businesses; the shared city has a limited
+number of lots, so reset the dev database (`TRUNCATE ... RESTART IDENTITY`) and
+restart the server if you run them many times.
 
 All money movements (NPC purchases, coffee sales, market escrow/refunds/trades,
 upgrades) are recorded in the append-only `economic_ledger` table for debugging:

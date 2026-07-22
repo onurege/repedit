@@ -38,6 +38,14 @@ import {
   REP_SALE_GOUGING,
   REP_LOST_CUSTOMER,
   REP_TRADE_FULFILLED,
+  REP_CONTRACT_FULFILLED,
+  SELLER_SUPPLIES,
+  BUYER_CONSUMES,
+  contractableProducts,
+  CONTRACT_MAX_QTY,
+  CONTRACT_MIN_DELIVERIES,
+  CONTRACT_MAX_DELIVERIES,
+  CONTRACT_FREQUENCY_SECS,
   OFFLINE_CAP_SECONDS,
   VAN_SPEED,
   MIN_DELIVERY_SECONDS,
@@ -59,6 +67,7 @@ import {
   type TradeRow,
   type AwayReport,
   type InventoryEntry,
+  type ContractPub,
 } from '@district/shared';
 import { query, tx } from '../db.js';
 
@@ -107,7 +116,26 @@ export interface BizRec {
   custAccum: number;
   status: string;
   inv: Map<ProductId, InvRec>;
+  tradeCount: number; // successful player trades + contract deliveries (public)
   dirty: boolean;
+}
+
+export interface ContractRec {
+  id: number;
+  buyerId: number;
+  sellerId: number;
+  buyerBizId: number;
+  sellerBizId: number;
+  product: ProductId;
+  quantity: number;
+  unitPrice: number;
+  frequencySecs: number;
+  totalDeliveries: number;
+  remaining: number;
+  status: 'proposed' | 'active' | 'completed' | 'rejected' | 'cancelled';
+  lastResult: string | null;
+  nextExecutionAtMs: number | null;
+  createdAtMs: number;
 }
 
 export interface OrderRec {
@@ -200,11 +228,13 @@ export class World extends EventEmitter {
   businesses = new Map<number, BizRec>();
   orders = new Map<number, OrderRec>();
   deliveries = new Map<number, DeliveryRec>();
+  contracts = new Map<number, ContractRec>();
   timeScale = 1;
   private tickTimer: ReturnType<typeof setInterval> | null = null;
   private ticksSinceFlush = 0;
   private tickInProgress = false;
   private fulfillLocks = new Set<number>();
+  private contractLocks = new Set<number>();
   // CUSTOMER_SALE ledger entries accumulate here (simulate() is synchronous)
   // and are persisted in batch by flush().
   private ledgerQueue: LedgerEntry[] = [];
@@ -268,6 +298,7 @@ export class World extends EventEmitter {
         custAccum: accums.cust ?? 0,
         status: '',
         inv: new Map(),
+        tradeCount: 0,
         dirty: false,
       };
       this.businesses.set(biz.id, biz);
@@ -308,6 +339,26 @@ export class World extends EventEmitter {
       });
     }
 
+    // Supply contracts (proposed + active survive restarts).
+    const contracts = await query(
+      "SELECT * FROM contracts WHERE status IN ('proposed','active')"
+    );
+    for (const r of contracts.rows) {
+      this.contracts.set(r.id, this.contractRowToRec(r));
+    }
+    // Seed public trade counts from historical market trades.
+    const counts = await query(
+      `SELECT player_id, sum(n)::int AS total FROM (
+         SELECT buyer_id AS player_id, count(*) AS n FROM trades GROUP BY buyer_id
+         UNION ALL
+         SELECT seller_id AS player_id, count(*) AS n FROM trades GROUP BY seller_id
+       ) x GROUP BY player_id`
+    );
+    for (const r of counts.rows) {
+      const biz = this.bizByOwner(r.player_id);
+      if (biz) biz.tradeCount = r.total;
+    }
+
     // Run capped catch-up simulation for server downtime.
     for (const biz of this.businesses.values()) {
       const secs = (biz as any).__catchup as number;
@@ -318,11 +369,39 @@ export class World extends EventEmitter {
     for (const d of [...this.deliveries.values()]) {
       if (d.arriveAtMs <= now) await this.completeDelivery(d);
     }
+    // Execute any contracts that came due while the server was down.
+    for (const c of [...this.contracts.values()]) {
+      if (c.status === 'active' && c.nextExecutionAtMs != null && c.nextExecutionAtMs <= now) {
+        await this.executeContract(c.id);
+      }
+    }
+
     await this.flush();
     console.log(
       `[world] loaded ${this.players.size} players, ${this.businesses.size} businesses, ` +
-        `${this.orders.size} open orders, ${this.deliveries.size} deliveries in transit`
+        `${this.orders.size} open orders, ${this.deliveries.size} deliveries in transit, ` +
+        `${this.contracts.size} contracts`
     );
+  }
+
+  private contractRowToRec(r: any): ContractRec {
+    return {
+      id: r.id,
+      buyerId: r.buyer_player_id,
+      sellerId: r.seller_player_id,
+      buyerBizId: r.buyer_business_id,
+      sellerBizId: r.seller_business_id,
+      product: r.product,
+      quantity: r.quantity,
+      unitPrice: r.unit_price,
+      frequencySecs: r.frequency_secs,
+      totalDeliveries: r.total_deliveries,
+      remaining: r.remaining_deliveries,
+      status: r.status,
+      lastResult: r.last_result ?? null,
+      nextExecutionAtMs: r.next_execution_at ? new Date(r.next_execution_at).getTime() : null,
+      createdAtMs: new Date(r.created_at).getTime(),
+    };
   }
 
   async flush(): Promise<void> {
@@ -425,6 +504,11 @@ export class World extends EventEmitter {
     for (const d of [...this.deliveries.values()]) {
       if (d.status === 'in_transit' && d.arriveAtMs <= now) {
         await this.completeDelivery(d);
+      }
+    }
+    for (const c of [...this.contracts.values()]) {
+      if (c.status === 'active' && c.nextExecutionAtMs != null && c.nextExecutionAtMs <= now) {
+        await this.executeContract(c.id);
       }
     }
     this.ticksSinceFlush++;
@@ -716,6 +800,7 @@ export class World extends EventEmitter {
       custAccum: 0,
       status: type === 'farm' ? 'PRODUCING' : 'OUT OF STOCK',
       inv: new Map(),
+      tradeCount: 0,
       dirty: false,
     };
     const products: ProductId[] = STARTING_PRODUCTS[type];
@@ -1018,6 +1103,8 @@ export class World extends EventEmitter {
     sellerBiz.dirty = buyerBiz.dirty = true;
     buyerBiz.expenses += amount;
     sellerBiz.revenue += amount;
+    sellerBiz.tradeCount += 1;
+    buyerBiz.tradeCount += 1;
     if (sellerBiz.type === 'farm') {
       sellerBiz.reputation = Math.min(REP_MAX, sellerBiz.reputation + REP_TRADE_FULFILLED);
     }
@@ -1095,6 +1182,8 @@ export class World extends EventEmitter {
       order.status = 'open';
       buyerBiz.expenses -= amount;
       sellerBiz.revenue -= amount;
+      sellerBiz.tradeCount -= 1;
+      buyerBiz.tradeCount -= 1;
       if (order.side === 'buy') {
         inv(sellerBiz, order.product).qty += qty;
         seller.cash -= amount;
@@ -1148,6 +1237,305 @@ export class World extends EventEmitter {
       biz.expenses -= cost;
       throw err;
     }
+  }
+
+  // ---------------- supply contracts (Phase 3) ----------------
+
+  private requireContract(id: number): ContractRec {
+    const c = this.contracts.get(id);
+    if (!c) throw new GameError('Contract not found.');
+    return c;
+  }
+
+  /** A buyer proposes a recurring supply contract to a seller's business. */
+  async proposeContract(
+    buyerId: number,
+    sellerBizId: number,
+    product: ProductId,
+    quantity: number,
+    unitPrice: number,
+    deliveries: number
+  ): Promise<ContractRec> {
+    const buyerBiz = this.requireBiz(buyerId);
+    const sellerBiz = this.businesses.get(sellerBizId);
+    if (!sellerBiz) throw new GameError('That business no longer exists.');
+    if (sellerBiz.ownerId === buyerId) throw new GameError('You cannot contract with yourself.');
+    quantity = Math.floor(quantity);
+    unitPrice = Math.floor(unitPrice);
+    deliveries = Math.floor(deliveries);
+    if (!contractableProducts(sellerBiz.type, buyerBiz.type).includes(product)) {
+      throw new GameError('That business cannot supply this product to yours.');
+    }
+    if (!Number.isFinite(quantity) || quantity < 1 || quantity > CONTRACT_MAX_QTY) {
+      throw new GameError(`Quantity must be 1-${CONTRACT_MAX_QTY}.`);
+    }
+    if (!Number.isFinite(unitPrice) || unitPrice < MARKET_MIN_PRICE || unitPrice > MARKET_MAX_PRICE) {
+      throw new GameError(`Unit price must be $${MARKET_MIN_PRICE}-$${MARKET_MAX_PRICE}.`);
+    }
+    if (!Number.isFinite(deliveries) || deliveries < CONTRACT_MIN_DELIVERIES || deliveries > CONTRACT_MAX_DELIVERIES) {
+      throw new GameError(`Deliveries must be ${CONTRACT_MIN_DELIVERIES}-${CONTRACT_MAX_DELIVERIES}.`);
+    }
+    if (capacityFor(buyerBiz, product) <= 0) throw new GameError('Your business cannot store that product.');
+
+    const res = await query(
+      `INSERT INTO contracts
+         (buyer_player_id, seller_player_id, buyer_business_id, seller_business_id,
+          product, quantity, unit_price, frequency_secs, total_deliveries, remaining_deliveries, status)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$9,'proposed') RETURNING id, created_at`,
+      [buyerId, sellerBiz.ownerId, buyerBiz.id, sellerBiz.id, product, quantity, unitPrice, CONTRACT_FREQUENCY_SECS, deliveries]
+    );
+    const c: ContractRec = {
+      id: res.rows[0].id,
+      buyerId,
+      sellerId: sellerBiz.ownerId,
+      buyerBizId: buyerBiz.id,
+      sellerBizId: sellerBiz.id,
+      product,
+      quantity,
+      unitPrice,
+      frequencySecs: CONTRACT_FREQUENCY_SECS,
+      totalDeliveries: deliveries,
+      remaining: deliveries,
+      status: 'proposed',
+      lastResult: null,
+      nextExecutionAtMs: null,
+      createdAtMs: new Date(res.rows[0].created_at).getTime(),
+    };
+    this.contracts.set(c.id, c);
+    console.log(`[econ] CONTRACT_PROPOSED id=${c.id} ${quantity}x${product} @$${unitPrice} buyer=${buyerId} seller=${c.sellerId}`);
+    this.emit('contract', c);
+    return c;
+  }
+
+  async acceptContract(playerId: number, contractId: number): Promise<ContractRec> {
+    const c = this.requireContract(contractId);
+    if (c.sellerId !== playerId) throw new GameError('Only the supplier can accept this contract.');
+    if (c.status !== 'proposed') throw new GameError('Contract is no longer pending.');
+    c.status = 'active';
+    c.nextExecutionAtMs = Date.now(); // first delivery attempts almost immediately
+    await query(
+      "UPDATE contracts SET status='active', next_execution_at=to_timestamp($2/1000.0) WHERE id=$1 AND status='proposed'",
+      [c.id, c.nextExecutionAtMs]
+    );
+    console.log(`[econ] CONTRACT_ACCEPTED id=${c.id}`);
+    this.emit('contract', c);
+    return c;
+  }
+
+  async rejectContract(playerId: number, contractId: number): Promise<ContractRec> {
+    const c = this.requireContract(contractId);
+    if (c.sellerId !== playerId) throw new GameError('Only the supplier can reject this contract.');
+    if (c.status !== 'proposed') throw new GameError('Contract is no longer pending.');
+    c.status = 'rejected';
+    await query("UPDATE contracts SET status='rejected' WHERE id=$1 AND status='proposed'", [c.id]);
+    this.emit('contract', c);
+    this.contracts.delete(c.id); // terminal: drop from live memory (history stays in DB)
+    return c;
+  }
+
+  async cancelContract(playerId: number, contractId: number): Promise<ContractRec> {
+    const c = this.requireContract(contractId);
+    if (c.buyerId !== playerId && c.sellerId !== playerId) throw new GameError('Not your contract.');
+    if (c.status !== 'active' && c.status !== 'proposed') throw new GameError('Contract cannot be cancelled.');
+    c.status = 'cancelled';
+    c.nextExecutionAtMs = null;
+    await query("UPDATE contracts SET status='cancelled', next_execution_at=NULL WHERE id=$1", [c.id]);
+    console.log(`[econ] CONTRACT_CANCELLED id=${c.id} by=${playerId}`);
+    this.emit('contract', c);
+    this.contracts.delete(c.id);
+    return c;
+  }
+
+  /**
+   * Execute one scheduled delivery of an active contract. Exactly-once:
+   * an in-memory lock plus a DB guard on (status, remaining) prevent any
+   * double payment / inventory removal / delivery / ledger entry.
+   * On insufficient seller stock or buyer funds the execution is skipped
+   * (recorded, rescheduled) without moving money or goods.
+   */
+  async executeContract(contractId: number): Promise<'delivered' | 'missed_stock' | 'missed_funds' | 'skipped'> {
+    if (this.contractLocks.has(contractId)) return 'skipped';
+    const c = this.contracts.get(contractId);
+    if (!c || c.status !== 'active') return 'skipped';
+    const seller = this.players.get(c.sellerId);
+    const buyer = this.players.get(c.buyerId);
+    const sellerBiz = this.businesses.get(c.sellerBizId);
+    const buyerBiz = this.businesses.get(c.buyerBizId);
+    if (!seller || !buyer || !sellerBiz || !buyerBiz) {
+      // A party disappeared (e.g. business reset): cancel the contract.
+      c.status = 'cancelled';
+      c.nextExecutionAtMs = null;
+      await query("UPDATE contracts SET status='cancelled', next_execution_at=NULL WHERE id=$1", [c.id]);
+      this.emit('contract', c);
+      this.contracts.delete(c.id);
+      return 'skipped';
+    }
+    const amount = c.quantity * c.unitPrice;
+    const sellerStock = inv(sellerBiz, c.product);
+    const nextAt = Date.now() + c.frequencySecs * 1000;
+
+    // --- Skip cases: never move money or goods. ---
+    if (sellerStock.qty < c.quantity) {
+      return this.recordContractMiss(c, 'MISSED — SUPPLIER STOCK', nextAt);
+    }
+    if (buyer.cash < amount) {
+      return this.recordContractMiss(c, 'MISSED — BUYER FUNDS', nextAt);
+    }
+
+    // --- Success path (mirrors marketplace fulfillment discipline). ---
+    this.contractLocks.add(contractId);
+    const prevRemaining = c.remaining;
+    const wasResult = c.lastResult;
+    try {
+      // Mutate memory synchronously.
+      sellerStock.qty -= c.quantity;
+      seller.cash += amount;
+      buyer.cash -= amount;
+      seller.dirty = buyer.dirty = true;
+      sellerBiz.revenue += amount;
+      buyerBiz.expenses += amount;
+      sellerBiz.tradeCount += 1;
+      buyerBiz.tradeCount += 1;
+      sellerBiz.reputation = Math.min(REP_MAX, sellerBiz.reputation + REP_CONTRACT_FULFILLED);
+      sellerBiz.dirty = buyerBiz.dirty = true;
+      this.addXp(seller, XP.perTrade);
+      this.addXp(buyer, XP.perTrade);
+      c.remaining -= 1;
+      c.status = c.remaining <= 0 ? 'completed' : 'active';
+      c.nextExecutionAtMs = c.remaining <= 0 ? null : nextAt;
+      c.lastResult = c.remaining <= 0 ? 'COMPLETED' : 'DELIVERED';
+
+      const delivery = await this.createDelivery(c.product, c.quantity, sellerBiz.lotId, buyerBiz);
+      await tx(async (cl) => {
+        const upd = await cl.query(
+          `UPDATE contracts SET remaining_deliveries=$1, status=$2, last_result=$3,
+             next_execution_at=$4 WHERE id=$5 AND status='active' AND remaining_deliveries=$6 RETURNING id`,
+          [
+            c.remaining,
+            c.status,
+            c.lastResult,
+            c.nextExecutionAtMs ? new Date(c.nextExecutionAtMs) : null,
+            c.id,
+            prevRemaining,
+          ]
+        );
+        if (!upd.rowCount) throw new GameError('Contract state changed, aborting execution.');
+        await cl.query('UPDATE players SET cash=$1, xp=$2, level=$3 WHERE id=$4', [seller.cash, seller.xp, seller.level, seller.id]);
+        await cl.query('UPDATE players SET cash=$1, xp=$2, level=$3 WHERE id=$4', [buyer.cash, buyer.xp, buyer.level, buyer.id]);
+        await cl.query(
+          `INSERT INTO inventories (business_id, product, qty, reserved) VALUES ($1,$2,$3,$4)
+           ON CONFLICT (business_id, product) DO UPDATE SET qty=$3, reserved=$4`,
+          [sellerBiz.id, c.product, sellerStock.qty, sellerStock.reserved]
+        );
+        await cl.query('UPDATE businesses SET revenue=$1, reputation=$2 WHERE id=$3', [sellerBiz.revenue, sellerBiz.reputation, sellerBiz.id]);
+        await cl.query('UPDATE businesses SET expenses=$1 WHERE id=$2', [buyerBiz.expenses, buyerBiz.id]);
+        await cl.query(LEDGER_SQL, ledgerParams({
+          playerId: seller.id, businessId: sellerBiz.id, type: 'CONTRACT_SELL', amount,
+          refType: 'contract', refId: c.id, before: seller.cash - amount, after: seller.cash,
+        }));
+        await cl.query(LEDGER_SQL, ledgerParams({
+          playerId: buyer.id, businessId: buyerBiz.id, type: 'CONTRACT_BUY', amount: -amount,
+          refType: 'contract', refId: c.id, before: buyer.cash + amount, after: buyer.cash,
+        }));
+      });
+
+      console.log(`[econ] CONTRACT_EXEC id=${c.id} ${c.quantity}x${c.product} @$${c.unitPrice} remaining=${c.remaining} delivery=${delivery.id}`);
+      this.emit('delivery', delivery);
+      this.emit('contract', c);
+      if (c.status === 'completed') this.contracts.delete(c.id);
+      return 'delivered';
+    } catch (err) {
+      // Revert in-memory mutation on persistence failure.
+      sellerStock.qty += c.quantity;
+      seller.cash -= amount;
+      buyer.cash += amount;
+      sellerBiz.revenue -= amount;
+      buyerBiz.expenses -= amount;
+      sellerBiz.tradeCount -= 1;
+      buyerBiz.tradeCount -= 1;
+      c.remaining = prevRemaining;
+      c.status = 'active';
+      c.lastResult = wasResult;
+      c.nextExecutionAtMs = nextAt;
+      throw err;
+    } finally {
+      this.contractLocks.delete(contractId);
+    }
+  }
+
+  private async recordContractMiss(
+    c: ContractRec,
+    reason: string,
+    nextAt: number
+  ): Promise<'missed_stock' | 'missed_funds'> {
+    c.lastResult = reason;
+    c.nextExecutionAtMs = nextAt;
+    await query(
+      "UPDATE contracts SET last_result=$1, next_execution_at=to_timestamp($2/1000.0) WHERE id=$3 AND status='active'",
+      [reason, nextAt, c.id]
+    );
+    console.log(`[econ] CONTRACT_MISS id=${c.id} ${reason}`);
+    this.emit('contract', c);
+    return reason.includes('STOCK') ? 'missed_stock' : 'missed_funds';
+  }
+
+  toContractPub(c: ContractRec): ContractPub {
+    const buyer = this.players.get(c.buyerId);
+    const seller = this.players.get(c.sellerId);
+    const buyerBiz = this.businesses.get(c.buyerBizId);
+    const sellerBiz = this.businesses.get(c.sellerBizId);
+    return {
+      id: c.id,
+      buyerId: c.buyerId,
+      sellerId: c.sellerId,
+      buyerName: buyer?.name ?? '???',
+      sellerName: seller?.name ?? '???',
+      buyerType: (buyerBiz?.type ?? 'farm') as any,
+      sellerType: (sellerBiz?.type ?? 'farm') as any,
+      product: c.product,
+      quantity: c.quantity,
+      unitPrice: c.unitPrice,
+      deliveries: c.totalDeliveries,
+      remaining: c.remaining,
+      status: c.status,
+      lastResult: c.lastResult,
+      nextExecutionAt: c.nextExecutionAtMs,
+      createdAt: c.createdAtMs,
+    };
+  }
+
+  /** All contracts (any status, incl. history) involving a player. */
+  async contractsForPlayer(playerId: number, limit = 40): Promise<ContractPub[]> {
+    const res = await query(
+      `SELECT c.*, bp.username AS buyer_name, sp.username AS seller_name,
+              bb.type AS buyer_type, sb.type AS seller_type
+       FROM contracts c
+       JOIN players bp ON bp.id = c.buyer_player_id
+       JOIN players sp ON sp.id = c.seller_player_id
+       JOIN businesses bb ON bb.id = c.buyer_business_id
+       JOIN businesses sb ON sb.id = c.seller_business_id
+       WHERE c.buyer_player_id=$1 OR c.seller_player_id=$1
+       ORDER BY c.created_at DESC LIMIT $2`,
+      [playerId, limit]
+    );
+    return res.rows.map((r) => ({
+      id: r.id,
+      buyerId: r.buyer_player_id,
+      sellerId: r.seller_player_id,
+      buyerName: r.buyer_name,
+      sellerName: r.seller_name,
+      buyerType: r.buyer_type,
+      sellerType: r.seller_type,
+      product: r.product,
+      quantity: r.quantity,
+      unitPrice: r.unit_price,
+      deliveries: r.total_deliveries,
+      remaining: r.remaining_deliveries,
+      status: r.status,
+      lastResult: r.last_result ?? null,
+      nextExecutionAt: r.next_execution_at ? new Date(r.next_execution_at).getTime() : null,
+      createdAt: new Date(r.created_at).getTime(),
+    }));
   }
 
   setPrice(playerId: number, price: number, product?: ProductId): void {
@@ -1250,6 +1638,9 @@ export class World extends EventEmitter {
       lotId: b.lotId,
       level: b.level,
       status: b.status,
+      reputation: Math.round(b.reputation * 100) / 100,
+      supplies: SELLER_SUPPLIES[b.type] ?? [],
+      tradeCount: b.tradeCount,
     };
   }
 
