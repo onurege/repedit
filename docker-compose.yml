@@ -1,0 +1,50 @@
+version: "3.9"
+
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: district
+      POSTGRES_PASSWORD: district
+      POSTGRES_DB: business_district
+    ports:
+      - "5432:5432"
+    volumes:
+      - dbdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U district -d business_district"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  server:
+    image: node:22-alpine
+    working_dir: /app
+    volumes:
+      - .:/app
+    command: sh -c "npm ci && npm run migrate && npm run seed && npm run dev:server"
+    environment:
+      DATABASE_URL: postgres://district:district@db:5432/business_district
+      PORT: "2567"
+      DEV_TOOLS: "1"
+    ports:
+      - "2567:2567"
+    depends_on:
+      db:
+        condition: service_healthy
+
+  client:
+    image: node:22-alpine
+    working_dir: /app
+    volumes:
+      - .:/app
+    command: sh -c "npm ci && npm run dev:client -- --host"
+    environment:
+      VITE_SERVER_URL: http://localhost:2567
+    ports:
+      - "5173:5173"
+    depends_on:
+      - server
+
+volumes:
+  dbdata:

@@ -1,0 +1,20 @@
+{
+  "name": "@district/client",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc --noEmit && vite build",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "@district/shared": "*",
+    "three": "^0.167.0"
+  },
+  "devDependencies": {
+    "@types/three": "^0.167.0",
+    "typescript": "^5.5.4",
+    "vite": "^5.4.0"
+  }
+}
