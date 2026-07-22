@@ -1,0 +1,19 @@
+# BUSINESS DISTRICT — reverse proxy for a single small VPS.
+#
+# Replace play.example.com with your domain. Caddy obtains and renews a TLS
+# certificate automatically. It serves the built client (client/dist) and
+# proxies the API + WebSocket to the Node server, so the browser talks to a
+# single HTTPS origin (the client resolves /api and /ws against its own origin).
+
+play.example.com {
+	encode gzip zstd
+
+	# API + WebSocket -> Node game server
+	@api path /api/* /ws
+	reverse_proxy @api server:2567
+
+	# Static client (single-page app)
+	root * /srv/client
+	file_server
+	try_files {path} /index.html
+}

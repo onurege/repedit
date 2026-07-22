@@ -22,28 +22,97 @@ export interface Selectable {
   bizId?: number;
 }
 
+const _tmpVec = new THREE.Vector3();
+
 export class City {
   root = new THREE.Group();
   private lotMeshes = new Map<string, THREE.Group>();
   private lotState = new Map<string, string>(); // lotId -> render key
+  private labels: THREE.Sprite[] = [];
+  private selectionRing: THREE.Mesh;
+  private selectedLot: string | null = null;
   selectables: THREE.Object3D[] = [];
 
   constructor(private scene: THREE.Scene) {
     scene.add(this.root);
     this.buildStatic();
+
+    // Reusable ground ring that highlights the currently selected/focused lot.
+    const ringGeo = new THREE.RingGeometry(6.2, 7.0, 40);
+    const ringMat = new THREE.MeshBasicMaterial({
+      color: 0xffd166,
+      transparent: true,
+      opacity: 0,
+      depthWrite: false,
+      side: THREE.DoubleSide,
+    });
+    this.selectionRing = new THREE.Mesh(ringGeo, ringMat);
+    this.selectionRing.rotation.x = -Math.PI / 2;
+    this.selectionRing.position.y = 0.08;
+    this.selectionRing.visible = false;
+    this.selectionRing.renderOrder = 5;
+    this.root.add(this.selectionRing);
+
     // vacant lots + wholesale initial
     this.syncBusinesses([]);
   }
 
+  highlightLot(lotId: string | null): void {
+    this.selectedLot = lotId;
+    if (lotId) {
+      const p = this.lotWorldPos(lotId);
+      this.selectionRing.position.set(p.x, 0.08, p.z);
+      this.selectionRing.visible = true;
+    } else {
+      this.selectionRing.visible = false;
+    }
+  }
+
+  /** Per-frame: pulse the selection ring and fade/scale labels by distance. */
+  update(dt: number, cameraPos: THREE.Vector3): void {
+    if (this.selectionRing.visible) {
+      const t = performance.now() / 1000;
+      const mat = this.selectionRing.material as THREE.MeshBasicMaterial;
+      mat.opacity = 0.55 + 0.35 * Math.sin(t * 3.5);
+      const s = 1 + 0.04 * Math.sin(t * 3.5);
+      this.selectionRing.scale.set(s, s, s);
+    }
+    // Distance-based label presentation: readable up close, gently fading
+    // and shrinking with distance so a zoomed-out city stays clean.
+    for (const spr of this.labels) {
+      const base = spr.userData.bdLabel as { baseX: number; baseY: number };
+      const d = spr.getWorldPosition(_tmpVec).distanceTo(cameraPos);
+      const m = spr.material as THREE.SpriteMaterial;
+      let opacity: number;
+      if (d < 55) opacity = 1;
+      else if (d > 140) opacity = 0;
+      else opacity = 1 - (d - 55) / 85;
+      m.opacity = opacity;
+      spr.visible = opacity > 0.02;
+      // grow slightly with distance so labels don't shrink to nothing
+      const scale = 1 + Math.min(0.5, Math.max(0, (d - 45) / 120));
+      spr.scale.set(base.baseX * scale, base.baseY * scale, 1);
+    }
+  }
+
   private buildStatic(): void {
-    // Ground
-    const ground = new THREE.Mesh(
-      new THREE.PlaneGeometry(CITY_EXTENT * 2, CITY_EXTENT * 2),
-      mat(0x8cc860)
-    );
+    // Large ground plane — extends far past the city so its edge is lost in
+    // fog rather than reading as an "end of the world" line.
+    const ground = new THREE.Mesh(new THREE.PlaneGeometry(600, 600), mat(0x84c25b));
     ground.rotation.x = -Math.PI / 2;
+    ground.position.y = -0.02;
     ground.receiveShadow = true;
     this.root.add(ground);
+
+    // A slightly brighter turf pad under the built-up area gives the district
+    // a defined footprint against the surrounding countryside.
+    const turf = new THREE.Mesh(
+      new THREE.PlaneGeometry(CITY_EXTENT * 2 + 20, CITY_EXTENT * 2 + 20),
+      mat(0x8fca63)
+    );
+    turf.rotation.x = -Math.PI / 2;
+    turf.receiveShadow = true;
+    this.root.add(turf);
 
     // Roads
     const roadMat = mat(0x4d4f5c);
@@ -80,9 +149,10 @@ export class City {
 
     // NPC houses in the inner blocks (positions avoid lots)
     // (several former house spots now host bakery / mini market lots)
+    // Houses fill the empty outer-diagonal gaps and never sit in front of a
+    // business lot (which would hide the building the player came to see).
     const housePositions: [number, number, number][] = [
-      [-21, -30, 2], [-30, -21, 3],
-      [21, 30, 5], [30, 21, 6],
+      [-42, -42, 2], [-42, 42, 3], [42, 42, 5], [42, -42, 6],
       [-9, -30, 11], [9, 30, 12], [-30, 9, 13], [30, -9, 14],
     ];
     for (const [x, z, seed] of housePositions) {
@@ -101,6 +171,16 @@ export class City {
       }
     }
     treeSpots.push([-50, -50], [50, 50], [-52, 40], [52, -40], [-64, 5], [64, -5], [5, -64], [-5, 64]);
+    // Countryside tree belts rings the district and dissolves into the fog,
+    // so the surrounding land reads as forest rather than empty plane.
+    for (let ring = 90; ring <= 140; ring += 16) {
+      const count = Math.floor(ring / 7);
+      for (let i = 0; i < count; i++) {
+        const a = (i / count) * Math.PI * 2 + ring * 0.13;
+        const jitter = ((i * 53) % 17) - 8;
+        treeSpots.push([Math.cos(a) * (ring + jitter), Math.sin(a) * (ring + jitter)]);
+      }
+    }
     let seed = 1;
     for (const [x, z] of treeSpots) {
       // skip spots that collide with lots
@@ -110,6 +190,7 @@ export class City {
           ROAD_LINES.some((L) => Math.abs(z - L) < ROAD_HALF_WIDTH + 0.8)) continue;
       const t = makeTree(seed++ * 971);
       t.position.set(x, 0, z);
+      if (Math.hypot(x, z) > 85) t.scale.multiplyScalar(1.2 + (seed % 5) * 0.15); // bigger, varied countryside trees
       this.root.add(t);
     }
 
@@ -160,6 +241,11 @@ export class City {
       if (old) {
         this.root.remove(old);
         this.selectables = this.selectables.filter((o) => (o.userData.sel as Selectable)?.lotId !== lot.id);
+        old.traverse((o) => {
+          if ((o as THREE.Sprite).userData?.bdLabel) {
+            this.labels = this.labels.filter((l) => l !== o);
+          }
+        });
       }
       let group: THREE.Group;
       let sel: Selectable;
@@ -182,7 +268,10 @@ export class City {
       group.position.set(lot.x, 0, lot.z);
       group.rotation.y = lot.rotY;
       group.userData.sel = sel;
-      group.traverse((o) => (o.userData.sel = sel));
+      group.traverse((o) => {
+        o.userData.sel = sel;
+        if ((o as THREE.Sprite).userData?.bdLabel) this.labels.push(o as THREE.Sprite);
+      });
       this.root.add(group);
       this.lotMeshes.set(lot.id, group);
       this.selectables.push(group);

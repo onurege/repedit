@@ -16,8 +16,16 @@ import type {
   ContractPub,
 } from '@district/shared';
 
+// Server URL resolution:
+//  - explicit VITE_SERVER_URL always wins (set it at build time to point at a
+//    separate API host);
+//  - otherwise in dev the API runs on :2567 alongside the Vite dev server;
+//  - otherwise (production build, no override) use the page's own origin, so a
+//    reverse proxy (e.g. Caddy) can serve the client and proxy /api + /ws.
+const env = (import.meta as any).env ?? {};
 const SERVER_URL: string =
-  (import.meta as any).env?.VITE_SERVER_URL || 'http://localhost:2567';
+  env.VITE_SERVER_URL ||
+  (env.DEV ? 'http://localhost:2567' : (typeof location !== 'undefined' ? location.origin : 'http://localhost:2567'));
 
 type Handler = (...args: any[]) => void;
 
@@ -172,11 +180,19 @@ export class GameClient {
         this.emit('delivery', msg.delivery);
         this.emit('update');
         break;
-      case 'delivery_done':
+      case 'delivery_done': {
+        const d = this.deliveries.get(msg.deliveryId);
         this.deliveries.delete(msg.deliveryId);
-        this.emit('delivery_done', msg.deliveryId);
+        const toBiz = d ? [...this.businesses.values()].find((b) => b.lotId === d.toLot) : undefined;
+        this.emit('delivery_done', {
+          id: msg.deliveryId,
+          product: d?.product,
+          qty: d?.qty,
+          toBizId: toBiz?.id,
+        });
         this.emit('update');
         break;
+      }
       case 'sale':
         this.emit('sale', msg);
         break;

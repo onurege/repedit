@@ -58,8 +58,12 @@ button { font-family: inherit; }
 }
 .choice:hover { border-color: #1d4ed8; transform: translateY(-3px); }
 .choice .icon { font-size: 44px; }
-.choice h3 { margin: 8px 0 6px; font-size: 17px; }
-.choice p { font-size: 12.5px; color: #64748b; line-height: 1.45; }
+.choice h3 { margin: 8px 0 4px; font-size: 17px; }
+.choice p { font-size: 12.5px; color: #64748b; line-height: 1.45; margin-top: 6px; }
+.role-tag { display: inline-block; font-size: 10px; font-weight: 800; letter-spacing: 0.4px; text-transform: uppercase; padding: 3px 8px; border-radius: 999px; }
+.role-tag.producer { background: #dcfce7; color: #15803d; }
+.role-tag.processor { background: #dbeafe; color: #1d4ed8; }
+.role-tag.retailer { background: #fef3c7; color: #b45309; }
 
 /* ---------- HUD ---------- */
 #hud { position: fixed; inset: 0; pointer-events: none; z-index: 10; display: none; }

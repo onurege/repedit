@@ -11,7 +11,9 @@ export function createScene(container: HTMLElement) {
 
   const scene = new THREE.Scene();
   scene.background = new THREE.Color(0xbfe4f5);
-  scene.fog = new THREE.Fog(0xbfe4f5, 160, 300);
+  // Fog blends the ground into the sky colour so the map edge is never a
+  // hard "end of the world" line at any comfortable camera distance.
+  scene.fog = new THREE.Fog(0xbfe4f5, 120, 250);
 
   const camera = new THREE.PerspectiveCamera(
     45,

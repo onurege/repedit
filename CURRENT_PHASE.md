@@ -1,4 +1,29 @@
-# PHASE 3 — PLAYER BUSINESS RELATIONSHIPS (current)
+# RELEASE CANDIDATE (current)
+
+All gameplay phases (1, 1.5, 2, 3) are complete and the game has had a
+visual-polish & game-feel pass to make it read as a finished browser tycoon
+rather than a prototype:
+
+- **Visuals**: distance-based building labels (raised above roofs, fade when
+  zoomed out); sale popups repositioned so they no longer collide with labels;
+  enlarged ground + tuned fog so there is no visible "map edge"; NPC houses
+  moved off business lots; countryside tree belt ringing the district; subtle
+  vacant-lot signs; a pulsing ground ring highlights the selected/focused lot.
+- **Entry / feel**: instant loading screen (title + progress) before the city
+  renders; business-selection cards tagged Producer / Processor + Retailer /
+  Retailer; delivery-arrival and level-up popups; throttled, tidy sale feedback.
+- **Production readiness**: `NODE_ENV=production` disables all dev tools
+  (verified inaccessible); health endpoint checks DB reachability; configurable
+  CORS; same-origin client URL resolution; `docker-compose.prod.yml` + Caddy
+  reverse-proxy config; `DEPLOYMENT.md` with backup procedure.
+
+No new gameplay systems were added in this phase. All 49 unit tests and the
+three browser E2Es (golden-path, supply-chain, contract) pass; production build
+succeeds. Ready for deployment to a small VPS.
+
+---
+
+# PHASE 3 — PLAYER BUSINESS RELATIONSHIPS
 
 Phases 1, 1.5 and 2 are complete. Phase 3 adds **recurring supply contracts**
 plus a small **public business inspection** panel — reusing the existing

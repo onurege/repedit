@@ -1,20 +1,32 @@
 import http from 'node:http';
 import express from 'express';
 import cors from 'cors';
-import { config } from './config.js';
-import { migrate } from './db.js';
+import { config, warnInsecureDefaults } from './config.js';
+import { migrate, query } from './db.js';
 import { registerAuthRoutes } from './auth.js';
 import { World } from './game/world.js';
 import { Net } from './net.js';
 
 async function main() {
+  warnInsecureDefaults();
   await migrate();
 
   const app = express();
-  app.use(cors());
+  app.disable('x-powered-by');
+  app.use(cors(config.corsOrigins.length ? { origin: config.corsOrigins } : undefined));
   app.use(express.json());
   registerAuthRoutes(app);
-  app.get('/api/health', (_req, res) => res.json({ ok: true }));
+
+  // Lightweight health check for deployment monitoring: reports whether the
+  // server is up and the database is reachable. Exposes no sensitive data.
+  app.get('/api/health', async (_req, res) => {
+    try {
+      await query('SELECT 1');
+      res.json({ ok: true, db: true });
+    } catch {
+      res.status(503).json({ ok: false, db: false });
+    }
+  });
 
   const world = new World();
   await world.load();

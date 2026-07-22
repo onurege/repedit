@@ -31,6 +31,7 @@ export class UI {
   private objectivesHidden = false;
 
   onFocusLot: ((lotId: string) => void) | null = null;
+  onCloseCity: (() => void) | null = null;
 
   constructor() {
     this.root = document.getElementById('app')!;
@@ -146,21 +147,25 @@ export class UI {
           <div class="choice" data-type="farm" style="flex-basis:44%">
             <div class="icon">🐄</div>
             <h3>Farm</h3>
+            <span class="role-tag producer">Producer</span>
             <p>Produce Milk or Wheat automatically and supply the whole city via the marketplace.</p>
           </div>
           <div class="choice" data-type="coffee_shop" style="flex-basis:44%">
             <div class="icon">☕</div>
             <h3>Coffee Shop</h3>
+            <span class="role-tag processor">Processor + Retailer</span>
             <p>Buy milk &amp; beans, brew coffee, serve townsfolk. Set your own prices.</p>
           </div>
           <div class="choice" data-type="bakery" style="flex-basis:44%">
             <div class="icon">🥖</div>
             <h3>Bakery</h3>
+            <span class="role-tag processor">Processor + Retailer</span>
             <p>Turn wheat into fresh bread and sell it to hungry customers.</p>
           </div>
           <div class="choice" data-type="mini_market" style="flex-basis:44%">
             <div class="icon">🛒</div>
             <h3>Mini Market</h3>
+            <span class="role-tag retailer">Retailer</span>
             <p>Pure retail: buy bread &amp; milk cheap, stock the shelves, earn the margin.</p>
           </div>
         </div>
@@ -223,6 +228,7 @@ export class UI {
     document.getElementById('nav-city')!.addEventListener('click', () => {
       sfx.click();
       this.closePanel();
+      this.onCloseCity?.();
     });
     document.getElementById('nav-biz')!.addEventListener('click', () => {
       sfx.click();

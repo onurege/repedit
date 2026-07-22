@@ -1,6 +1,11 @@
 import * as THREE from 'three';
 import './ui/styles.css';
+import { PRODUCTS } from '@district/shared';
 import { client } from './net.js';
+
+const PRODUCT_EMOJI: Record<string, string> = Object.fromEntries(
+  Object.values(PRODUCTS).map((p) => [p.id, p.emoji])
+);
 import { UI } from './ui/ui.js';
 import { createScene } from './game/scene.js';
 import { CameraRig } from './game/camera.js';
@@ -17,7 +22,11 @@ const actors = new Actors(scene);
 const effects = new Effects(scene);
 const ui = new UI();
 
-ui.onFocusLot = (lotId) => rig.focusOn(city.lotWorldPos(lotId));
+ui.onFocusLot = (lotId) => {
+  rig.focusOn(city.lotWorldPos(lotId));
+  city.highlightLot(lotId);
+};
+ui.onCloseCity = () => city.highlightLot(null);
 
 // ---------- selection ----------
 const raycaster = new THREE.Raycaster();
@@ -25,8 +34,12 @@ rig.onSelect = (x, y) => {
   raycaster.setFromCamera(new THREE.Vector2(x, y), camera);
   const hits = raycaster.intersectObjects(city.selectables, true);
   const sel = hits.find((h) => h.object.userData.sel)?.object.userData.sel as Selectable | undefined;
-  if (!sel) return;
+  if (!sel) {
+    city.highlightLot(null);
+    return;
+  }
   sfx.click();
+  city.highlightLot(sel.lotId);
   if (sel.kind === 'wholesale') {
     ui.openWholesale();
     rig.focusOn(city.lotWorldPos(sel.lotId));
@@ -71,36 +84,54 @@ client.on('update', () => {
   if (myLastLevel && lvl > myLastLevel) {
     sfx.upgrade();
     const pos = city.lotWorldPos(client.myBiz!.lotId);
-    effects.popupText(pos.clone().setY(9), 'UPGRADED!', '#ffd166');
+    effects.popupText(pos.clone().setY(5.5), `LEVEL ${lvl}!`, '#ffd166');
+    city.highlightLot(client.myBiz!.lotId);
   }
   myLastLevel = lvl;
 });
 
+// Throttle sale popups per lot so a busy shop shows tidy, occasional feedback
+// (below the name label) rather than a spammy stack.
+const lastSalePopup = new Map<string, number>();
 client.on('sale', (e: { bizId: number; lotId: string; amount: number }) => {
   const mine = client.myBiz?.id === e.bizId;
   // A customer walks to the shop; the +$ pops when they reach the door.
   actors.spawnCustomer(e.lotId, () => {
-    const pos = city.lotWorldPos(e.lotId);
-    effects.popupText(pos.clone().setY(6.5), `+$${e.amount}`, mine ? '#7dff8a' : '#c8f5cd');
     if (mine) sfx.sale();
     else sfx.saleFar();
+    const now = performance.now();
+    if (now - (lastSalePopup.get(e.lotId) ?? 0) < 900) return; // aggregate rapid sales
+    lastSalePopup.set(e.lotId, now);
+    const pos = city.lotWorldPos(e.lotId);
+    // Popups rise from just above the storefront and fade out well below the
+    // floating name label, so the two never collide.
+    effects.popupText(
+      pos.clone().setY(4.2).add(new THREE.Vector3((Math.random() - 0.5) * 3, 0, 2)),
+      `+$${e.amount}`,
+      mine ? '#7dff8a' : '#bdeecb'
+    );
   });
 });
 
 client.on('lost_customer', (e: { bizId: number; lotId: string }) => {
   if (client.myBiz?.id === e.bizId) {
+    const now = performance.now();
+    if (now - (lastSalePopup.get('lost:' + e.lotId) ?? 0) < 2500) return;
+    lastSalePopup.set('lost:' + e.lotId, now);
     const pos = city.lotWorldPos(e.lotId);
-    effects.popupText(pos.clone().setY(6.5), 'out of stock!', '#ff9d9d');
+    effects.popupText(pos.clone().setY(4.5), 'out of stock!', '#ff9d9d');
   }
 });
 
-client.on('delivery', () => {
-  // van spawn handled by syncDeliveries; small feedback if it's mine
-});
-
-client.on('delivery_done', (id: number) => {
-  actors.deliveryArrived(id);
+client.on('delivery_done', (d: { id: number; product?: string; qty?: number; toBizId?: number }) => {
+  actors.deliveryArrived(d.id);
   sfx.delivery();
+  // Celebrate deliveries arriving at MY business with a clear popup.
+  if (d.toBizId != null && client.myBiz?.id === d.toBizId && d.product && d.qty) {
+    const emoji = PRODUCT_EMOJI[d.product] ?? '📦';
+    const pos = city.lotWorldPos(client.myBiz.lotId);
+    effects.popupText(pos.clone().setY(4.6), `+${d.qty} ${emoji}`, '#8fd3ff');
+  }
 });
 
 client.on('trade', () => {
@@ -126,13 +157,26 @@ if (client.token) {
 
 // ---------- render loop ----------
 let last = performance.now();
+let bootHidden = false;
+function hideBoot() {
+  if (bootHidden) return;
+  bootHidden = true;
+  const boot = document.getElementById('boot');
+  if (boot) {
+    boot.classList.add('hide');
+    setTimeout(() => boot.remove(), 600);
+  }
+}
 function frame(now: number) {
   const dt = Math.min(0.05, (now - last) / 1000);
   last = now;
   rig.update(dt);
   actors.update(dt, Date.now());
   effects.update(dt);
+  city.update(dt, camera.position);
   renderer.render(scene, camera);
   requestAnimationFrame(frame);
 }
 requestAnimationFrame(frame);
+// Reveal the game once the first frames have rendered (city is visible).
+requestAnimationFrame(() => requestAnimationFrame(() => setTimeout(hideBoot, 250)));

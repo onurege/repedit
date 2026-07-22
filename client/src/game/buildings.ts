@@ -73,24 +73,38 @@ export function gableRoof(w: number, d: number, h: number, color: number, x = 0,
 function label(text: string, sub: string, color = '#ffffff'): THREE.Sprite {
   const canvas = document.createElement('canvas');
   canvas.width = 512;
-  canvas.height = 160;
+  canvas.height = 176;
   const g = canvas.getContext('2d')!;
-  g.fillStyle = 'rgba(30, 41, 59, 0.85)';
-  const r = 36;
-  g.beginPath();
-  g.roundRect(16, 12, 480, 136, r);
+  // rounded pill with a soft outline for readability over any background
+  const pill = (x: number, y: number, w: number, h: number, r: number) => {
+    g.beginPath();
+    g.roundRect(x, y, w, h, r);
+  };
+  g.fillStyle = 'rgba(17, 24, 39, 0.82)';
+  pill(14, 14, 484, 148, 44);
   g.fill();
-  g.fillStyle = color;
-  g.font = 'bold 58px system-ui, sans-serif';
+  g.lineWidth = 4;
+  g.strokeStyle = 'rgba(255,255,255,0.14)';
+  pill(14, 14, 484, 148, 44);
+  g.stroke();
   g.textAlign = 'center';
-  g.fillText(text.slice(0, 16), 256, 76);
-  g.fillStyle = '#ffd166';
-  g.font = '600 42px system-ui, sans-serif';
-  g.fillText(sub, 256, 130);
+  g.fillStyle = color;
+  g.font = 'bold 60px system-ui, sans-serif';
+  g.fillText(text.slice(0, 16), 256, 82);
+  g.fillStyle = '#ffce6b';
+  g.font = '600 40px system-ui, sans-serif';
+  g.fillText(sub, 256, 138);
   const tex = new THREE.CanvasTexture(canvas);
   tex.colorSpace = THREE.SRGBColorSpace;
-  const sprite = new THREE.Sprite(new THREE.SpriteMaterial({ map: tex, depthTest: false }));
-  sprite.scale.set(9, 2.8, 1);
+  tex.anisotropy = 4;
+  const sprite = new THREE.Sprite(
+    new THREE.SpriteMaterial({ map: tex, depthTest: false, transparent: true })
+  );
+  const bw = 8.4;
+  const bh = (bw * canvas.height) / canvas.width;
+  sprite.scale.set(bw, bh, 1);
+  sprite.renderOrder = 20;
+  sprite.userData.bdLabel = { baseX: bw, baseY: bh };
   return sprite;
 }
 
@@ -153,7 +167,7 @@ export function makeFarm(level: number, ownerName: string): THREE.Group {
     g.add(cow);
   }
   const lbl = label(ownerName, `Farm · Lv ${level}`, '#d7f9d0');
-  lbl.position.set(0, 8.2, 0);
+  lbl.position.set(0, 8.8, 0);
   g.add(lbl);
   return g;
 }
@@ -200,7 +214,7 @@ export function makeCoffeeShop(level: number, ownerName: string): THREE.Group {
   g.add(cyl(0.58, 0.58, 0.1, 0x7a4a2b, -3.9, 4.1, 2.9, 12));
 
   const lbl = label(ownerName, `Coffee Shop · Lv ${level}`, '#ffe9c9');
-  lbl.position.set(0, 7.6, 0);
+  lbl.position.set(0, 8.2, 0);
   g.add(lbl);
   return g;
 }
@@ -242,7 +256,7 @@ export function makeBakery(level: number, ownerName: string): THREE.Group {
     g.add(pretzel);
   }
   const lbl = label(ownerName, `Bakery · Lv ${level}`, '#ffe3bd');
-  lbl.position.set(0, 7.6, 0);
+  lbl.position.set(0, 8.2, 0);
   g.add(lbl);
   return g;
 }
@@ -275,7 +289,7 @@ export function makeMiniMarket(level: number, ownerName: string): THREE.Group {
     g.add(box(2.6, 0.08, 0.25, 0xe8e6da, w / 2 + 1.4, 0.28, 1.4, false));
   }
   const lbl = label(ownerName, `Mini Market · Lv ${level}`, '#d2f5e4');
-  lbl.position.set(0, 7.6, 0);
+  lbl.position.set(0, 8.2, 0);
   g.add(lbl);
   return g;
 }
@@ -310,7 +324,7 @@ export function makeWholesale(): THREE.Group {
   g.add(box(0.85, 0.85, 0.85, 0xb08a55, 5.5, 1.2, -2.4));
   g.add(box(1, 1, 1, 0xc9a06a, 4.2, 0.2, -3.3));
   const lbl = label('Central Wholesale', 'Wholesale Goods · NPC', '#cfe3ff');
-  lbl.position.set(0, 8.6, 0);
+  lbl.position.set(0, 9.2, 0);
   g.add(lbl);
   return g;
 }
@@ -414,16 +428,43 @@ const LOT_LABELS: Record<string, string> = {
 
 export function makeVacantSign(kind: string): THREE.Group {
   const g = new THREE.Group();
-  const pad = box(kind === 'farm' ? 16 : 10, 0.16, kind === 'farm' ? 12 : 8, 0xd6cdA0, 0, 0, 0, false);
-  (pad.material as THREE.Material).transparent = true;
-  (pad.material as any).opacity = 0.5;
+  // A subtle mown-grass pad marks the empty lot without shouting.
+  const pad = box(kind === 'farm' ? 15 : 9, 0.08, kind === 'farm' ? 11 : 7, 0x93cf6a, 0, 0, 0, false);
+  pad.receiveShadow = true;
   g.add(pad);
-  g.add(box(0.18, 2.2, 0.18, 0x8a6f4d, 0, 0, 0));
-  const board = label('FOR SALE', LOT_LABELS[kind] ?? 'Lot', '#ffd166');
-  board.position.y = 3.1;
-  board.scale.set(7, 2.2, 1);
-  g.add(board);
+  // small realtor-style sign board on a post
+  const post = box(0.14, 1.5, 0.14, 0x9b8368, 0, 0, 0);
+  g.add(post);
+  const boardMesh = box(1.9, 1.0, 0.08, 0xf4f1e8, 0, 1.35, 0);
+  g.add(boardMesh);
+  g.add(box(2.0, 0.22, 0.1, 0xe4572e, 0, 1.75, 0.02)); // red header strip
+  const spr = smallSign('FOR SALE', LOT_LABELS[kind] ?? 'Lot');
+  spr.position.set(0, 1.35, 0.09);
+  g.add(spr);
   return g;
+}
+
+// Compact flat sign face (used on vacant-lot boards) — much smaller and
+// quieter than a floating business label.
+function smallSign(title: string, sub: string): THREE.Sprite {
+  const canvas = document.createElement('canvas');
+  canvas.width = 256;
+  canvas.height = 136;
+  const g = canvas.getContext('2d')!;
+  g.fillStyle = '#e4572e';
+  g.fillText('', 0, 0);
+  g.textAlign = 'center';
+  g.fillStyle = '#b3401f';
+  g.font = 'bold 40px system-ui, sans-serif';
+  g.fillText(title, 128, 52);
+  g.fillStyle = '#5b6572';
+  g.font = '600 30px system-ui, sans-serif';
+  g.fillText(sub, 128, 100);
+  const tex = new THREE.CanvasTexture(canvas);
+  tex.colorSpace = THREE.SRGBColorSpace;
+  const spr = new THREE.Sprite(new THREE.SpriteMaterial({ map: tex, transparent: true, depthTest: true }));
+  spr.scale.set(1.85, 0.98, 1);
+  return spr;
 }
 
 function mulberry(seed: number) {

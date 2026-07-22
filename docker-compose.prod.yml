@@ -1,0 +1,71 @@
+# Production stack for a small Ubuntu VPS:
+#   Internet -> Caddy (TLS, static client + reverse proxy) -> Node server -> PostgreSQL
+#
+# Usage:
+#   cp .env.example .env          # then edit: set a strong POSTGRES_PASSWORD, DATABASE_URL, DOMAIN
+#   docker compose -f docker-compose.prod.yml up -d --build
+#
+# The client is built to client/dist by the one-shot `client-build` service and
+# served by Caddy. Dev tools are OFF (NODE_ENV=production).
+
+services:
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-district}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set a strong POSTGRES_PASSWORD in .env}
+      POSTGRES_DB: ${POSTGRES_DB:-business_district}
+    volumes:
+      - dbdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-district} -d ${POSTGRES_DB:-business_district}"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  # One-shot: install deps and build the client bundle into client/dist.
+  client-build:
+    image: node:22-alpine
+    working_dir: /app
+    volumes:
+      - .:/app
+    command: sh -c "npm ci && npm run build -w shared && npm run build -w client"
+    environment:
+      # Empty VITE_SERVER_URL => client uses its own origin (proxied by Caddy).
+      VITE_SERVER_URL: ""
+
+  server:
+    image: node:22-alpine
+    working_dir: /app
+    restart: unless-stopped
+    volumes:
+      - .:/app
+    command: sh -c "npm ci && npm run migrate && npm start"
+    environment:
+      NODE_ENV: production
+      DATABASE_URL: postgres://${POSTGRES_USER:-district}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB:-business_district}
+      PORT: "2567"
+    depends_on:
+      db:
+        condition: service_healthy
+
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - ./client/dist:/srv/client:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      - server
+      - client-build
+
+volumes:
+  dbdata:
+  caddy_data:
+  caddy_config:

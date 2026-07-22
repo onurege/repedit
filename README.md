@@ -1,11 +1,14 @@
 # BUSINESS DISTRICT
 
 A browser-based, persistent, multiplayer business simulation set in a stylized
-low-poly 3D city. Own a **Farm** or a **Coffee Shop**, produce and trade real
-goods with other players on a live marketplace, watch delivery vans carry your
-milk across town, and grow your business.
+low-poly 3D city. Run a **Farm**, **Coffee Shop**, **Bakery** or **Mini Market**,
+produce and trade real goods with other players on a live marketplace, form
+recurring **supply contracts**, watch delivery vans carry goods across town, and
+grow your business.
 
-**Current phase: PHASE 1 — PLAYABLE ECONOMY MVP** (see [CURRENT_PHASE.md](CURRENT_PHASE.md))
+**Status: RELEASE CANDIDATE** — all gameplay (trading, supply chains, contracts)
+plus a visual/game-feel polish pass. See [CURRENT_PHASE.md](CURRENT_PHASE.md).
+For production deployment on a small VPS, see [DEPLOYMENT.md](DEPLOYMENT.md).
 
 ![stack](https://img.shields.io/badge/stack-TypeScript%20%C2%B7%20Three.js%20%C2%B7%20Node%20%C2%B7%20PostgreSQL-blue)
 
