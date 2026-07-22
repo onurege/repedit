@@ -41,7 +41,9 @@ services:
     restart: unless-stopped
     volumes:
       - .:/app
-    command: sh -c "npm ci && npm run migrate && npm start"
+    # client-build has already run `npm ci` on the shared volume, so deps are
+    # installed; wait for it to avoid a concurrent-install race.
+    command: sh -c "npm run migrate && npm start"
     environment:
       NODE_ENV: production
       DATABASE_URL: postgres://${POSTGRES_USER:-district}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB:-business_district}
@@ -49,6 +51,8 @@ services:
     depends_on:
       db:
         condition: service_healthy
+      client-build:
+        condition: service_completed_successfully
 
   caddy:
     image: caddy:2-alpine
@@ -62,8 +66,10 @@ services:
       - caddy_data:/data
       - caddy_config:/config
     depends_on:
-      - server
-      - client-build
+      server:
+        condition: service_started
+      client-build:
+        condition: service_completed_successfully
 
 volumes:
   dbdata:
