@@ -57,6 +57,12 @@ services:
   caddy:
     image: caddy:2-alpine
     restart: unless-stopped
+    # Explicit public DNS: some hosts (systemd-resolved at 127.0.0.53) leave
+    # containers unable to resolve names, which blocks Caddy from reaching
+    # Let's Encrypt and obtaining a TLS certificate.
+    dns:
+      - 8.8.8.8
+      - 1.1.1.1
     ports:
       - "80:80"
       - "443:443"
