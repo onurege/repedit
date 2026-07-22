@@ -21,6 +21,25 @@ offline progression, full persistence. **This phase is implemented.**
 - Deferred to later: player-owned logistics, dynamic pricing, trade analytics,
   contract negotiation/penalties
 
+## V2.1 — Company Foundation & Multi-Business  ✅
+
+- Persistent Company entity (one per player), owning 1+ businesses — **implemented**
+- Management capacity gates how many businesses a company can run — **implemented**
+- Open additional businesses (vacant lot + escalating cost) — **implemented**
+
+## V2.2 — Market Share, Company Profile & City Rankings  ✅
+
+- Final-consumer market share (bread / coffee / milk retail) — **implemented**
+- Wheat & milk supplier rankings (external volume) — **implemented**
+- Rolling 7-day competitive window (no lifetime lock-in) — **implemented**
+- Public Company Profile + City Rankings, linked navigation — **implemented**
+- Deferred to V2.3: dynamic city demand, city events/festivals
+
+## V2.3 — Dynamic City Demand & City Events  (next)
+
+- Demand that shifts by product/time; city events and festivals
+- **Documented only. Do not implement ahead of schedule.**
+
 ## PHASE 4 — Living City
 
 - Day/night cycle and weather

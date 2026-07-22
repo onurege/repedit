@@ -292,6 +292,16 @@ export class Net {
           await world.cancelContract(pid, msg.contractId);
           this.send(conn.ws, { t: 'toast', code: 'toast.contract_cancelled', kind: 'info' });
           break;
+        case 'get_rankings': {
+          const rankings = await world.computeCityRankings(pid);
+          this.send(conn.ws, { t: 'rankings', rankings });
+          break;
+        }
+        case 'get_company_profile': {
+          const profile = await world.computeCompanyProfile(msg.companyId, pid);
+          if (profile) this.send(conn.ws, { t: 'company_profile', profile });
+          break;
+        }
         case 'dev': {
           if (!config.devTools) throw new GameError('err.dev_disabled');
           const result = await world.devCommand(pid, msg.cmd, msg.value, msg.bizId);

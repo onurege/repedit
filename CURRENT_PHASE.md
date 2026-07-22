@@ -1,4 +1,49 @@
-# V2.1 — COMPANY FOUNDATION & MULTI-BUSINESS EXPANSION (current)
+# V2.2 — MARKET SHARE, COMPANY PROFILE & CITY RANKINGS (current)
+
+The first city-wide **competition** layer. Players can now answer "how big is
+my company, what am I best at, and who is beating me?" — without any new
+economy mechanics, dynamic demand, or city events (those are V2.3).
+
+- **Competitive metrics** are computed from *recent* activity over a rolling
+  **7-day window**, so early players can't lock in the top spots. (We interpret
+  the spec's "7 game days" as 7 real days — the natural recent horizon for a
+  persistent, mostly-offline idle economy.)
+- **Market share** (final consumers): a company's share of the city's NPC
+  retail sales for **Bread, Coffee and Milk (retail)**, by units. Internal and
+  B2B flows never count as final share — only real NPC sales do.
+- **Supplier rankings** (raw materials): **Wheat** and **Milk** suppliers ranked
+  by recent *external* player-to-player volume (marketplace + contract
+  deliveries). A company supplying itself is impossible here (no internal
+  transfer exists; marketplace/contracts require two different companies).
+- **Company Profile** (public): name, owner, level, management capacity,
+  aggregated reputation, businesses owned (listed, clickable), founded date,
+  recent revenue and **net cash flow** (labelled honestly — not "profit"),
+  successful trades, active contracts, plus market-share cards and supplier
+  ranks with `#1` badges. Only categories with real activity are shown. Private
+  data (cash, inventory, contract pricing, ledger) is never exposed to others.
+- **City Rankings** (Top 10 + your own rank): recent revenue, net cash flow,
+  reputation, fastest-growing (revenue % change vs the previous window, guarded
+  by a minimum-activity floor so a new company can't jump to #1 from ~$0),
+  and the per-product boards (bread / coffee / milk-retail / wheat-supplier /
+  milk-supplier). Rows link to the company's profile.
+- **Metrics aggregate across all of a company's businesses** and are recorded
+  only from *committed* economic events — inside the same transaction as the
+  money movement — so a failed sale or a rejected double-fulfill never inflates
+  a statistic, and everything survives logout/reconnect/restart. Rankings are
+  computed on demand with a short (5s) cache; no per-tick global scans.
+
+Data model: a single append-only `company_activity` table (migration 006)
+carries the per-product *unit* flows the ledger doesn't; recent revenue / net /
+growth are derived from the existing `economic_ledger`. Company reputation is an
+activity-weighted average of its businesses' reputations.
+
+All 68 unit tests (incl. 8 new ranking tests) and five browser E2Es
+(golden-path, supply-chain, contract, company, and the new rankings flow) pass;
+production build succeeds.
+
+---
+
+# V2.1 — COMPANY FOUNDATION & MULTI-BUSINESS EXPANSION
 
 Introduces a persistent **Company** that every player owns exactly one of; a
 company owns one or more businesses (still only the existing four types —

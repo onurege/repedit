@@ -15,6 +15,8 @@ import type {
   AwayReport,
   ContractPub,
   CompanyPriv,
+  CityRankings,
+  CompanyProfile,
 } from '@district/shared';
 import { t } from './i18n.js';
 
@@ -44,6 +46,8 @@ export class GameClient {
   devTools = false;
   trades: TradeRow[] = [];
   contracts = new Map<number, ContractPub>();
+  rankings: CityRankings | null = null;
+  companyProfile: CompanyProfile | null = null;
   connected = false;
 
   private ws: WebSocket | null = null;
@@ -281,6 +285,15 @@ export class GameClient {
         break;
       case 'level_up':
         this.emit('level_up', msg.level);
+        break;
+      case 'rankings':
+        this.rankings = msg.rankings;
+        this.emit('rankings', msg.rankings);
+        this.emit('update');
+        break;
+      case 'company_profile':
+        this.companyProfile = msg.profile;
+        this.emit('company_profile', msg.profile);
         break;
     }
   }

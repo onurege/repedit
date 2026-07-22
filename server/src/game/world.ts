@@ -82,8 +82,34 @@ import {
   type MsgParams,
   type ContractPub,
   type CompanyPriv,
+  RANKING_WINDOW_SECONDS,
+  FINAL_MARKET_PRODUCTS,
+  SUPPLIER_PRODUCTS,
+  GROWTH_MIN_REVENUE,
+  RANKING_TOP_N,
+  RANKING_CATEGORIES,
+  type RankingCategory,
+  type CompanyProfile,
+  type MarketShareEntry,
+  type SupplierRankEntry,
+  type CityRankings,
+  type RankingBoard,
+  type RankingRow,
 } from '@district/shared';
 import { query, tx } from '../db.js';
+
+/** Cached raw per-metric value maps (companyId -> value) for city rankings. */
+interface RankingMaps {
+  revenue: Map<number, number>;
+  net: Map<number, number>;
+  rep: Map<number, number>;
+  growth: Map<number, number>;
+  bread: Map<number, number>;
+  coffee: Map<number, number>;
+  milkRetail: Map<number, number>;
+  wheatSup: Map<number, number>;
+  milkSup: Map<number, number>;
+}
 
 /**
  * A player-facing failure. Carries a locale-independent `code` (plus
@@ -218,6 +244,25 @@ function ledgerParams(e: LedgerEntry): any[] {
   return [e.playerId, e.businessId, e.type, e.amount, e.refType, e.refId, e.before, e.after];
 }
 
+// V2.2 competitive activity (see migrations/006). Recorded only from committed
+// economic events, so a failed/duplicate transaction never inflates a stat.
+interface ActivityEntry {
+  companyId: number;
+  businessId: number | null;
+  kind: 'final_sale' | 'supplier_sale';
+  product: ProductId;
+  units: number;
+  amount: number;
+}
+
+const ACTIVITY_SQL = `INSERT INTO company_activity
+  (company_id, business_id, kind, product, units, amount)
+  VALUES ($1,$2,$3,$4,$5,$6)`;
+
+function activityParams(e: ActivityEntry): any[] {
+  return [e.companyId, e.businessId, e.kind, e.product, e.units, e.amount];
+}
+
 const TRADABLE: ProductId[] = ['milk', 'beans', 'wheat', 'bread'];
 
 const STARTING_PRODUCTS: Record<BusinessType, ProductId[]> = {
@@ -276,6 +321,12 @@ export class World extends EventEmitter {
   // CUSTOMER_SALE ledger entries accumulate here (simulate() is synchronous)
   // and are persisted in batch by flush().
   private ledgerQueue: LedgerEntry[] = [];
+  // V2.2: final-consumer sales from the tick accumulate here and persist in the
+  // same transaction as the ledger (exactly-once with the economic activity).
+  private activityQueue: ActivityEntry[] = [];
+  // Cache the expensive per-metric value maps briefly; per-viewer boards (which
+  // add each player's own-rank marker) are then built cheaply in memory.
+  private rankingsCache: { at: number; maps: RankingMaps } | null = null;
 
   /** All businesses owned by a player (may be several since V2.1). */
   bizesByOwner(playerId: number): BizRec[] {
@@ -537,20 +588,27 @@ export class World extends EventEmitter {
     const dirtyBiz = [...this.businesses.values()].filter((b) => b.dirty);
     const dirtyCompanies = [...this.companies.values()].filter((c) => c.dirty);
     const ledger = this.ledgerQueue;
-    if (!dirtyPlayers.length && !dirtyBiz.length && !dirtyCompanies.length && !ledger.length) return;
+    const activity = this.activityQueue;
+    if (!dirtyPlayers.length && !dirtyBiz.length && !dirtyCompanies.length && !ledger.length && !activity.length) return;
     this.ledgerQueue = [];
+    this.activityQueue = [];
     try {
-      await this.flushTx(dirtyPlayers, dirtyBiz, dirtyCompanies, ledger);
+      await this.flushTx(dirtyPlayers, dirtyBiz, dirtyCompanies, ledger, activity);
     } catch (err) {
       // don't lose audit rows on a transient failure
       this.ledgerQueue.unshift(...ledger);
+      this.activityQueue.unshift(...activity);
       throw err;
     }
   }
 
-  private async flushTx(dirtyPlayers: PlayerRec[], dirtyBiz: BizRec[], dirtyCompanies: CompanyRec[], ledger: LedgerEntry[]): Promise<void> {
+  private async flushTx(
+    dirtyPlayers: PlayerRec[], dirtyBiz: BizRec[], dirtyCompanies: CompanyRec[],
+    ledger: LedgerEntry[], activity: ActivityEntry[] = []
+  ): Promise<void> {
     await tx(async (c) => {
       for (const e of ledger) await c.query(LEDGER_SQL, ledgerParams(e));
+      for (const a of activity) await c.query(ACTIVITY_SQL, activityParams(a));
       for (const co of dirtyCompanies) {
         await c.query('UPDATE companies SET name=$1, level=$2, xp=$3 WHERE id=$4', [co.name, co.level, co.xp, co.id]);
         co.dirty = false;
@@ -788,6 +846,11 @@ export class World extends EventEmitter {
       owner.dirty = true;
       biz.revenue += gross;
       biz.coffeeSold += sold; // total units sold at retail
+      // V2.2: final-consumer sale -> market-share activity (units to NPCs).
+      this.activityQueue.push({
+        companyId: biz.companyId, businessId: biz.id,
+        kind: 'final_sale', product, units: sold, amount: gross,
+      });
       this.addXp(owner, sold * XP.perSale, silent);
       const fair = Math.round((RETAIL_BASE[product] ?? PRODUCTS[product].basePrice) * 1.2);
       biz.reputation += sold * (price <= fair ? REP_SALE_FAIR_PRICE : REP_SALE_GOUGING);
@@ -1409,6 +1472,11 @@ export class World extends EventEmitter {
             refType: 'trade', refId: newTradeId, before: buyer.cash + amount, after: buyer.cash,
           }));
         }
+        // V2.2: external supplier sale (marketplace is always player-to-player).
+        await c.query(ACTIVITY_SQL, activityParams({
+          companyId: sellerBiz.companyId, businessId: sellerBiz.id,
+          kind: 'supplier_sale', product: order.product, units: qty, amount,
+        }));
         return ins.rows[0];
       });
       if (order.remaining === 0) this.orders.delete(orderId);
@@ -1693,6 +1761,11 @@ export class World extends EventEmitter {
           playerId: buyer.id, businessId: buyerBiz.id, type: 'CONTRACT_BUY', amount: -amount,
           refType: 'contract', refId: c.id, before: buyer.cash + amount, after: buyer.cash,
         }));
+        // V2.2: external supplier sale (contracts are between two companies).
+        await cl.query(ACTIVITY_SQL, activityParams({
+          companyId: sellerBiz.companyId, businessId: sellerBiz.id,
+          kind: 'supplier_sale', product: c.product, units: c.quantity, amount,
+        }));
       });
 
       console.log(`[econ] CONTRACT_EXEC id=${c.id} ${c.quantity}x${c.product} @$${c.unitPrice} remaining=${c.remaining} delivery=${delivery.id}`);
@@ -1937,6 +2010,253 @@ export class World extends EventEmitter {
       capacity: companyCapacity(company.level),
       capacityUsed: this.capacityUsed(company.ownerId),
       businessCount: this.bizesByOwner(company.ownerId).length,
+    };
+  }
+
+  // ============================================================
+  // V2.2 — competitive metrics (market share, profile, rankings)
+  // ============================================================
+
+  /** Locate a company by its own id (companies map is keyed by ownerId). */
+  private companyById(id: number): CompanyRec | undefined {
+    for (const c of this.companies.values()) if (c.id === id) return c;
+    return undefined;
+  }
+
+  /**
+   * Aggregated company reputation: an activity-weighted average of the
+   * company's businesses' reputations (weight = 1 + lifetime units the business
+   * has moved), so busy businesses dominate and empty ones barely count.
+   * Falls back to a plain average when there is no activity yet.
+   */
+  private companyReputation(ownerId: number): number {
+    const bizes = this.bizesByOwner(ownerId);
+    if (!bizes.length) return REP_START;
+    let wsum = 0;
+    let w = 0;
+    for (const b of bizes) {
+      const weight = 1 + b.coffeeSold + b.milkProduced;
+      wsum += b.reputation * weight;
+      w += weight;
+    }
+    return Math.round((wsum / w) * 100) / 100;
+  }
+
+  private activeContractsFor(ownerId: number): number {
+    let n = 0;
+    for (const c of this.contracts.values()) {
+      if (c.status === 'active' && (c.buyerId === ownerId || c.sellerId === ownerId)) n++;
+    }
+    return n;
+  }
+
+  private windowStartISO(windowsBack = 0): string {
+    return new Date(Date.now() - (windowsBack + 1) * RANKING_WINDOW_SECONDS * 1000).toISOString();
+  }
+
+  /** Recent competitive units grouped by company for one kind+product. */
+  private async recentUnits(
+    kind: 'final_sale' | 'supplier_sale',
+    product: ProductId,
+    fromISO: string
+  ): Promise<Map<number, number>> {
+    const r = await query(
+      `SELECT company_id, SUM(units)::bigint AS units FROM company_activity
+       WHERE kind=$1 AND product=$2 AND created_at >= $3 GROUP BY company_id`,
+      [kind, product, fromISO]
+    );
+    const m = new Map<number, number>();
+    for (const row of r.rows) m.set(row.company_id, Number(row.units));
+    return m;
+  }
+
+  /** Recent ledger money grouped by company (optionally by transaction types). */
+  private async recentLedger(
+    fromISO: string,
+    types: string[] | null,
+    toISO: string | null = null
+  ): Promise<Map<number, number>> {
+    const conds = ['l.created_at >= $1'];
+    const params: any[] = [fromISO];
+    if (toISO) { params.push(toISO); conds.push(`l.created_at < $${params.length}`); }
+    if (types) { params.push(types); conds.push(`l.transaction_type = ANY($${params.length})`); }
+    const r = await query(
+      `SELECT c.id AS cid, COALESCE(SUM(l.amount),0)::bigint AS v
+       FROM companies c
+       LEFT JOIN economic_ledger l ON l.player_id = c.player_id AND ${conds.join(' AND ')}
+       GROUP BY c.id`,
+      params
+    );
+    const m = new Map<number, number>();
+    for (const row of r.rows) m.set(row.cid, Number(row.v));
+    return m;
+  }
+
+  private static REVENUE_TYPES = ['CUSTOMER_SALE', 'MARKET_SELL', 'CONTRACT_SELL'];
+
+  private rankingRow(companyId: number, value: number): RankingRow | null {
+    const co = this.companyById(companyId);
+    if (!co) return null;
+    return { companyId, ownerId: co.ownerId, name: co.name, value };
+  }
+
+  /** Turn a companyId->value map into a board (top N + viewer's own rank). */
+  private buildBoard(
+    category: RankingCategory,
+    unit: RankingBoard['unit'],
+    values: Map<number, number>,
+    viewerCompanyId: number | null,
+    positiveOnly = false
+  ): RankingBoard {
+    let rows: RankingRow[] = [];
+    for (const [cid, v] of values) {
+      if (positiveOnly && v <= 0) continue;
+      const row = this.rankingRow(cid, Math.round(v * 100) / 100);
+      if (row) rows.push(row);
+    }
+    rows.sort((a, b) => b.value - a.value || a.companyId - b.companyId);
+    const top = rows.slice(0, RANKING_TOP_N);
+    const board: RankingBoard = { category, unit, top };
+    if (viewerCompanyId != null) {
+      const idx = rows.findIndex((r) => r.companyId === viewerCompanyId);
+      if (idx >= 0) {
+        board.selfRank = idx + 1;
+        if (idx >= RANKING_TOP_N) board.self = { ...rows[idx], rank: idx + 1 };
+      }
+    }
+    return board;
+  }
+
+  /** Recompute (or reuse cached) the raw per-metric value maps. */
+  private async rankingMaps(): Promise<RankingMaps> {
+    const now = Date.now();
+    if (this.rankingsCache && now - this.rankingsCache.at < 5000) return this.rankingsCache.maps;
+    const curFrom = this.windowStartISO(0);
+    const prevFrom = this.windowStartISO(1);
+
+    const [revenue, net, prevRev, bread, coffee, milkRetail, wheatSup, milkSup] = await Promise.all([
+      this.recentLedger(curFrom, World.REVENUE_TYPES),
+      this.recentLedger(curFrom, null),
+      this.recentLedger(prevFrom, World.REVENUE_TYPES, curFrom),
+      this.recentUnits('final_sale', 'bread', curFrom),
+      this.recentUnits('final_sale', 'coffee', curFrom),
+      this.recentUnits('final_sale', 'milk', curFrom),
+      this.recentUnits('supplier_sale', 'wheat', curFrom),
+      this.recentUnits('supplier_sale', 'milk', curFrom),
+    ]);
+
+    // Reputation from live in-memory business state (authoritative, cheap).
+    const rep = new Map<number, number>();
+    for (const co of this.companies.values()) rep.set(co.id, this.companyReputation(co.ownerId));
+
+    // Fastest growing: % change cur vs prev, both windows above the floor.
+    const growth = new Map<number, number>();
+    for (const [cid, cur] of revenue) {
+      const prev = prevRev.get(cid) ?? 0;
+      if (cur >= GROWTH_MIN_REVENUE && prev >= GROWTH_MIN_REVENUE) {
+        growth.set(cid, ((cur - prev) / prev) * 100);
+      }
+    }
+
+    const maps: RankingMaps = { revenue, net, rep, growth, bread, coffee, milkRetail, wheatSup, milkSup };
+    this.rankingsCache = { at: now, maps };
+    return maps;
+  }
+
+  /** All city rankings, with the requesting player's own-rank markers. */
+  async computeCityRankings(viewerOwnerId: number | null): Promise<CityRankings> {
+    const viewerCid = viewerOwnerId != null ? this.companies.get(viewerOwnerId)?.id ?? null : null;
+    const m = await this.rankingMaps();
+    const boards: RankingBoard[] = [
+      this.buildBoard('recent_revenue', 'money', m.revenue, viewerCid, true),
+      this.buildBoard('net_cash_flow', 'money', m.net, viewerCid),
+      this.buildBoard('reputation', 'stars', m.rep, viewerCid),
+      this.buildBoard('growth', 'percent', m.growth, viewerCid),
+      this.buildBoard('bread', 'units', m.bread, viewerCid, true),
+      this.buildBoard('coffee', 'units', m.coffee, viewerCid, true),
+      this.buildBoard('milk_retail', 'units', m.milkRetail, viewerCid, true),
+      this.buildBoard('wheat_supplier', 'units', m.wheatSup, viewerCid, true),
+      this.buildBoard('milk_supplier', 'units', m.milkSup, viewerCid, true),
+    ];
+    return { boards, serverTime: Date.now() };
+  }
+
+  /** Public competitive profile for a company. Only exposes public data. */
+  async computeCompanyProfile(companyId: number, viewerOwnerId: number | null): Promise<CompanyProfile | null> {
+    const company = this.companyById(companyId);
+    if (!company) return null;
+    const ownerId = company.ownerId;
+    const owner = this.players.get(ownerId);
+    const bizes = this.bizesByOwner(ownerId);
+    const curFrom = this.windowStartISO(0);
+    const prevFrom = this.windowStartISO(1);
+
+    const [revenueMap, netMap] = await Promise.all([
+      this.recentLedger(curFrom, World.REVENUE_TYPES),
+      this.recentLedger(curFrom, null),
+    ]);
+
+    // Market shares for the final-consumer products this company actually sells.
+    const marketShares: MarketShareEntry[] = [];
+    const badges: string[] = [];
+    for (const product of FINAL_MARKET_PRODUCTS) {
+      const cur = await this.recentUnits('final_sale', product, curFrom);
+      const mine = cur.get(companyId) ?? 0;
+      if (mine <= 0) continue;
+      let cityUnits = 0;
+      for (const v of cur.values()) cityUnits += v;
+      const ranked = [...cur.entries()].sort((a, b) => b[1] - a[1] || a[0] - b[0]);
+      const rank = ranked.findIndex(([cid]) => cid === companyId) + 1;
+      const prev = await this.recentUnits('final_sale', product, prevFrom);
+      let prevShare: number | undefined;
+      const prevCur = prev.get(companyId);
+      if (prevCur != null) {
+        let prevCity = 0;
+        for (const v of prev.values()) prevCity += v;
+        // prev map covers [prevFrom, now]; subtract current to get prior window
+        const priorMine = prevCur - mine;
+        const priorCity = prevCity - cityUnits;
+        if (priorCity > 0 && priorMine >= 0) prevShare = priorMine / priorCity;
+      }
+      marketShares.push({
+        product, units: mine, cityUnits,
+        share: cityUnits > 0 ? mine / cityUnits : 0, rank, prevShare,
+      });
+      if (rank === 1) badges.push(`top_${product === 'milk' ? 'milk_retail' : product}`);
+    }
+
+    // Supplier ranks for raw materials this company externally supplies.
+    const supplierRanks: SupplierRankEntry[] = [];
+    for (const product of SUPPLIER_PRODUCTS) {
+      const cur = await this.recentUnits('supplier_sale', product, curFrom);
+      const mine = cur.get(companyId) ?? 0;
+      if (mine <= 0) continue;
+      const ranked = [...cur.entries()].sort((a, b) => b[1] - a[1] || a[0] - b[0]);
+      const rank = ranked.findIndex(([cid]) => cid === companyId) + 1;
+      supplierRanks.push({ product, units: mine, rank });
+      if (rank === 1) badges.push(`top_${product}_supplier`);
+    }
+
+    return {
+      id: company.id,
+      ownerId,
+      ownerName: owner?.name ?? '???',
+      name: company.name,
+      level: company.level,
+      capacity: companyCapacity(company.level),
+      capacityUsed: this.capacityUsed(ownerId),
+      reputation: this.companyReputation(ownerId),
+      businessCount: bizes.length,
+      foundedAt: company.createdAtMs,
+      tradeCount: bizes.reduce((s, b) => s + b.tradeCount, 0),
+      activeContracts: this.activeContractsFor(ownerId),
+      recentRevenue: Math.max(0, revenueMap.get(companyId) ?? 0),
+      recentNet: netMap.get(companyId) ?? 0,
+      isSelf: viewerOwnerId === ownerId,
+      businesses: bizes.map((b) => this.toBizPub(b)),
+      marketShares,
+      supplierRanks,
+      badges,
     };
   }
 

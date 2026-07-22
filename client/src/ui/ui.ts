@@ -10,7 +10,7 @@ import {
   CONTRACT_FREQUENCY_SECS, LOTS, BUSINESS_CAPACITY, businessOpenCost,
   companyCapacity, COMPANY_NAME_MIN, COMPANY_NAME_MAX,
   type BizPub, type OrderPub, type AwayReport, type ProductId, type ContractPub,
-  type BusinessType,
+  type BusinessType, type CompanyProfile, type RankingBoard, type CityRankings,
 } from '@district/shared';
 import { client } from '../net.js';
 import { sfx, unlockAudio } from '../audio.js';
@@ -20,7 +20,7 @@ const BIZ_ICON: Record<string, string> = {
   farm: '🐄', coffee_shop: '☕', bakery: '🥖', mini_market: '🛒',
 };
 
-type PanelKind = 'none' | 'business' | 'market' | 'wholesale' | 'dev' | 'info' | 'contracts';
+type PanelKind = 'none' | 'business' | 'market' | 'wholesale' | 'dev' | 'info' | 'contracts' | 'rankings' | 'profile';
 
 interface TabDef {
   id: string;
@@ -65,6 +65,8 @@ export class UI {
   private panelTab = '';
   private infoBizId: number | null = null;
   private proposeFor: number | null = null;
+  private profileCompanyId: number | null = null;
+  private rankingCat = '';
   private flags: Record<string, boolean> = {};
   private objectivesHidden = false;
   private authError = '';
@@ -88,6 +90,15 @@ export class UI {
     });
     client.on('connection', (ok: boolean) => {
       document.getElementById('reconnect')!.classList.toggle('visible', !ok && !!client.token);
+    });
+    client.on('rankings', () => {
+      if (this.panelKind === 'rankings') { this.lastBodyHTML = ''; this.renderPanel(); }
+    });
+    client.on('company_profile', (p: CompanyProfile) => {
+      if (this.panelKind === 'profile' && p.id === this.profileCompanyId) {
+        this.lastBodyHTML = '';
+        this.renderPanel();
+      }
     });
     client.on('contract', (c: ContractPub, prev: ContractPub | undefined) => {
       const me = client.you?.id;
@@ -328,6 +339,7 @@ export class UI {
         <button id="nav-biz">${t('nav.business')}</button>
         <button id="nav-market">${t('nav.market')}</button>
         <button id="nav-contracts">${t('nav.contracts')} <span id="nav-contracts-badge"></span></button>
+        <button id="nav-rankings">${t('nav.rankings')}</button>
         <button id="nav-dev" style="display:none">${t('nav.dev')}</button>
       </div>
       <div class="panel" id="panel">
@@ -365,6 +377,10 @@ export class UI {
       sfx.click();
       this.openPanel('contracts');
     });
+    document.getElementById('nav-rankings')!.addEventListener('click', () => {
+      sfx.click();
+      this.openRankings();
+    });
     document.getElementById('nav-dev')!.addEventListener('click', () => {
       sfx.click();
       this.openPanel('dev');
@@ -399,6 +415,20 @@ export class UI {
     this.openPanel('info');
   }
 
+  openRankings(): void {
+    client.send({ t: 'get_rankings' });
+    this.openPanel('rankings');
+  }
+
+  /** Open a company's public profile (own or another player's). */
+  openCompanyProfile(companyId: number): void {
+    this.profileCompanyId = companyId;
+    // Show cached immediately if it's already the right company; always refresh.
+    if (client.companyProfile?.id !== companyId) client.companyProfile = null;
+    client.send({ t: 'get_company_profile', companyId });
+    this.openPanel('profile');
+  }
+
   openPanel(kind: PanelKind): void {
     this.panelKind = kind;
     this.panelTab = '';
@@ -419,6 +449,7 @@ export class UI {
     document.getElementById('nav-biz')!.classList.toggle('active', this.panelKind === 'business');
     document.getElementById('nav-market')!.classList.toggle('active', this.panelKind === 'market');
     document.getElementById('nav-contracts')!.classList.toggle('active', this.panelKind === 'contracts');
+    document.getElementById('nav-rankings')!.classList.toggle('active', this.panelKind === 'rankings');
     document.getElementById('nav-dev')!.classList.toggle('active', this.panelKind === 'dev');
   }
 
@@ -507,7 +538,7 @@ export class UI {
       });
       bar.querySelector('#co-name')!.addEventListener('click', () => {
         sfx.click();
-        this.showRenameCompany();
+        if (client.company) this.openCompanyProfile(client.company.id);
       });
     }
   }
@@ -654,6 +685,12 @@ export class UI {
         break;
       case 'contracts':
         this.renderContractsPanel(title, tabs, body);
+        break;
+      case 'rankings':
+        this.renderRankingsPanel(title, tabs, body);
+        break;
+      case 'profile':
+        this.renderProfilePanel(title, tabs, body);
         break;
     }
   }
@@ -1019,9 +1056,14 @@ export class UI {
       <div class="kv"><span class="k">${t('info.supplies_label')}</span><span class="v">${suppliesTxt}</span></div>
       <div class="kv"><span class="k">${t('info.successful_trades')}</span><span class="v">${biz.tradeCount ?? 0}</span></div>
       <div class="kv"><span class="k">${t('info.status')}</span><span class="v">${statusText(biz.status)}</span></div>
+      <button class="btn ghost" id="view-company" style="width:100%;margin-top:8px">${t('profile.view_company')}</button>
       ${proposeBlock}
       ${!canContract ? `<div class="hint">${t(myBiz ? 'info.cannot_contract' : 'info.choose_business_first')}</div>` : ''}
     `, (b) => {
+      b.querySelector('#view-company')?.addEventListener('click', () => {
+        sfx.click();
+        this.openCompanyProfile(biz.companyId);
+      });
       b.querySelector('#ct-open')?.addEventListener('click', () => {
         this.proposeFor = biz.id;
         this.lastBodyHTML = '';
@@ -1122,6 +1164,149 @@ export class UI {
         client.send({ t: 'contract_cancel', contractId: parseInt((el as HTMLElement).dataset.ctCancel!, 10) });
         sfx.click();
       }));
+    });
+  }
+
+  // ================= CITY RANKINGS =================
+
+  private renderRankingsPanel(title: HTMLElement, tabs: HTMLElement, body: HTMLElement): void {
+    title.textContent = t('rankings.title');
+    const data = client.rankings;
+    if (!data) {
+      tabs.innerHTML = '';
+      this.setBody(body, `<p class="hint">${t('rankings.loading')}</p>`);
+      return;
+    }
+    const tab = this.tabBar(tabs, data.boards.map((b) => ({ id: b.category, label: t(`rank.cat.${b.category}`) })));
+    const board = data.boards.find((b) => b.category === tab) ?? data.boards[0];
+    this.rankingCat = board.category;
+    this.setBody(body, this.rankingBoardHtml(board), (b) => {
+      b.querySelectorAll('[data-rank-co]').forEach((el) =>
+        el.addEventListener('click', () => {
+          sfx.click();
+          this.openCompanyProfile(parseInt((el as HTMLElement).dataset.rankCo!, 10));
+        })
+      );
+    });
+  }
+
+  private fmtRankValue(unit: RankingBoard['unit'], value: number): string {
+    if (unit === 'money') return fmt(value);
+    if (unit === 'stars') return `★ ${value.toFixed(2)}`;
+    if (unit === 'percent') return `${value >= 0 ? '+' : ''}${value.toFixed(1)}%`;
+    return `${Math.round(value).toLocaleString()}`;
+  }
+
+  private rankingBoardHtml(board: RankingBoard): string {
+    const meId = client.company?.id;
+    const rows = board.top.map((r, i) => {
+      const mine = r.companyId === meId;
+      return `<div class="rank-row ${mine ? 'mine' : ''}" data-rank-co="${r.companyId}">
+        <span class="rank-pos">${i + 1}</span>
+        <span class="rank-name">🏢 ${escapeHtml(r.name)}</span>
+        <span class="rank-val">${this.fmtRankValue(board.unit, r.value)}</span>
+      </div>`;
+    }).join('');
+    let selfLine = '';
+    if (board.self) {
+      selfLine = `<div class="rank-sep">···</div>
+        <div class="rank-row mine" data-rank-co="${board.self.companyId}">
+          <span class="rank-pos">${board.self.rank}</span>
+          <span class="rank-name">🏢 ${escapeHtml(board.self.name)}</span>
+          <span class="rank-val">${this.fmtRankValue(board.unit, board.self.value)}</span>
+        </div>`;
+    } else if (board.selfRank && meId != null) {
+      selfLine = `<div class="rank-selfnote">${t('rankings.your_rank', { rank: board.selfRank })}</div>`;
+    }
+    const desc = t(`rank.desc.${board.category}`);
+    return `<div class="rank-desc">${desc}</div>` +
+      (rows ? rows : `<p class="hint">${t('rankings.empty')}</p>`) + selfLine;
+  }
+
+  // ================= COMPANY PROFILE =================
+
+  private renderProfilePanel(title: HTMLElement, tabs: HTMLElement, body: HTMLElement): void {
+    tabs.innerHTML = '';
+    const p = client.companyProfile;
+    if (!p || p.id !== this.profileCompanyId) {
+      title.textContent = t('profile.title');
+      this.setBody(body, `<p class="hint">${t('profile.loading')}</p>`);
+      return;
+    }
+    title.textContent = `🏢 ${p.name}`;
+    const online = client.players.find((pl) => pl.id === p.ownerId)?.online;
+    const founded = new Date(p.foundedAt).toLocaleDateString(getLang() === 'tr' ? 'tr-TR' : 'en-US');
+    const badges = p.badges.map((bd) => `<span class="profile-badge">${t(`badge.${bd}`)}</span>`).join('');
+
+    const shareCards = p.marketShares.map((m) => {
+      const pct = (m.share * 100).toFixed(1);
+      const barW = Math.min(100, m.share * 100);
+      let trend = '';
+      if (m.prevShare != null) {
+        const prevPct = m.prevShare * 100;
+        const delta = m.share * 100 - prevPct;
+        const arrow = delta >= 0 ? '↑' : '↓';
+        trend = `<div class="share-trend ${delta >= 0 ? 'pos' : 'neg'}">${prevPct.toFixed(1)}% → ${pct}% ${arrow} ${delta >= 0 ? '+' : ''}${delta.toFixed(1)} ${t('profile.pts')}</div>`;
+      }
+      return `<div class="share-card">
+        <div class="share-head"><span>${PRODUCTS[m.product].emoji} ${t(`rank.cat.${m.product === 'milk' ? 'milk_retail' : m.product}`)}</span>
+          <span class="share-rank">${t('profile.city_rank', { rank: m.rank })}</span></div>
+        <div class="share-bar"><div style="width:${barW}%"></div><span class="share-pct">${pct}%</span></div>
+        <div class="share-sub">${t('profile.window_sales', { n: Math.round(m.units).toLocaleString() })}</div>
+        ${trend}
+      </div>`;
+    }).join('');
+
+    const supplierRows = p.supplierRanks.map((s) =>
+      `<div class="kv"><span class="k">${PRODUCTS[s.product].emoji} ${t(`rank.cat.${s.product}_supplier`)}</span>
+        <span class="v">${t('profile.city_rank', { rank: s.rank })} · ${Math.round(s.units).toLocaleString()} ${t('profile.units')}</span></div>`
+    ).join('');
+
+    const bizRows = p.businesses.map((b) =>
+      `<div class="profile-biz" data-focus-lot="${b.lotId}">
+        <span class="pb-icon">${BIZ_ICON[b.type] ?? '🏪'}</span>
+        <span class="pb-main"><b>${bizName(b.type)}</b><br/><span class="cap">${t('biz.level')} ${b.level} · ★ ${(b.reputation ?? 3).toFixed(1)}</span></span>
+      </div>`
+    ).join('');
+
+    const html = `
+      <div class="profile-top">
+        <div>${badges || ''}</div>
+        <div class="kv"><span class="k">${t('info.owner')}</span><span class="v">${escapeHtml(p.ownerName)} ${t(online ? 'info.online' : 'info.offline')}</span></div>
+        <div class="kv"><span class="k">${t('company.level_label')}</span><span class="v">${p.level}</span></div>
+        <div class="kv"><span class="k">${t('company.capacity_label')}</span><span class="v">${p.capacityUsed} / ${p.capacity}</span></div>
+        <div class="kv"><span class="k">${t('biz.reputation')}</span><span class="v">★ ${p.reputation.toFixed(2)}</span></div>
+        <div class="kv"><span class="k">${t('profile.businesses')}</span><span class="v">${p.businessCount}</span></div>
+        <div class="kv"><span class="k">${t('info.successful_trades')}</span><span class="v">${p.tradeCount}</span></div>
+        <div class="kv"><span class="k">${t('profile.active_contracts')}</span><span class="v">${p.activeContracts}</span></div>
+        <div class="kv"><span class="k">${t('profile.founded')}</span><span class="v">${founded}</span></div>
+      </div>
+      <div class="profile-window">
+        <h4>${t('profile.last_days')}</h4>
+        <div class="kv"><span class="k">${t('profile.recent_revenue')}</span><span class="v pos">${fmt(p.recentRevenue)}</span></div>
+        <div class="kv"><span class="k">${t('profile.recent_net')}</span><span class="v ${p.recentNet >= 0 ? 'pos' : 'neg'}">${p.recentNet >= 0 ? '+' : ''}${fmt(p.recentNet)}</span></div>
+      </div>
+      ${shareCards ? `<h4 class="profile-h">${t('profile.market_share')}</h4>${shareCards}` : ''}
+      ${supplierRows ? `<h4 class="profile-h">${t('profile.supplier_ranks')}</h4>${supplierRows}` : ''}
+      <h4 class="profile-h">${t('profile.owned_businesses')}</h4>
+      ${bizRows}
+      ${p.isSelf ? `<button class="btn ghost" id="profile-rename" style="width:100%;margin-top:12px">${t('company.rename_title')}</button>` : ''}
+    `;
+    this.setBody(body, html, (b) => {
+      b.querySelectorAll('[data-focus-lot]').forEach((el) =>
+        el.addEventListener('click', () => {
+          sfx.click();
+          const lotId = (el as HTMLElement).dataset.focusLot!;
+          this.onFocusLot?.(lotId);
+          const biz = [...client.businesses.values()].find((x) => x.lotId === lotId);
+          if (biz && !client.myBusinesses.has(biz.id)) this.openInfo(biz.id);
+          else if (biz) { client.selectBiz(biz.id); this.openBusiness(); }
+        })
+      );
+      b.querySelector('#profile-rename')?.addEventListener('click', () => {
+        sfx.click();
+        this.showRenameCompany();
+      });
     });
   }
 

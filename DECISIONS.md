@@ -99,3 +99,41 @@
 - **All audio is synthesized WebAudio** (clicks, sale/purchase chimes, upgrade
   fanfare, delivery ding, ambient bed) — respects autoplay rules by starting
   on first user gesture.
+
+## V2.2 — Market share, company profile & city rankings
+
+- **Rolling 7-day window (real time), not lifetime.** Competitive rankings use
+  recent activity so early players can't permanently hold the top. We read the
+  spec's "7 game days" as 7 real days — the natural "recent" horizon for a
+  persistent, mostly-offline idle economy. The contract cadence's 45s "game
+  day" is a separate concept and deliberately not reused for rankings.
+- **One small append-only table, plus the existing ledger.** `company_activity`
+  (migration 006) records only the per-product *unit* flows the ledger lacks:
+  `final_sale` (NPC retail → market share) and `supplier_sale` (external
+  player-to-player marketplace/contract volume → supplier ranks). Recent
+  revenue, net cash flow and growth are derived from the existing
+  `economic_ledger`. No analytics database, no per-tick global scans.
+- **Stats are recorded inside the same transaction as the money.** Final sales
+  queue alongside the CUSTOMER_SALE ledger row and flush together; marketplace
+  and contract supplier rows are written in those operations' own commit
+  transactions. So a failed sale or a rejected double-fulfill can never inflate
+  a statistic, and every metric survives logout/reconnect/restart.
+- **Market share is final-consumer only.** Internal transfers don't exist
+  (inventory is per-business, no company-internal transfer), and marketplace /
+  contract flows are counted as *supplier* volume, never as final market share.
+  NPC wholesale supply is never counted as player market activity.
+- **Net cash flow, not "profit".** True per-window profit is hard to attribute
+  cleanly from the ledger, so the profile/rankings show net cash flow over the
+  window and label it as such — no misleading metric.
+- **Company reputation** is an activity-weighted average of its businesses'
+  reputations (weight = 1 + lifetime units the business has moved), falling back
+  to a plain average when there's no activity — reusing existing per-business
+  reputation rather than a new model.
+- **Fastest-growing guards against new-company nonsense:** a company is eligible
+  only if both the current and previous window clear a recent-revenue floor
+  ($5,000), so going $0 → $100 can't vault to #1.
+- **On-demand with a 5s cache.** Rankings are computed from a handful of indexed
+  queries when requested and cached briefly; per-viewer "your rank" markers are
+  layered on cheaply in memory. Profiles expose only public data (company,
+  public businesses, reputation, rankings, market share, trade counts) — never
+  cash, inventory, contract pricing, or ledger entries.

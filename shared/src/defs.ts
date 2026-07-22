@@ -241,3 +241,43 @@ export const COMPANY_NAME_MAX = 24;
 export function defaultCompanyName(username: string): string {
   return `${username} Co.`.slice(0, COMPANY_NAME_MAX);
 }
+
+// ============================================================
+// V2.2 — Market share, company profile & city rankings
+// ============================================================
+// Competitive rankings use a rolling "recent activity" window rather than
+// lifetime totals, so early players cannot lock in the top spots. We interpret
+// the spec's "last 7 game days" as 7 real days: the natural "recent" horizon
+// for a persistent, mostly-offline idle economy. (The contract cadence's
+// 45s "game day" is a separate concept and deliberately not reused here.)
+export const RANKING_WINDOW_SECONDS = 7 * 24 * 3600;
+
+// Products whose NPC retail sales define final-consumer market share.
+export const FINAL_MARKET_PRODUCTS: ProductId[] = ['bread', 'coffee', 'milk'];
+// Raw materials ranked by external (player-to-player) supplier volume instead.
+export const SUPPLIER_PRODUCTS: ProductId[] = ['wheat', 'milk'];
+
+// Fastest-growing compares this window's revenue with the previous window's.
+// A company must clear this recent-revenue floor (in $) to be eligible, so a
+// brand-new company going $0 -> $100 cannot vault to #1 on a % change.
+export const GROWTH_MIN_REVENUE = 5000;
+
+// How many entries a ranking board shows before falling back to "your rank".
+export const RANKING_TOP_N = 10;
+
+// Locale-independent ranking category codes (client maps to labels).
+export type RankingCategory =
+  | 'recent_revenue'
+  | 'net_cash_flow'
+  | 'reputation'
+  | 'growth'
+  | 'bread'
+  | 'coffee'
+  | 'milk_retail'
+  | 'wheat_supplier'
+  | 'milk_supplier';
+
+export const RANKING_CATEGORIES: RankingCategory[] = [
+  'recent_revenue', 'net_cash_flow', 'reputation', 'growth',
+  'bread', 'coffee', 'milk_retail', 'wheat_supplier', 'milk_supplier',
+];

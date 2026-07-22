@@ -123,6 +123,49 @@ button { font-family: inherit; }
 .open-lot .ol-meta { font-size: 12px; color: #64748b; }
 .open-lot .neg { color: #dc2626; font-weight: 700; }
 
+/* ---------- city rankings ---------- */
+.rank-desc { font-size: 12px; color: #64748b; margin-bottom: 10px; }
+.rank-row {
+  display: flex; align-items: center; gap: 10px; padding: 8px 10px; border-radius: 10px;
+  cursor: pointer; border: 1px solid transparent;
+}
+.rank-row:hover { background: #f1f5f9; }
+.rank-row.mine { background: #eef4ff; border-color: #c7dbff; }
+.rank-pos { min-width: 26px; font-weight: 800; color: #94a3b8; text-align: center; }
+.rank-row.mine .rank-pos { color: #1d4ed8; }
+.rank-name { flex: 1; font-weight: 700; font-size: 14px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.rank-val { font-weight: 800; font-size: 14px; color: #0f172a; }
+.rank-sep { text-align: center; color: #cbd5e1; letter-spacing: 3px; padding: 2px 0; }
+.rank-selfnote { margin-top: 8px; text-align: center; font-size: 13px; font-weight: 700; color: #1d4ed8; }
+
+/* ---------- company profile ---------- */
+.profile-top .kv, .profile-window .kv { padding: 3px 0; }
+.profile-badge {
+  display: inline-block; background: linear-gradient(135deg,#fde68a,#fbbf24); color: #7c2d12;
+  font-size: 12px; font-weight: 800; padding: 4px 10px; border-radius: 999px; margin: 0 6px 6px 0;
+}
+.profile-window { background: #f8fafc; border-radius: 12px; padding: 10px 12px; margin: 12px 0; }
+.profile-window h4, .profile-h { font-size: 12px; text-transform: uppercase; letter-spacing: 0.6px; color: #64748b; margin: 0 0 6px; }
+.profile-h { margin-top: 16px; }
+.share-card { border: 1px solid #e2e8f0; border-radius: 12px; padding: 10px 12px; margin-bottom: 8px; }
+.share-head { display: flex; justify-content: space-between; font-weight: 700; font-size: 13px; margin-bottom: 6px; }
+.share-rank { color: #1d4ed8; }
+.share-bar { position: relative; background: #e2e8f0; border-radius: 6px; height: 18px; overflow: hidden; }
+.share-bar > div { position: absolute; inset: 0 auto 0 0; background: linear-gradient(90deg,#3b82f6,#1d4ed8); border-radius: 6px; }
+.share-pct { position: absolute; right: 8px; top: 0; line-height: 18px; font-size: 11px; font-weight: 800; color: #0f172a; }
+.share-sub { font-size: 12px; color: #64748b; margin-top: 5px; }
+.share-trend { font-size: 12px; font-weight: 700; margin-top: 3px; }
+.share-trend.pos { color: #16a34a; }
+.share-trend.neg { color: #dc2626; }
+.profile-biz {
+  display: flex; align-items: center; gap: 10px; padding: 8px 10px; border-radius: 10px;
+  cursor: pointer; border: 1px solid #eef2f7; margin-bottom: 6px;
+}
+.profile-biz:hover { border-color: #1d4ed8; background: #f8fbff; }
+.profile-biz .pb-icon { font-size: 22px; }
+.profile-biz .pb-main { font-size: 13px; }
+.profile-biz .cap { font-size: 11px; color: #94a3b8; }
+
 .nav {
   position: absolute; bottom: 16px; left: 50%; transform: translateX(-50%);
   display: flex; gap: 8px; pointer-events: auto;

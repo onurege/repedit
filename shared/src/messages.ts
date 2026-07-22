@@ -3,7 +3,7 @@
 // The client only ever sends INTENT; the server owns all state.
 // ============================================================
 
-import type { BusinessType, ProductId } from './defs.js';
+import type { BusinessType, ProductId, RankingCategory } from './defs.js';
 
 // ---------- client -> server ----------
 // Actions that target one of the player's businesses carry an optional
@@ -25,6 +25,8 @@ export type ClientMsg =
   | { t: 'contract_reject'; contractId: number }
   | { t: 'contract_cancel'; contractId: number }
   | { t: 'dev'; cmd: string; value?: number; bizId?: number }
+  | { t: 'get_rankings' }
+  | { t: 'get_company_profile'; companyId: number }
   | { t: 'ping' };
 
 // ---------- server -> client ----------
@@ -101,6 +103,68 @@ export interface CompanyPriv extends CompanyPub {
   capacity: number;           // total management capacity
   capacityUsed: number;       // sum of owned business capacities
   businessCount: number;
+}
+
+// ---------- V2.2: market share, company profile & city rankings ----------
+
+/** A company's standing in one final-consumer product market. */
+export interface MarketShareEntry {
+  product: ProductId;
+  units: number;        // this company's recent NPC sales (units)
+  cityUnits: number;    // whole-city recent NPC sales for the product
+  share: number;        // 0..1 (units / cityUnits)
+  rank: number;         // 1-based city rank among companies with activity
+  prevShare?: number;   // previous-window share, when cheaply available
+}
+
+/** A company's standing as an external supplier of a raw material. */
+export interface SupplierRankEntry {
+  product: ProductId;
+  units: number;        // recent external (P2P/contract) units supplied
+  rank: number;         // 1-based city rank among suppliers with activity
+}
+
+/** Public competitive profile of a company (safe to show to anyone). */
+export interface CompanyProfile {
+  id: number;
+  ownerId: number;
+  ownerName: string;
+  name: string;
+  level: number;
+  capacity: number;
+  capacityUsed: number;
+  reputation: number;         // aggregated company reputation (1..5)
+  businessCount: number;
+  foundedAt: number;          // epoch ms
+  tradeCount: number;         // successful trades + contract deliveries
+  activeContracts: number;
+  recentRevenue: number;      // rolling window, $ (gross inflows)
+  recentNet: number;          // rolling window net cash flow, $ (signed)
+  isSelf: boolean;
+  businesses: BizPub[];       // owned businesses (public view)
+  marketShares: MarketShareEntry[];
+  supplierRanks: SupplierRankEntry[];
+  badges: string[];           // e.g. 'top_bread' — small profile badges
+}
+
+export interface RankingRow {
+  companyId: number;
+  ownerId: number;
+  name: string;
+  value: number;      // metric value (units, $, rep, or growth %)
+}
+
+export interface RankingBoard {
+  category: RankingCategory;
+  unit: 'money' | 'units' | 'stars' | 'percent';
+  top: RankingRow[];              // up to RANKING_TOP_N
+  self?: RankingRow & { rank: number }; // present if outside the top N
+  selfRank?: number;              // the player's own rank (any position)
+}
+
+export interface CityRankings {
+  boards: RankingBoard[];
+  serverTime: number;
 }
 
 export interface BizPriv extends BizPub {
@@ -216,4 +280,6 @@ export type ServerMsg =
   | { t: 'toast'; code: string; params?: MsgParams; kind?: 'info' | 'success' | 'error' }
   | { t: 'error'; code: string; params?: MsgParams }
   | { t: 'level_up'; level: number }
+  | { t: 'rankings'; rankings: CityRankings }
+  | { t: 'company_profile'; profile: CompanyProfile }
   | { t: 'pong' };
