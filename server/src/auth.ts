@@ -36,14 +36,14 @@ export function registerAuthRoutes(app: Express): void {
     try {
       const { username, password } = req.body ?? {};
       if (!validUsername(username)) {
-        return res.status(400).json({ error: 'Username must be 3-20 chars (letters, digits, _ or -).' });
+        return res.status(400).json({ code: 'auth.username_invalid' });
       }
       if (typeof password !== 'string' || password.length < 4) {
-        return res.status(400).json({ error: 'Password must be at least 4 characters.' });
+        return res.status(400).json({ code: 'auth.password_short' });
       }
       const existing = await query('SELECT 1 FROM players WHERE lower(username) = lower($1)', [username]);
       if (existing.rowCount) {
-        return res.status(409).json({ error: 'Username already taken.' });
+        return res.status(409).json({ code: 'auth.username_taken' });
       }
       const ins = await query(
         'INSERT INTO players (username, pass_hash, cash) VALUES ($1, $2, $3) RETURNING id, username',
@@ -54,7 +54,7 @@ export function registerAuthRoutes(app: Express): void {
       res.json({ token, playerId: player.id, username: player.username });
     } catch (err) {
       console.error('[auth] register failed', err);
-      res.status(500).json({ error: 'Registration failed.' });
+      res.status(500).json({ code: 'auth.register_failed' });
     }
   });
 
@@ -62,21 +62,21 @@ export function registerAuthRoutes(app: Express): void {
     try {
       const { username, password } = req.body ?? {};
       if (typeof username !== 'string' || typeof password !== 'string') {
-        return res.status(400).json({ error: 'Missing credentials.' });
+        return res.status(400).json({ code: 'auth.missing_credentials' });
       }
       const found = await query(
         'SELECT id, username, pass_hash FROM players WHERE lower(username) = lower($1)',
         [username]
       );
       if (!found.rowCount || !verifyPassword(password, found.rows[0].pass_hash)) {
-        return res.status(401).json({ error: 'Invalid username or password.' });
+        return res.status(401).json({ code: 'auth.invalid_credentials' });
       }
       const player = found.rows[0];
       const token = await createSession(player.id);
       res.json({ token, playerId: player.id, username: player.username });
     } catch (err) {
       console.error('[auth] login failed', err);
-      res.status(500).json({ error: 'Login failed.' });
+      res.status(500).json({ code: 'auth.login_failed' });
     }
   });
 }

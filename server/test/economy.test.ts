@@ -22,7 +22,7 @@ describe('farm production', () => {
     world.simulate(biz, 100, true); // 100s at 0.5/s = 50 milk
     expect(biz.inv.get('milk')!.qty).toBe(50);
     expect(biz.milkProduced).toBe(50);
-    expect(biz.status).toBe('PRODUCING');
+    expect(biz.status).toBe('producing');
   });
 
   it('never exceeds storage capacity and pauses when full', async () => {
@@ -30,7 +30,7 @@ describe('farm production', () => {
     const biz = await world.chooseBusiness(pid, 'farm');
     world.simulate(biz, 100000, true);
     expect(biz.inv.get('milk')!.qty).toBe(FARM_LEVELS[1].milkCapacity);
-    expect(biz.status).toBe('STORAGE FULL');
+    expect(biz.status).toBe('storage_full');
     // full storage must not bank production for later
     world.simulate(biz, 1, true);
     expect(biz.prodAccum).toBeLessThanOrEqual(1.5);
@@ -55,7 +55,7 @@ describe('coffee shop', () => {
     world.simulate(biz, 300, true);
     expect(biz.coffeeSold).toBe(0);
     expect(p.cash).toBe(cashBefore);
-    expect(biz.status).toBe('OUT OF STOCK');
+    expect(biz.status).toBe('out_of_stock');
 
     // Give ingredients: sales happen and inputs are consumed 1:1.
     biz.inv.get('milk')!.qty = 50;

@@ -67,11 +67,23 @@ import {
   type TradeRow,
   type AwayReport,
   type InventoryEntry,
+  type BizStatus,
+  type ContractResult,
+  type MsgParams,
   type ContractPub,
 } from '@district/shared';
 import { query, tx } from '../db.js';
 
-export class GameError extends Error {}
+/**
+ * A player-facing failure. Carries a locale-independent `code` (plus
+ * interpolation params) so the client renders it in the player's language;
+ * the Error message itself is only for server logs.
+ */
+export class GameError extends Error {
+  constructor(readonly code: string, readonly params?: MsgParams) {
+    super(code);
+  }
+}
 
 export interface PlayerRec {
   id: number;
@@ -114,7 +126,7 @@ export interface BizRec {
   prodAccum: number;
   brewAccum: number;
   custAccum: number;
-  status: string;
+  status: BizStatus;
   inv: Map<ProductId, InvRec>;
   tradeCount: number; // successful player trades + contract deliveries (public)
   dirty: boolean;
@@ -133,7 +145,7 @@ export interface ContractRec {
   totalDeliveries: number;
   remaining: number;
   status: 'proposed' | 'active' | 'completed' | 'rejected' | 'cancelled';
-  lastResult: string | null;
+  lastResult: ContractResult | null;
   nextExecutionAtMs: number | null;
   createdAtMs: number;
 }
@@ -246,13 +258,13 @@ export class World extends EventEmitter {
 
   private player(id: number): PlayerRec {
     const p = this.players.get(id);
-    if (!p) throw new GameError('Unknown player.');
+    if (!p) throw new GameError('err.unknown_player');
     return p;
   }
 
   private requireBiz(playerId: number): BizRec {
     const b = this.bizByOwner(playerId);
-    if (!b) throw new GameError('You need a business first.');
+    if (!b) throw new GameError('err.need_business');
     return b;
   }
 
@@ -496,7 +508,7 @@ export class World extends EventEmitter {
       // Offline progression cap: pause businesses whose owner has been
       // away for a long time (prevents unbounded idle income).
       if (owner && owner.connections === 0 && now - owner.lastSeenMs > OFFLINE_CAP_SECONDS * 1000) {
-        biz.status = 'PAUSED (owner away)';
+        biz.status = 'paused_away';
         continue;
       }
       this.simulate(biz, dt, false);
@@ -551,7 +563,7 @@ export class World extends EventEmitter {
         }
         // Full storage must not bank production time.
         if (biz.prodAccum > 1) biz.prodAccum = 1;
-        biz.status = space - add <= 0 ? 'STORAGE FULL' : 'PRODUCING';
+        biz.status = space - add <= 0 ? 'storage_full' : 'producing';
         break;
       }
       case 'coffee_shop': {
@@ -582,7 +594,7 @@ export class World extends EventEmitter {
         biz.custAccum -= arrivals;
         this.applyRetail(biz, owner, 'coffee', biz.price, arrivals, silent);
         const canServe = coffee.qty > 0 || (milk.qty > 0 && beans.qty > 0);
-        biz.status = canServe ? 'OPEN' : 'OUT OF STOCK';
+        biz.status = canServe ? 'open' : 'out_of_stock';
         break;
       }
       case 'bakery': {
@@ -607,7 +619,7 @@ export class World extends EventEmitter {
         const arrivals = Math.floor(biz.custAccum);
         biz.custAccum -= arrivals;
         this.applyRetail(biz, owner, 'bread', biz.price, arrivals, silent);
-        biz.status = bread.qty > 0 || wheat.qty > 0 ? 'OPEN' : 'OUT OF STOCK';
+        biz.status = bread.qty > 0 || wheat.qty > 0 ? 'open' : 'out_of_stock';
         break;
       }
       case 'mini_market': {
@@ -624,7 +636,7 @@ export class World extends EventEmitter {
         biz.prodAccum -= milkArrivals;
         this.applyRetail(biz, owner, 'milk', biz.price2, milkArrivals, silent);
         biz.status =
-          inv(biz, 'bread').qty > 0 || inv(biz, 'milk').qty > 0 ? 'OPEN' : 'OUT OF STOCK';
+          inv(biz, 'bread').qty > 0 || inv(biz, 'milk').qty > 0 ? 'open' : 'out_of_stock';
         break;
       }
     }
@@ -688,7 +700,7 @@ export class World extends EventEmitter {
     let p = this.players.get(playerId);
     if (!p) {
       const res = await query('SELECT * FROM players WHERE id=$1', [playerId]);
-      if (!res.rowCount) throw new GameError('Unknown player.');
+      if (!res.rowCount) throw new GameError('err.unknown_player');
       const r = res.rows[0];
       p = {
         id: r.id,
@@ -756,11 +768,11 @@ export class World extends EventEmitter {
 
   async chooseBusiness(playerId: number, type: BusinessType): Promise<BizRec> {
     const p = this.player(playerId);
-    if (this.bizByOwner(playerId)) throw new GameError('You already own a business.');
-    if (!STARTING_PRODUCTS[type]) throw new GameError('Unknown business type.');
+    if (this.bizByOwner(playerId)) throw new GameError('err.already_own_business');
+    if (!STARTING_PRODUCTS[type]) throw new GameError('err.unknown_business_type');
     const taken = new Set([...this.businesses.values()].map((b) => b.lotId));
     const lot = lotsOfKind(type).find((l) => !taken.has(l.id));
-    if (!lot) throw new GameError('No free lots for that business type right now.');
+    if (!lot) throw new GameError('err.no_free_lots');
 
     const row = await tx(async (c) => {
       const defaultPrice = type === 'coffee_shop' ? DEFAULT_COFFEE_PRICE : DEFAULT_BREAD_PRICE;
@@ -798,7 +810,7 @@ export class World extends EventEmitter {
       prodAccum: 0,
       brewAccum: 0,
       custAccum: 0,
-      status: type === 'farm' ? 'PRODUCING' : 'OUT OF STOCK',
+      status: type === 'farm' ? 'producing' : 'out_of_stock',
       inv: new Map(),
       tradeCount: 0,
       dirty: false,
@@ -814,18 +826,18 @@ export class World extends EventEmitter {
     const p = this.player(playerId);
     const biz = this.requireBiz(playerId);
     qty = Math.floor(qty);
-    if (!Number.isFinite(qty) || qty < 1 || qty > MARKET_MAX_QTY) throw new GameError('Invalid quantity.');
+    if (!Number.isFinite(qty) || qty < 1 || qty > MARKET_MAX_QTY) throw new GameError('err.invalid_qty');
     const unit = NPC_WHOLESALE_PRICES[product];
-    if (!unit) throw new GameError('Central Wholesale does not sell that.');
+    if (!unit) throw new GameError('err.wholesale_no_product');
     const cap = capacityFor(biz, product);
-    if (cap <= 0) throw new GameError(`Your ${biz.type === 'farm' ? 'farm' : 'shop'} cannot store ${PRODUCTS[product].name}.`);
+    if (cap <= 0) throw new GameError('err.cannot_store_product', { bizType: biz.type, product });
     const rec = inv(biz, product);
     const incoming = this.incomingFor(biz.id, product);
     if (rec.qty + rec.reserved + incoming + qty > cap) {
-      throw new GameError(`Not enough storage space (capacity ${cap}).`);
+      throw new GameError('err.not_enough_storage', { cap });
     }
     const cost = unit * qty;
-    if (p.cash < cost) throw new GameError(`Not enough cash ($${cost} needed).`);
+    if (p.cash < cost) throw new GameError('err.not_enough_cash', { cost });
 
     // Mutate memory synchronously, then persist.
     p.cash -= cost;
@@ -878,7 +890,7 @@ export class World extends EventEmitter {
   ): Promise<DeliveryRec> {
     const fromLot = lotById(fromLotId);
     const toLot = lotById(toBiz.lotId);
-    if (!fromLot || !toLot) throw new GameError('Bad delivery route.');
+    if (!fromLot || !toLot) throw new GameError('err.bad_delivery_route');
     const path = roadPath({ x: fromLot.x, z: fromLot.z }, { x: toLot.x, z: toLot.z });
     const seconds = Math.max(MIN_DELIVERY_SECONDS, pathLength(path) / VAN_SPEED);
     const now = Date.now();
@@ -939,21 +951,21 @@ export class World extends EventEmitter {
     const biz = this.requireBiz(playerId);
     qty = Math.floor(qty);
     price = Math.floor(price);
-    if (!TRADABLE.includes(product)) throw new GameError('That product is not tradable.');
-    if (!Number.isFinite(qty) || qty < 1 || qty > MARKET_MAX_QTY) throw new GameError('Invalid quantity.');
+    if (!TRADABLE.includes(product)) throw new GameError('err.not_tradable');
+    if (!Number.isFinite(qty) || qty < 1 || qty > MARKET_MAX_QTY) throw new GameError('err.invalid_qty');
     if (!Number.isFinite(price) || price < MARKET_MIN_PRICE || price > MARKET_MAX_PRICE) {
-      throw new GameError(`Price must be $${MARKET_MIN_PRICE}-$${MARKET_MAX_PRICE}.`);
+      throw new GameError('err.price_range', { min: MARKET_MIN_PRICE, max: MARKET_MAX_PRICE });
     }
 
     if (side === 'sell') {
       const rec = inv(biz, product);
-      if (rec.qty < qty) throw new GameError(`You only have ${rec.qty} ${PRODUCTS[product].name}.`);
+      if (rec.qty < qty) throw new GameError('err.only_have', { qty: rec.qty, product });
       rec.qty -= qty;
       rec.reserved += qty; // physically still on the lot, escrowed for the market
     } else {
       const cost = qty * price;
-      if (p.cash < cost) throw new GameError(`Not enough cash to escrow $${cost}.`);
-      if (capacityFor(biz, product) <= 0) throw new GameError('Your business cannot store that product.');
+      if (p.cash < cost) throw new GameError('err.not_enough_cash_escrow', { cost });
+      if (capacityFor(biz, product) <= 0) throw new GameError('err.cannot_store_that');
       p.cash -= cost; // escrow
       p.dirty = true;
     }
@@ -1012,8 +1024,8 @@ export class World extends EventEmitter {
   async cancelOrder(playerId: number, orderId: number): Promise<void> {
     const p = this.player(playerId);
     const order = this.orders.get(orderId);
-    if (!order || order.status !== 'open') throw new GameError('Order is not open.');
-    if (order.playerId !== playerId) throw new GameError('Not your order.');
+    if (!order || order.status !== 'open') throw new GameError('err.order_not_open');
+    if (order.playerId !== playerId) throw new GameError('err.not_your_order');
     const biz = this.requireBiz(playerId);
 
     order.status = 'cancelled';
@@ -1056,19 +1068,19 @@ export class World extends EventEmitter {
    * per-order lock guards the async persistence window.
    */
   async fulfillOrder(playerId: number, orderId: number, qty: number): Promise<TradeRow> {
-    if (this.fulfillLocks.has(orderId)) throw new GameError('Order is being processed, try again.');
+    if (this.fulfillLocks.has(orderId)) throw new GameError('err.order_processing');
     const fulfiller = this.player(playerId);
     const fulfillerBiz = this.requireBiz(playerId);
     const order = this.orders.get(orderId);
     if (!order || order.status !== 'open' || order.remaining <= 0) {
-      throw new GameError('Order is no longer available.');
+      throw new GameError('err.order_unavailable');
     }
-    if (order.playerId === playerId) throw new GameError('You cannot fulfill your own order.');
+    if (order.playerId === playerId) throw new GameError('err.own_order');
     const owner = this.player(order.playerId);
     const ownerBiz = this.bizByOwner(order.playerId);
-    if (!ownerBiz) throw new GameError('Counterparty has no business.');
+    if (!ownerBiz) throw new GameError('err.counterparty_no_business');
     qty = Math.floor(qty);
-    if (!Number.isFinite(qty) || qty < 1) throw new GameError('Invalid quantity.');
+    if (!Number.isFinite(qty) || qty < 1) throw new GameError('err.invalid_qty');
     qty = Math.min(qty, order.remaining);
     const amount = qty * order.price;
 
@@ -1080,7 +1092,7 @@ export class World extends EventEmitter {
       seller = fulfiller;
       sellerBiz = fulfillerBiz;
       const rec = inv(sellerBiz, order.product);
-      if (rec.qty < qty) throw new GameError(`You only have ${rec.qty} ${PRODUCTS[order.product].name}.`);
+      if (rec.qty < qty) throw new GameError('err.only_have', { qty: rec.qty, product: order.product });
       rec.qty -= qty;
       seller.cash += amount; // buyer's escrow pays out
     } else {
@@ -1089,10 +1101,10 @@ export class World extends EventEmitter {
       sellerBiz = ownerBiz;
       buyer = fulfiller;
       buyerBiz = fulfillerBiz;
-      if (capacityFor(buyerBiz, order.product) <= 0) throw new GameError('Your business cannot store that product.');
-      if (buyer.cash < amount) throw new GameError(`Not enough cash ($${amount} needed).`);
+      if (capacityFor(buyerBiz, order.product) <= 0) throw new GameError('err.cannot_store_that');
+      if (buyer.cash < amount) throw new GameError('err.not_enough_cash', { cost: amount });
       const rec = inv(sellerBiz, order.product);
-      if (rec.reserved < qty) throw new GameError('Seller stock unavailable.');
+      if (rec.reserved < qty) throw new GameError('err.seller_stock_unavailable');
       buyer.cash -= amount;
       seller.cash += amount;
       rec.reserved -= qty;
@@ -1120,7 +1132,7 @@ export class World extends EventEmitter {
           [order.remaining, order.status, orderId]
         );
         if (!upd.rowCount && order.status === 'open') {
-          throw new GameError('Order state changed, aborting.');
+          throw new GameError('err.order_state_changed');
         }
         await c.query('UPDATE players SET cash=$1, xp=$2, level=$3 WHERE id=$4', [
           buyer.cash, buyer.xp, buyer.level, buyer.id,
@@ -1201,15 +1213,15 @@ export class World extends EventEmitter {
   async upgrade(playerId: number): Promise<void> {
     const p = this.player(playerId);
     const biz = this.requireBiz(playerId);
-    if (biz.level >= MAX_LEVEL) throw new GameError('Already at max level.');
+    if (biz.level >= MAX_LEVEL) throw new GameError('err.max_level');
     const cost = {
       farm: FARM_LEVELS[biz.level].upgradeCost,
       coffee_shop: SHOP_LEVELS[biz.level].upgradeCost,
       bakery: BAKERY_LEVELS[biz.level].upgradeCost,
       mini_market: MARKET_LEVELS[biz.level].upgradeCost,
     }[biz.type];
-    if (cost == null) throw new GameError('Already at max level.');
-    if (p.cash < cost) throw new GameError(`Upgrade costs $${cost}.`);
+    if (cost == null) throw new GameError('err.max_level');
+    if (p.cash < cost) throw new GameError('err.upgrade_cost', { cost });
     p.cash -= cost;
     p.dirty = true;
     biz.level += 1;
@@ -1243,7 +1255,7 @@ export class World extends EventEmitter {
 
   private requireContract(id: number): ContractRec {
     const c = this.contracts.get(id);
-    if (!c) throw new GameError('Contract not found.');
+    if (!c) throw new GameError('err.contract_not_found');
     return c;
   }
 
@@ -1258,24 +1270,24 @@ export class World extends EventEmitter {
   ): Promise<ContractRec> {
     const buyerBiz = this.requireBiz(buyerId);
     const sellerBiz = this.businesses.get(sellerBizId);
-    if (!sellerBiz) throw new GameError('That business no longer exists.');
-    if (sellerBiz.ownerId === buyerId) throw new GameError('You cannot contract with yourself.');
+    if (!sellerBiz) throw new GameError('err.business_gone');
+    if (sellerBiz.ownerId === buyerId) throw new GameError('err.contract_self');
     quantity = Math.floor(quantity);
     unitPrice = Math.floor(unitPrice);
     deliveries = Math.floor(deliveries);
     if (!contractableProducts(sellerBiz.type, buyerBiz.type).includes(product)) {
-      throw new GameError('That business cannot supply this product to yours.');
+      throw new GameError('err.contract_bad_supply');
     }
     if (!Number.isFinite(quantity) || quantity < 1 || quantity > CONTRACT_MAX_QTY) {
-      throw new GameError(`Quantity must be 1-${CONTRACT_MAX_QTY}.`);
+      throw new GameError('err.contract_qty_range', { max: CONTRACT_MAX_QTY });
     }
     if (!Number.isFinite(unitPrice) || unitPrice < MARKET_MIN_PRICE || unitPrice > MARKET_MAX_PRICE) {
-      throw new GameError(`Unit price must be $${MARKET_MIN_PRICE}-$${MARKET_MAX_PRICE}.`);
+      throw new GameError('err.contract_price_range', { min: MARKET_MIN_PRICE, max: MARKET_MAX_PRICE });
     }
     if (!Number.isFinite(deliveries) || deliveries < CONTRACT_MIN_DELIVERIES || deliveries > CONTRACT_MAX_DELIVERIES) {
-      throw new GameError(`Deliveries must be ${CONTRACT_MIN_DELIVERIES}-${CONTRACT_MAX_DELIVERIES}.`);
+      throw new GameError('err.contract_deliveries_range', { min: CONTRACT_MIN_DELIVERIES, max: CONTRACT_MAX_DELIVERIES });
     }
-    if (capacityFor(buyerBiz, product) <= 0) throw new GameError('Your business cannot store that product.');
+    if (capacityFor(buyerBiz, product) <= 0) throw new GameError('err.cannot_store_that');
 
     const res = await query(
       `INSERT INTO contracts
@@ -1309,8 +1321,8 @@ export class World extends EventEmitter {
 
   async acceptContract(playerId: number, contractId: number): Promise<ContractRec> {
     const c = this.requireContract(contractId);
-    if (c.sellerId !== playerId) throw new GameError('Only the supplier can accept this contract.');
-    if (c.status !== 'proposed') throw new GameError('Contract is no longer pending.');
+    if (c.sellerId !== playerId) throw new GameError('err.contract_only_supplier_accept');
+    if (c.status !== 'proposed') throw new GameError('err.contract_not_pending');
     c.status = 'active';
     c.nextExecutionAtMs = Date.now(); // first delivery attempts almost immediately
     await query(
@@ -1324,8 +1336,8 @@ export class World extends EventEmitter {
 
   async rejectContract(playerId: number, contractId: number): Promise<ContractRec> {
     const c = this.requireContract(contractId);
-    if (c.sellerId !== playerId) throw new GameError('Only the supplier can reject this contract.');
-    if (c.status !== 'proposed') throw new GameError('Contract is no longer pending.');
+    if (c.sellerId !== playerId) throw new GameError('err.contract_only_supplier_reject');
+    if (c.status !== 'proposed') throw new GameError('err.contract_not_pending');
     c.status = 'rejected';
     await query("UPDATE contracts SET status='rejected' WHERE id=$1 AND status='proposed'", [c.id]);
     this.emit('contract', c);
@@ -1335,8 +1347,8 @@ export class World extends EventEmitter {
 
   async cancelContract(playerId: number, contractId: number): Promise<ContractRec> {
     const c = this.requireContract(contractId);
-    if (c.buyerId !== playerId && c.sellerId !== playerId) throw new GameError('Not your contract.');
-    if (c.status !== 'active' && c.status !== 'proposed') throw new GameError('Contract cannot be cancelled.');
+    if (c.buyerId !== playerId && c.sellerId !== playerId) throw new GameError('err.contract_not_yours');
+    if (c.status !== 'active' && c.status !== 'proposed') throw new GameError('err.contract_not_cancellable');
     c.status = 'cancelled';
     c.nextExecutionAtMs = null;
     await query("UPDATE contracts SET status='cancelled', next_execution_at=NULL WHERE id=$1", [c.id]);
@@ -1376,10 +1388,10 @@ export class World extends EventEmitter {
 
     // --- Skip cases: never move money or goods. ---
     if (sellerStock.qty < c.quantity) {
-      return this.recordContractMiss(c, 'MISSED — SUPPLIER STOCK', nextAt);
+      return this.recordContractMiss(c, 'missed_stock', nextAt);
     }
     if (buyer.cash < amount) {
-      return this.recordContractMiss(c, 'MISSED — BUYER FUNDS', nextAt);
+      return this.recordContractMiss(c, 'missed_funds', nextAt);
     }
 
     // --- Success path (mirrors marketplace fulfillment discipline). ---
@@ -1403,7 +1415,7 @@ export class World extends EventEmitter {
       c.remaining -= 1;
       c.status = c.remaining <= 0 ? 'completed' : 'active';
       c.nextExecutionAtMs = c.remaining <= 0 ? null : nextAt;
-      c.lastResult = c.remaining <= 0 ? 'COMPLETED' : 'DELIVERED';
+      c.lastResult = c.remaining <= 0 ? 'completed' : 'delivered';
 
       const delivery = await this.createDelivery(c.product, c.quantity, sellerBiz.lotId, buyerBiz);
       await tx(async (cl) => {
@@ -1419,7 +1431,7 @@ export class World extends EventEmitter {
             prevRemaining,
           ]
         );
-        if (!upd.rowCount) throw new GameError('Contract state changed, aborting execution.');
+        if (!upd.rowCount) throw new GameError('err.contract_state_changed');
         await cl.query('UPDATE players SET cash=$1, xp=$2, level=$3 WHERE id=$4', [seller.cash, seller.xp, seller.level, seller.id]);
         await cl.query('UPDATE players SET cash=$1, xp=$2, level=$3 WHERE id=$4', [buyer.cash, buyer.xp, buyer.level, buyer.id]);
         await cl.query(
@@ -1465,7 +1477,7 @@ export class World extends EventEmitter {
 
   private async recordContractMiss(
     c: ContractRec,
-    reason: string,
+    reason: 'missed_stock' | 'missed_funds',
     nextAt: number
   ): Promise<'missed_stock' | 'missed_funds'> {
     c.lastResult = reason;
@@ -1476,7 +1488,7 @@ export class World extends EventEmitter {
     );
     console.log(`[econ] CONTRACT_MISS id=${c.id} ${reason}`);
     this.emit('contract', c);
-    return reason.includes('STOCK') ? 'missed_stock' : 'missed_funds';
+    return reason;
   }
 
   toContractPub(c: ContractRec): ContractPub {
@@ -1540,10 +1552,10 @@ export class World extends EventEmitter {
 
   setPrice(playerId: number, price: number, product?: ProductId): void {
     const biz = this.requireBiz(playerId);
-    if (biz.type === 'farm') throw new GameError('Farms sell via the marketplace.');
+    if (biz.type === 'farm') throw new GameError('err.farms_use_market');
     price = Math.floor(price);
     if (!Number.isFinite(price) || price < MIN_COFFEE_PRICE || price > MAX_COFFEE_PRICE) {
-      throw new GameError(`Price must be $${MIN_COFFEE_PRICE}-$${MAX_COFFEE_PRICE}.`);
+      throw new GameError('err.retail_price_range', { min: MIN_COFFEE_PRICE, max: MAX_COFFEE_PRICE });
     }
     if (biz.type === 'mini_market' && product === 'milk') {
       biz.price2 = price;
@@ -1556,8 +1568,8 @@ export class World extends EventEmitter {
 
   setProduction(playerId: number, product: ProductId): void {
     const biz = this.requireBiz(playerId);
-    if (biz.type !== 'farm') throw new GameError('Only farms choose production.');
-    if (product !== 'milk' && product !== 'wheat') throw new GameError('Farms produce Milk or Wheat.');
+    if (biz.type !== 'farm') throw new GameError('err.only_farms_production');
+    if (product !== 'milk' && product !== 'wheat') throw new GameError('err.farm_product_choice');
     if (biz.production === product) return;
     biz.production = product;
     biz.prodAccum = 0;
@@ -1606,7 +1618,7 @@ export class World extends EventEmitter {
         await this.resetBusiness(playerId);
         return 'business reset';
       default:
-        throw new GameError(`Unknown dev command: ${cmd}`);
+        throw new GameError('err.unknown_dev_cmd', { cmd });
     }
   }
 

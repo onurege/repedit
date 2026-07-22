@@ -1,0 +1,951 @@
+// ============================================================
+// Client-side localisation. The server never sends prose — it sends
+// message codes plus params (see shared/messages.ts), and everything
+// the player reads is resolved here.
+//
+// Adding a language: add its code to `LANGS`, add a dictionary below.
+// Missing keys fall back to English, then to the raw key, so a partial
+// translation degrades gracefully instead of rendering blanks.
+// ============================================================
+import type { ProductId, BusinessType, MsgParams } from '@district/shared';
+
+export type Lang = 'en' | 'tr';
+
+export const LANGS: { id: Lang; label: string; flag: string }[] = [
+  { id: 'en', label: 'English', flag: '🇬🇧' },
+  { id: 'tr', label: 'Türkçe', flag: '🇹🇷' },
+];
+
+const STORAGE_KEY = 'bd_lang';
+
+function detectLang(): Lang {
+  const saved = localStorage.getItem(STORAGE_KEY);
+  if (saved === 'en' || saved === 'tr') return saved;
+  return navigator.language?.toLowerCase().startsWith('tr') ? 'tr' : 'en';
+}
+
+let current: Lang = detectLang();
+const listeners = new Set<() => void>();
+
+export function getLang(): Lang {
+  return current;
+}
+
+export function setLang(lang: Lang): void {
+  if (lang === current) return;
+  current = lang;
+  localStorage.setItem(STORAGE_KEY, lang);
+  document.documentElement.lang = lang;
+  document.title = t('app.title');
+  listeners.forEach((fn) => fn());
+}
+
+/** Subscribe to language changes; UI layers re-render from here. */
+export function onLangChange(fn: () => void): void {
+  listeners.add(fn);
+}
+
+// ---------------- dictionaries ----------------
+
+type Dict = Record<string, string>;
+
+const en: Dict = {
+  'app.title': 'Business District',
+  'app.tagline': 'Build your business in a shared miniature city.',
+
+  // ---- language switcher ----
+  'lang.label': 'Language',
+
+  // ---- auth ----
+  'auth.tab.register': 'New player',
+  'auth.tab.login': 'Log in',
+  'auth.username': 'Username',
+  'auth.password': 'Password',
+  'auth.username.placeholder': 'e.g. barista_joe',
+  'auth.password.placeholder': 'min. 4 characters',
+  'auth.submit.register': 'Create account & play',
+  'auth.submit.login': 'Log in & play',
+  'auth.hint': 'Tip: open a second browser (or private window) with another account to trade with yourself.',
+  'auth.session_expired': 'Session expired — please log in again.',
+  'auth.failed': 'Authentication failed.',
+  'auth.username_invalid': 'Username must be 3-20 chars (letters, digits, _ or -).',
+  'auth.password_short': 'Password must be at least 4 characters.',
+  'auth.username_taken': 'Username already taken.',
+  'auth.register_failed': 'Registration failed.',
+  'auth.missing_credentials': 'Missing credentials.',
+  'auth.invalid_credentials': 'Invalid username or password.',
+  'auth.login_failed': 'Login failed.',
+
+  // ---- choose business ----
+  'choose.title': 'Choose your business',
+  'choose.tagline': 'You have {cash} to get started. Pick your path:',
+  'choose.farm.name': 'Farm',
+  'choose.farm.desc': 'Produce fresh milk automatically. Sell it to coffee shops on the player marketplace for steady profit.',
+  'choose.shop.name': 'Coffee Shop',
+  'choose.shop.desc': 'Buy milk & beans, brew coffee, and serve a stream of townsfolk. Set your own prices.',
+
+  // ---- HUD ----
+  'hud.cash': 'Cash',
+  'hud.profit': 'Profit',
+  'hud.level': 'Level',
+  'hud.reputation': 'Reputation',
+  'hud.online': 'Online',
+  'nav.city': '🏙️ City',
+  'nav.business': '🏪 Business',
+  'nav.market': '📦 Market',
+  'nav.dev': '🛠️ Dev',
+  'hud.controls': 'WASD pan · drag rotate · wheel zoom · click select · R reset',
+  'hud.reconnecting': 'Reconnecting to the city…',
+  'panel.title': 'Panel',
+
+  // ---- business statuses ----
+  'status.producing': 'PRODUCING',
+  'status.storage_full': 'STORAGE FULL',
+  'status.open': 'OPEN',
+  'status.out_of_stock': 'OUT OF STOCK',
+  'status.paused_away': 'PAUSED (owner away)',
+  'status.none': '—',
+
+  // ---- products & business types ----
+  'product.milk': 'Milk',
+  'product.beans': 'Coffee Beans',
+  'product.coffee': 'Coffee',
+  'biz.farm': 'Farm',
+  'biz.coffee_shop': 'Coffee Shop',
+  'biz.farm.lower': 'farm',
+  'biz.coffee_shop.lower': 'coffee shop',
+  'biz.dairy_farm': 'Dairy Farm',
+
+  // ---- business panel ----
+  'biz.none.title': 'No business yet',
+  'biz.none.body': 'Choose a business to get started.',
+  'biz.title.farm': "🐄 {owner}'s Farm",
+  'biz.title.shop': "☕ {owner}'s Coffee Shop",
+  'tab.overview': 'Overview',
+  'tab.inventory': 'Inventory',
+  'tab.production': 'Production',
+  'tab.pricing': 'Pricing',
+  'tab.upgrade': 'Upgrade',
+  'biz.level': 'Level',
+  'biz.revenue': 'Revenue (lifetime)',
+  'biz.expenses': 'Expenses (lifetime)',
+  'biz.profit': 'Profit',
+  'biz.milk_produced': 'Milk produced',
+  'biz.coffee_sold': 'Coffee sold',
+  'biz.customers': 'Customers',
+  'biz.reputation': 'Reputation',
+  'biz.hint.shop': 'Restock milk & beans from the Market (player offers) or Central Wholesale (click the blue depot).',
+  'biz.hint.farm': 'Sell your milk on the Market — coffee shops need it! Central Wholesale charges them ${price} per milk, so undercut that.',
+  'inv.hint': 'Reserved goods are listed on the marketplace. Incoming goods are on a delivery van.',
+  'inv.on_market': '{qty} on market',
+  'inv.incoming': '{qty} incoming 🚚',
+  'prod.rate': 'Production rate',
+  'prod.rate.value': '{n} milk / min',
+  'prod.capacity': 'Storage capacity',
+  'prod.milk_lifetime': 'Milk produced (lifetime)',
+  'prod.hint': "Milk is produced automatically, even while you're offline (up to 8 hours). When storage is full, production pauses — sell milk on the Market to keep the cows busy!",
+  'price.current': 'Current coffee price',
+  'price.set': 'Set price',
+  'price.hint': 'Base price is $30. Cheaper coffee attracts more customers and builds reputation; pricing above ~$36 slows traffic and hurts your stars. Each coffee consumes 1 milk + 1 beans.',
+  'upg.milk_per_min': 'Milk / min',
+  'upg.storage': 'Storage',
+  'upg.customers_per_min': 'Customers / min',
+  'upg.brew_speed': 'Brew speed',
+  'upg.brew_speed.value': '{n} / min',
+  'upg.ingredient_storage': 'Ingredient storage',
+  'upg.current_level': 'Current level',
+  'upg.max': 'MAX LEVEL REACHED 🏆',
+  'upg.max.hint': 'Your {biz} is fully upgraded.',
+  'upg.button': 'Upgrade to Level {level} — {cost}',
+  'upg.hint': 'Upgrading visibly expands your building in the city.',
+
+  // ---- marketplace ----
+  'market.title': '📦 Marketplace',
+  'tab.orders': 'Orders',
+  'tab.my_orders': 'My Orders',
+  'tab.history': 'History',
+  'market.create': 'Create order',
+  'market.side.sell': 'SELL',
+  'market.side.buy': 'BUY',
+  'market.qty': 'Quantity',
+  'market.unit_price': 'Unit price ($)',
+  'market.place': 'Place order',
+  'market.hint': 'SELL escrows your goods; BUY escrows your cash. NPC wholesale milk costs ${price} — player milk is usually cheaper.',
+  'market.empty': 'No open orders. Create one above!',
+  'market.cancel': 'Cancel',
+  'market.mine.empty': 'You have no open orders.',
+  'market.cancel.hint': 'Cancelling refunds escrowed cash / returns reserved goods.',
+  'market.your_order': 'your order',
+  'market.sell_to': 'Sell to',
+  'market.buy_from': 'Buy from',
+  'market.wanted_by': 'wanted by {name}',
+  'market.offered_by': 'offered by {name}',
+  'market.recent_trades': 'Recent player trades',
+  'market.trades.empty': 'No trades yet. Be the first!',
+
+  // ---- wholesale ----
+  'wholesale.title': '🏭 Central Wholesale',
+  'wholesale.per_unit': '{price} / unit',
+  'wholesale.buy': 'Buy',
+  'wholesale.hint': 'The NPC wholesaler guarantees supply so your shop never stalls — but player milk on the Market is usually cheaper. Goods arrive by delivery van.',
+
+  // ---- info panel ----
+  'info.title': 'Business',
+  'info.vacant': 'This lot is vacant.',
+  'info.owner': 'Owner',
+  'info.type': 'Type',
+  'info.status': 'Status',
+  'info.hint.farm': 'Farms sell milk on the marketplace — check the Market for their offers.',
+  'info.hint.shop': 'Coffee shops buy milk — check the Market for their buy orders.',
+
+  // ---- dev panel ----
+  'dev.title': '🛠️ Dev Tools',
+  'dev.hint': 'Development-only helpers (disabled in production builds).',
+  'dev.add_money': '+ $5,000',
+  'dev.add_milk': '+ 100 Milk',
+  'dev.add_beans': '+ 100 Beans',
+  'dev.speed': 'Game speed:',
+  'dev.reset': 'Reset my business',
+  'dev.reset.confirm': 'Really reset your business?',
+  'dev.open_orders': 'Open orders',
+  'dev.deliveries': 'Deliveries in transit',
+  'dev.businesses': 'Businesses',
+  'dev.logout': 'Log out',
+
+  // ---- objectives ----
+  'obj.title': 'Objectives',
+  'obj.hide': 'hide',
+  'obj.farm.open': 'Open your Farm',
+  'obj.farm.produce': 'Produce Milk',
+  'obj.market.open': 'Open the Marketplace',
+  'obj.farm.sell_order': 'Create a Sell Order',
+  'obj.farm.trade': 'Complete a player trade',
+  'obj.farm.upgrade': 'Upgrade your Farm',
+  'obj.shop.open': 'Open your Coffee Shop',
+  'obj.shop.beans': 'Buy Coffee Beans',
+  'obj.shop.milk': 'Buy Milk',
+  'obj.shop.sale': 'Make your first sale',
+  'obj.shop.upgrade': 'Upgrade your Coffee Shop',
+
+  // ---- away report ----
+  'away.title': 'While you were away',
+  'away.tagline.farm': 'Your farm kept working for {dur}.',
+  'away.tagline.shop': 'Your shop kept serving for {dur}.',
+  'away.revenue': 'Revenue',
+  'away.expenses': 'Expenses',
+  'away.profit': 'Profit',
+  'away.milk': 'Milk produced',
+  'away.coffee': 'Coffee sold',
+  'away.ok': 'Back to business',
+  'away.hours': '{h}h {m}m',
+  'away.minutes': '{m}m',
+
+  // ---- world popups ----
+  'world.upgraded': 'UPGRADED!',
+  'world.out_of_stock': 'out of stock!',
+  'world.for_sale': 'FOR SALE',
+  'world.lot.farm': 'Farm lot',
+  'world.lot.cafe': 'Café lot',
+  'world.wholesale': 'Central Wholesale',
+  'world.wholesale.sub': 'Wholesale Goods · NPC',
+  'world.sign.farm': 'Farm · Lv {level}',
+  'world.sign.shop': 'Coffee Shop · Lv {level}',
+  'world.sign.bakery': 'Bakery · Lv {level}',
+  'world.sign.market': 'Mini Market · Lv {level}',
+  'world.lot.bakery': 'Bakery lot',
+  'world.lot.market': 'Market lot',
+  'world.lot.generic': 'Lot',
+  'world.wholesale.sub2': 'Wholesale Goods · NPC',
+
+  // ---- level up ----
+  'toast.level_up': 'Level up! You reached level {level} 🎉',
+
+  // ---- server toasts ----
+  'toast.lot_opened': 'A lot opened up in the district.',
+  'toast.farm_welcome': 'Welcome to your new farm!',
+  'toast.shop_open': 'Your coffee shop is open!',
+  'toast.order_placed': 'Order placed on the marketplace.',
+  'toast.trade_complete': 'Trade complete: {qty} × {product} @ ${price}. Delivery on its way!',
+  'toast.upgrade_complete': 'Upgrade complete!',
+  'toast.dev': '[dev] {result}',
+
+  // ---- server errors ----
+  'err.unknown_player': 'Unknown player.',
+  'err.need_business': 'You need a business first.',
+  'err.already_own_business': 'You already own a business.',
+  'err.unknown_business_type': 'Unknown business type.',
+  'err.no_free_lots': 'No free lots for that business type right now.',
+  'err.invalid_qty': 'Invalid quantity.',
+  'err.wholesale_no_product': 'Central Wholesale does not sell that.',
+  'err.cannot_store_product': 'Your {bizType} cannot store {product}.',
+  'err.not_enough_storage': 'Not enough storage space (capacity {cap}).',
+  'err.not_enough_cash': 'Not enough cash (${cost} needed).',
+  'err.bad_delivery_route': 'Bad delivery route.',
+  'err.not_tradable': 'That product is not tradable.',
+  'err.price_range': 'Price must be ${min}-${max}.',
+  'err.only_have': 'You only have {qty} {product}.',
+  'err.not_enough_cash_escrow': 'Not enough cash to escrow ${cost}.',
+  'err.cannot_store_that': 'Your business cannot store that product.',
+  'err.order_not_open': 'Order is not open.',
+  'err.not_your_order': 'Not your order.',
+  'err.order_processing': 'Order is being processed, try again.',
+  'err.order_unavailable': 'Order is no longer available.',
+  'err.own_order': 'You cannot fulfill your own order.',
+  'err.counterparty_no_business': 'Counterparty has no business.',
+  'err.seller_stock_unavailable': 'Seller stock unavailable.',
+  'err.order_state_changed': 'Order state changed, aborting.',
+  'err.max_level': 'Already at max level.',
+  'err.upgrade_cost': 'Upgrade costs ${cost}.',
+  'err.only_shops_price': 'Only coffee shops set a sale price.',
+  'err.coffee_price_range': 'Price must be ${min}-${max}.',
+  'err.unknown_dev_cmd': 'Unknown dev command: {cmd}',
+  'err.dev_disabled': 'Dev tools are disabled.',
+  'err.invalid_session': 'Invalid session. Please log in again.',
+  'err.server': 'Something went wrong on the server.',
+
+  // ---- new products & business types (Phase 2/3) ----
+  'product.wheat': 'Wheat',
+  'product.bread': 'Bread',
+  'biz.bakery': 'Bakery',
+  'biz.mini_market': 'Mini Market',
+  'biz.bakery.lower': 'bakery',
+  'biz.mini_market.lower': 'mini market',
+  'role.producer': 'Producer',
+  'role.processor': 'Processor + Retailer',
+  'role.retailer': 'Retailer',
+  'choose.farm.desc2': 'Produce Milk or Wheat automatically and supply the whole city via the marketplace.',
+  'choose.shop.desc2': 'Buy milk & beans, brew coffee, serve townsfolk. Set your own prices.',
+  'choose.bakery.desc': 'Turn wheat into fresh bread and sell it to hungry customers.',
+  'choose.market.desc': 'Pure retail: buy bread & milk cheap, stock the shelves, earn the margin.',
+
+  // ---- production choice ----
+  'tab.production_choice': 'Produce',
+  'prod.choose': 'What should this farm produce?',
+  'prod.switch': 'Switch production',
+
+  // ---- contracts ----
+  'nav.contracts': '📜 Contracts',
+  'contracts.title': '📜 Supply Contracts',
+  'tab.incoming': 'Incoming',
+  'tab.outgoing': 'Outgoing',
+  'contract.propose': 'Propose contract',
+  'contract.propose.to': 'Propose a supply contract to {name}',
+  'contract.product': 'Product',
+  'contract.quantity': 'Quantity per delivery',
+  'contract.unit_price': 'Unit price',
+  'contract.deliveries': 'Deliveries',
+  'contract.send': 'Send proposal',
+  'contract.accept': 'Accept',
+  'contract.reject': 'Reject',
+  'contract.cancel': 'Cancel',
+  'contract.none.incoming': 'No incoming contract proposals.',
+  'contract.none.outgoing': 'You have no outgoing contracts.',
+  'contract.summary': '{qty} × {product} @ {price}, every {secs}s',
+  'contract.remaining': '{n} deliveries left',
+  'contract.from': 'from {name}',
+  'contract.to': 'to {name}',
+  'contract.hint': 'Contracts deliver automatically on a timer. The supplier needs stock; the buyer needs cash.',
+  'contract.status.proposed': 'PROPOSED',
+  'contract.status.active': 'ACTIVE',
+  'contract.status.completed': 'COMPLETED',
+  'contract.status.rejected': 'REJECTED',
+  'contract.status.cancelled': 'CANCELLED',
+  'contract.result.completed': 'COMPLETED',
+  'contract.result.delivered': 'DELIVERED',
+  'contract.result.missed_stock': 'MISSED — SUPPLIER STOCK',
+  'contract.result.missed_funds': 'MISSED — BUYER FUNDS',
+  'contract.next': 'Next delivery',
+  'contract.last': 'Last result',
+
+  // ---- contract toasts ----
+  'toast.contract_proposal': '📜 {name} proposes a supply contract: {qty} × {product} @ {price}',
+  'toast.contract_now_active': 'Your supply contract is now active! 🤝',
+  'toast.contract_completed': 'Contract completed: {qty} × {product}.',
+  'toast.contract_proposed': 'Contract proposed to {name}.',
+  'toast.contract_accepted': 'Your supply contract was accepted!',
+  'toast.contract_active': 'Contract active. Deliveries will begin.',
+  'toast.contract_rejected': 'Contract rejected.',
+  'toast.contract_cancelled': 'Contract cancelled.',
+
+  // ---- welcome toasts per business ----
+  'toast.welcome.farm': 'Welcome to your new farm!',
+  'toast.welcome.coffee_shop': 'Your coffee shop is open!',
+  'toast.welcome.bakery': 'Your bakery is open — the ovens are warm!',
+  'toast.welcome.mini_market': 'Your mini market is open for business!',
+
+  // ---- public business inspection ----
+  'info.trades': 'Completed trades',
+  'info.supplies': 'Can supply',
+  'info.supplies.none': 'nothing tradable',
+
+  // ---- new errors ----
+  'err.contract_not_found': 'Contract not found.',
+  'err.business_gone': 'That business no longer exists.',
+  'err.contract_self': 'You cannot contract with yourself.',
+  'err.contract_bad_supply': 'That business cannot supply this product to yours.',
+  'err.contract_qty_range': 'Quantity must be 1-{max}.',
+  'err.contract_price_range': 'Unit price must be ${min}-${max}.',
+  'err.contract_deliveries_range': 'Deliveries must be {min}-{max}.',
+  'err.contract_only_supplier_accept': 'Only the supplier can accept this contract.',
+  'err.contract_not_pending': 'Contract is no longer pending.',
+  'err.contract_only_supplier_reject': 'Only the supplier can reject this contract.',
+  'err.contract_not_yours': 'Not your contract.',
+  'err.contract_not_cancellable': 'Contract cannot be cancelled.',
+  'err.contract_state_changed': 'Contract state changed, aborting execution.',
+  'err.farms_use_market': 'Farms sell via the marketplace.',
+  'err.retail_price_range': 'Price must be ${min}-${max}.',
+  'err.only_farms_production': 'Only farms choose production.',
+  'err.farm_product_choice': 'Farms produce Milk or Wheat.',
+
+  // ---- generic business framing ----
+  'biz.title': "{icon} {owner}'s {name}",
+  'biz.sold.coffee_shop': 'Coffee sold',
+  'biz.sold.bakery': 'Bread sold',
+  'biz.sold.mini_market': 'Items sold',
+  'biz.sold.default': 'Units sold',
+  'biz.units_produced': 'Units produced',
+  'biz.producing': 'Producing',
+  'biz.hint.coffee_shop': 'Restock milk & beans from the Market (player offers) or Central Wholesale (the blue depot).',
+  'biz.hint.bakery': 'Restock Wheat from the Market (player farms) or Central Wholesale (${wheat}/wheat). Each bread consumes 1 wheat.',
+  'biz.hint.mini_market': 'Stock Bread and Milk from the Market (player bakeries & farms) or Central Wholesale. Your profit is the retail margin.',
+  'biz.hint.farm2': 'Sell your Milk or Wheat on the Market — shops and bakeries need it! Central Wholesale charges ${milk}/milk and ${wheat}/wheat, so undercut that.',
+
+  // ---- production tab ----
+  'prod.rate.generic': '{n} / min',
+  'prod.capacity.per_product': 'Storage capacity (per product)',
+  'prod.units_lifetime': 'Units produced (lifetime)',
+  'prod.hint2': 'Production runs automatically, even offline (up to 8 h). Milk supplies coffee shops & mini markets; wheat supplies bakeries. Switching keeps existing stock.',
+
+  // ---- pricing ----
+  'price.bread_retail': '🍞 Bread retail price',
+  'price.milk_retail': '🥛 Milk retail price',
+  'price.set_bread': 'Set bread price',
+  'price.set_milk': 'Set milk price',
+  'price.hint.market': 'Reference prices: bread $20, milk $18. Cheaper attracts more customers and builds reputation; ~20% above reference repels them. Buy stock below your retail price to earn the margin.',
+  'price.current.bread': 'Current bread price',
+  'price.current.coffee': 'Current coffee price',
+  'price.hint.bakery': 'Base price is $20. Each bread consumes 1 wheat. Cheaper bread attracts more customers; pricing above ~$24 slows traffic and hurts your stars.',
+
+  // ---- upgrade extras ----
+  'upg.units_per_min': 'Units / min',
+  'upg.customers_per_min.per_product': 'Customers / min (per product)',
+  'upg.shelf_capacity': 'Shelf capacity (per product)',
+  'upg.bake_speed': 'Bake speed',
+
+  // ---- info panel ----
+  'info.company': 'Company',
+  'info.online': '🟢 online',
+  'info.offline': '⚪ offline',
+  'info.supplies_label': 'Supplies',
+  'info.retailer_no_supply': 'Retailer (no supply)',
+  'info.successful_trades': 'Successful trades',
+  'info.propose_btn': '📜 Propose Supply Contract',
+  'info.cannot_contract': 'Your business type cannot form a supply contract with this one.',
+  'info.choose_business_first': 'Choose a business to trade with others.',
+
+  // ---- contract propose form ----
+  'contract.propose_title': 'Propose supply contract',
+  'contract.qty_short': 'Qty',
+  'contract.per_unit': '/unit',
+  'contract.deliveries_label': 'Deliveries',
+  'contract.freq_hint': 'one per game day (~{secs}s)',
+  'contract.withdraw': 'Withdraw',
+  'contract.awaiting_supplier': 'awaiting supplier',
+  'contract.left': '{n} left',
+  'contract.next_in': 'next ~{secs}s',
+  'contract.deliveries_total': '{n} deliveries · total {total}',
+  'contract.dir.from': 'from {name}',
+  'contract.dir.to': 'to {name}',
+
+  // ---- contracts panel ----
+  'tab.active': 'Active',
+  'contracts.empty.incoming': 'No incoming proposals. Others can propose contracts by clicking your business.',
+  'contracts.empty.outgoing': "No pending proposals. Click another player's business to propose one.",
+  'contracts.empty.active': 'No active contracts yet.',
+  'contracts.empty.history': 'No past contracts.',
+
+  // ---- dev extras ----
+  'dev.add_wheat': '+ 100 Wheat',
+  'dev.add_bread': '+ 100 Bread',
+
+  // ---- objectives (new types) ----
+  'obj.farm.produce2': 'Produce Milk or Wheat',
+  'obj.bakery.open': 'Open your Bakery',
+  'obj.bakery.wheat': 'Acquire Wheat',
+  'obj.bakery.sale': 'Sell your first Bread',
+  'obj.bakery.buy_wheat': 'Buy Wheat from another player',
+  'obj.bakery.upgrade': 'Upgrade your Bakery',
+  'obj.market.openbiz': 'Open your Mini Market',
+  'obj.market.stock': 'Stock Bread or Milk',
+  'obj.market.sale': 'Make your first retail sale',
+  'obj.market.buy_stock': 'Buy stock from another player',
+  'obj.market.upgrade': 'Upgrade your Mini Market',
+
+  // ---- away extras ----
+  'away.tagline.generic': 'Your business kept serving for {dur}.',
+  'away.units_produced': 'Units produced',
+  'away.items_sold': 'Items sold',
+};
+
+const tr: Dict = {
+  'app.title': 'İş Merkezi',
+  'app.tagline': 'Ortak bir minyatür şehirde kendi işini kur.',
+
+  'lang.label': 'Dil',
+
+  'auth.tab.register': 'Yeni oyuncu',
+  'auth.tab.login': 'Giriş yap',
+  'auth.username': 'Kullanıcı adı',
+  'auth.password': 'Şifre',
+  'auth.username.placeholder': 'örn. barista_ali',
+  'auth.password.placeholder': 'en az 4 karakter',
+  'auth.submit.register': 'Hesap oluştur & oyna',
+  'auth.submit.login': 'Giriş yap & oyna',
+  'auth.hint': 'İpucu: ikinci bir tarayıcıda (veya gizli pencerede) başka bir hesap açarak kendinle ticaret yapabilirsin.',
+  'auth.session_expired': 'Oturum süresi doldu — lütfen tekrar giriş yap.',
+  'auth.failed': 'Kimlik doğrulama başarısız.',
+  'auth.username_invalid': 'Kullanıcı adı 3-20 karakter olmalı (harf, rakam, _ veya -).',
+  'auth.password_short': 'Şifre en az 4 karakter olmalı.',
+  'auth.username_taken': 'Bu kullanıcı adı alınmış.',
+  'auth.register_failed': 'Kayıt başarısız.',
+  'auth.missing_credentials': 'Giriş bilgileri eksik.',
+  'auth.invalid_credentials': 'Kullanıcı adı veya şifre hatalı.',
+  'auth.login_failed': 'Giriş başarısız.',
+
+  'choose.title': 'İşini seç',
+  'choose.tagline': 'Başlamak için {cash} paran var. Yolunu seç:',
+  'choose.farm.name': 'Çiftlik',
+  'choose.farm.desc': 'Otomatik olarak taze süt üret. Oyuncu pazarında kahvecilere satarak istikrarlı kâr elde et.',
+  'choose.shop.name': 'Kahve Dükkânı',
+  'choose.shop.desc': 'Süt ve çekirdek al, kahve demle ve şehir halkına servis et. Fiyatını kendin belirle.',
+
+  'hud.cash': 'Nakit',
+  'hud.profit': 'Kâr',
+  'hud.level': 'Seviye',
+  'hud.reputation': 'İtibar',
+  'hud.online': 'Çevrimiçi',
+  'nav.city': '🏙️ Şehir',
+  'nav.business': '🏪 İşletmem',
+  'nav.market': '📦 Pazar',
+  'nav.dev': '🛠️ Geliştirici',
+  'hud.controls': 'WASD kaydır · sürükle döndür · tekerlek yakınlaştır · tıkla seç · R sıfırla',
+  'hud.reconnecting': 'Şehre yeniden bağlanılıyor…',
+  'panel.title': 'Panel',
+
+  'status.producing': 'ÜRETİYOR',
+  'status.storage_full': 'DEPO DOLU',
+  'status.open': 'AÇIK',
+  'status.out_of_stock': 'STOK YOK',
+  'status.paused_away': 'DURAKLADI (sahibi uzakta)',
+  'status.none': '—',
+
+  'product.milk': 'Süt',
+  'product.beans': 'Kahve Çekirdeği',
+  'product.coffee': 'Kahve',
+  'biz.farm': 'Çiftlik',
+  'biz.coffee_shop': 'Kahve Dükkânı',
+  'biz.farm.lower': 'çiftliğin',
+  'biz.coffee_shop.lower': 'kahve dükkânın',
+  'biz.dairy_farm': 'Süt Çiftliği',
+
+  'biz.none.title': 'Henüz işletmen yok',
+  'biz.none.body': 'Başlamak için bir işletme seç.',
+  'biz.title.farm': '🐄 {owner} Çiftliği',
+  'biz.title.shop': '☕ {owner} Kahve Dükkânı',
+  'tab.overview': 'Genel',
+  'tab.inventory': 'Envanter',
+  'tab.production': 'Üretim',
+  'tab.pricing': 'Fiyat',
+  'tab.upgrade': 'Yükseltme',
+  'biz.level': 'Seviye',
+  'biz.revenue': 'Gelir (toplam)',
+  'biz.expenses': 'Gider (toplam)',
+  'biz.profit': 'Kâr',
+  'biz.milk_produced': 'Üretilen süt',
+  'biz.coffee_sold': 'Satılan kahve',
+  'biz.customers': 'Müşteriler',
+  'biz.reputation': 'İtibar',
+  'biz.hint.shop': 'Süt ve çekirdeği Pazar’dan (oyuncu ilanları) ya da Merkez Toptancı’dan (mavi depoya tıkla) tedarik et.',
+  'biz.hint.farm': 'Sütünü Pazar’da sat — kahvecilerin sütüne ihtiyacı var! Merkez Toptancı onlardan süt başına ${price} alıyor, sen bunun altına in.',
+  'inv.hint': 'Rezerve mallar pazarda listelenmiş durumda. Gelen mallar teslimat kamyonunda.',
+  'inv.on_market': '{qty} pazarda',
+  'inv.incoming': '{qty} yolda 🚚',
+  'prod.rate': 'Üretim hızı',
+  'prod.rate.value': 'dakikada {n} süt',
+  'prod.capacity': 'Depo kapasitesi',
+  'prod.milk_lifetime': 'Üretilen süt (toplam)',
+  'prod.hint': 'Süt, sen çevrimdışıyken bile otomatik üretilir (8 saate kadar). Depo dolduğunda üretim durur — inekleri meşgul tutmak için sütünü Pazar’da sat!',
+  'price.current': 'Güncel kahve fiyatı',
+  'price.set': 'Fiyatı ayarla',
+  'price.hint': 'Baz fiyat $30. Ucuz kahve daha çok müşteri çeker ve itibarını yükseltir; ~$36 üzeri fiyat trafiği yavaşlatır ve yıldızlarını düşürür. Her kahve 1 süt + 1 çekirdek tüketir.',
+  'upg.milk_per_min': 'Süt / dk',
+  'upg.storage': 'Depo',
+  'upg.customers_per_min': 'Müşteri / dk',
+  'upg.brew_speed': 'Demleme hızı',
+  'upg.brew_speed.value': '{n} / dk',
+  'upg.ingredient_storage': 'Malzeme deposu',
+  'upg.current_level': 'Mevcut seviye',
+  'upg.max': 'MAKSİMUM SEVİYE 🏆',
+  'upg.max.hint': '{biz} tamamen yükseltilmiş durumda.',
+  'upg.button': 'Seviye {level}’e yükselt — {cost}',
+  'upg.hint': 'Yükseltme, şehirdeki binanı gözle görülür şekilde büyütür.',
+
+  'market.title': '📦 Pazar',
+  'tab.orders': 'İlanlar',
+  'tab.my_orders': 'İlanlarım',
+  'tab.history': 'Geçmiş',
+  'market.create': 'İlan oluştur',
+  'market.side.sell': 'SATIŞ',
+  'market.side.buy': 'ALIŞ',
+  'market.qty': 'Miktar',
+  'market.unit_price': 'Birim fiyat ($)',
+  'market.place': 'İlanı yayınla',
+  'market.hint': 'SATIŞ mallarını, ALIŞ nakdini emanete alır. Toptancı sütü ${price} — oyuncu sütü genelde daha ucuzdur.',
+  'market.empty': 'Açık ilan yok. Yukarıdan bir tane oluştur!',
+  'market.cancel': 'İptal',
+  'market.mine.empty': 'Açık ilanın yok.',
+  'market.cancel.hint': 'İptal, emanetteki nakdi iade eder / rezerve malları geri verir.',
+  'market.your_order': 'senin ilanın',
+  'market.sell_to': 'Sat',
+  'market.buy_from': 'Satın al',
+  'market.wanted_by': '{name} istiyor',
+  'market.offered_by': '{name} sunuyor',
+  'market.recent_trades': 'Son oyuncu ticaretleri',
+  'market.trades.empty': 'Henüz ticaret yok. İlk sen ol!',
+
+  'wholesale.title': '🏭 Merkez Toptancı',
+  'wholesale.per_unit': '{price} / adet',
+  'wholesale.buy': 'Al',
+  'wholesale.hint': 'Toptancı tedariki garanti eder, dükkânın asla durmaz — ama Pazar’daki oyuncu sütü genelde daha ucuzdur. Mallar teslimat kamyonuyla gelir.',
+
+  'info.title': 'İşletme',
+  'info.vacant': 'Bu arsa boş.',
+  'info.owner': 'Sahibi',
+  'info.type': 'Tür',
+  'info.status': 'Durum',
+  'info.hint.farm': 'Çiftlikler pazarda süt satar — ilanları için Pazar’a bak.',
+  'info.hint.shop': 'Kahveciler süt satın alır — alış ilanları için Pazar’a bak.',
+
+  'dev.title': '🛠️ Geliştirici Araçları',
+  'dev.hint': 'Yalnızca geliştirme yardımcıları (üretim derlemelerinde kapalı).',
+  'dev.add_money': '+ $5.000',
+  'dev.add_milk': '+ 100 Süt',
+  'dev.add_beans': '+ 100 Çekirdek',
+  'dev.speed': 'Oyun hızı:',
+  'dev.reset': 'İşletmemi sıfırla',
+  'dev.reset.confirm': 'İşletmen gerçekten sıfırlansın mı?',
+  'dev.open_orders': 'Açık ilanlar',
+  'dev.deliveries': 'Yoldaki teslimatlar',
+  'dev.businesses': 'İşletmeler',
+  'dev.logout': 'Çıkış yap',
+
+  'obj.title': 'Hedefler',
+  'obj.hide': 'gizle',
+  'obj.farm.open': 'Çiftliğini aç',
+  'obj.farm.produce': 'Süt üret',
+  'obj.market.open': 'Pazarı aç',
+  'obj.farm.sell_order': 'Bir satış ilanı oluştur',
+  'obj.farm.trade': 'Bir oyuncu ticareti tamamla',
+  'obj.farm.upgrade': 'Çiftliğini yükselt',
+  'obj.shop.open': 'Kahve dükkânını aç',
+  'obj.shop.beans': 'Kahve çekirdeği al',
+  'obj.shop.milk': 'Süt al',
+  'obj.shop.sale': 'İlk satışını yap',
+  'obj.shop.upgrade': 'Kahve dükkânını yükselt',
+
+  'away.title': 'Sen yokken',
+  'away.tagline.farm': 'Çiftliğin {dur} boyunca çalışmaya devam etti.',
+  'away.tagline.shop': 'Dükkânın {dur} boyunca servise devam etti.',
+  'away.revenue': 'Gelir',
+  'away.expenses': 'Gider',
+  'away.profit': 'Kâr',
+  'away.milk': 'Üretilen süt',
+  'away.coffee': 'Satılan kahve',
+  'away.ok': 'İşimin başına',
+  'away.hours': '{h}sa {m}dk',
+  'away.minutes': '{m}dk',
+
+  'world.upgraded': 'YÜKSELTİLDİ!',
+  'world.out_of_stock': 'stok yok!',
+  'world.for_sale': 'SATILIK',
+  'world.lot.farm': 'Çiftlik arsası',
+  'world.lot.cafe': 'Kafe arsası',
+  'world.wholesale': 'Merkez Toptancı',
+  'world.wholesale.sub': 'Toptan Ürünler · NPC',
+  'world.sign.farm': 'Çiftlik · Sv {level}',
+  'world.sign.shop': 'Kahveci · Sv {level}',
+  'world.sign.bakery': 'Fırın · Sv {level}',
+  'world.sign.market': 'Market · Sv {level}',
+  'world.lot.bakery': 'Fırın arsası',
+  'world.lot.market': 'Market arsası',
+  'world.lot.generic': 'Arsa',
+  'world.wholesale.sub2': 'Toptan Ürünler · NPC',
+
+  'toast.level_up': 'Seviye atladın! {level}. seviyeye ulaştın 🎉',
+
+  'toast.lot_opened': 'Şehirde bir arsa boşaldı.',
+  'toast.farm_welcome': 'Yeni çiftliğine hoş geldin!',
+  'toast.shop_open': 'Kahve dükkânın açıldı!',
+  'toast.order_placed': 'İlan pazarda yayınlandı.',
+  'toast.trade_complete': 'Ticaret tamam: {qty} × {product} @ ${price}. Teslimat yolda!',
+  'toast.upgrade_complete': 'Yükseltme tamamlandı!',
+  'toast.dev': '[dev] {result}',
+
+  'err.unknown_player': 'Bilinmeyen oyuncu.',
+  'err.need_business': 'Önce bir işletmeye ihtiyacın var.',
+  'err.already_own_business': 'Zaten bir işletmen var.',
+  'err.unknown_business_type': 'Bilinmeyen işletme türü.',
+  'err.no_free_lots': 'Şu anda bu işletme türü için boş arsa yok.',
+  'err.invalid_qty': 'Geçersiz miktar.',
+  'err.wholesale_no_product': 'Merkez Toptancı bunu satmıyor.',
+  'err.cannot_store_product': '{bizType} {product} depolayamaz.',
+  'err.not_enough_storage': 'Yeterli depo alanı yok (kapasite {cap}).',
+  'err.not_enough_cash': 'Yeterli nakit yok (${cost} gerekli).',
+  'err.bad_delivery_route': 'Geçersiz teslimat rotası.',
+  'err.not_tradable': 'Bu ürün ticarete uygun değil.',
+  'err.price_range': 'Fiyat ${min}-${max} arasında olmalı.',
+  'err.only_have': 'Elinde yalnızca {qty} {product} var.',
+  'err.not_enough_cash_escrow': '${cost} emanete alınacak nakit yok.',
+  'err.cannot_store_that': 'İşletmen bu ürünü depolayamaz.',
+  'err.order_not_open': 'İlan açık değil.',
+  'err.not_your_order': 'Bu ilan sana ait değil.',
+  'err.order_processing': 'İlan işleniyor, tekrar dene.',
+  'err.order_unavailable': 'İlan artık mevcut değil.',
+  'err.own_order': 'Kendi ilanını karşılayamazsın.',
+  'err.counterparty_no_business': 'Karşı tarafın işletmesi yok.',
+  'err.seller_stock_unavailable': 'Satıcının stoğu müsait değil.',
+  'err.order_state_changed': 'İlan durumu değişti, iptal ediliyor.',
+  'err.max_level': 'Zaten maksimum seviyedesin.',
+  'err.upgrade_cost': 'Yükseltme ${cost} tutuyor.',
+  'err.only_shops_price': 'Yalnızca kahve dükkânları satış fiyatı belirler.',
+  'err.coffee_price_range': 'Fiyat ${min}-${max} arasında olmalı.',
+  'err.unknown_dev_cmd': 'Bilinmeyen geliştirici komutu: {cmd}',
+  'err.dev_disabled': 'Geliştirici araçları kapalı.',
+  'err.invalid_session': 'Geçersiz oturum. Lütfen tekrar giriş yap.',
+  'err.server': 'Sunucuda bir şeyler ters gitti.',
+
+  // ---- yeni ürünler & işletme türleri ----
+  'product.wheat': 'Buğday',
+  'product.bread': 'Ekmek',
+  'biz.bakery': 'Fırın',
+  'biz.mini_market': 'Market',
+  'biz.bakery.lower': 'fırının',
+  'biz.mini_market.lower': 'marketin',
+  'role.producer': 'Üretici',
+  'role.processor': 'İşleyici + Perakendeci',
+  'role.retailer': 'Perakendeci',
+  'choose.farm.desc2': 'Otomatik olarak Süt veya Buğday üret ve pazar üzerinden tüm şehre tedarik et.',
+  'choose.shop.desc2': 'Süt ve çekirdek al, kahve demle, şehir halkına servis et. Fiyatını kendin belirle.',
+  'choose.bakery.desc': 'Buğdayı taze ekmeğe dönüştür ve aç müşterilere sat.',
+  'choose.market.desc': 'Saf perakende: ekmeği ve sütü ucuza al, rafları doldur, marjı cebine koy.',
+
+  'tab.production_choice': 'Üretim',
+  'prod.choose': 'Bu çiftlik ne üretsin?',
+  'prod.switch': 'Üretimi değiştir',
+
+  'nav.contracts': '📜 Kontratlar',
+  'contracts.title': '📜 Tedarik Kontratları',
+  'tab.incoming': 'Gelen',
+  'tab.outgoing': 'Giden',
+  'contract.propose': 'Kontrat öner',
+  'contract.propose.to': '{name} işletmesine tedarik kontratı öner',
+  'contract.product': 'Ürün',
+  'contract.quantity': 'Teslimat başına miktar',
+  'contract.unit_price': 'Birim fiyat',
+  'contract.deliveries': 'Teslimat sayısı',
+  'contract.send': 'Öneriyi gönder',
+  'contract.accept': 'Kabul et',
+  'contract.reject': 'Reddet',
+  'contract.cancel': 'İptal et',
+  'contract.none.incoming': 'Gelen kontrat önerisi yok.',
+  'contract.none.outgoing': 'Giden kontratın yok.',
+  'contract.summary': '{qty} × {product} @ {price}, her {secs} sn',
+  'contract.remaining': '{n} teslimat kaldı',
+  'contract.from': '{name} tarafından',
+  'contract.to': '{name} işletmesine',
+  'contract.hint': 'Kontratlar zamanlayıcıyla otomatik teslim eder. Tedarikçinin stoğu, alıcının nakdi olmalı.',
+  'contract.status.proposed': 'ÖNERİLDİ',
+  'contract.status.active': 'AKTİF',
+  'contract.status.completed': 'TAMAMLANDI',
+  'contract.status.rejected': 'REDDEDİLDİ',
+  'contract.status.cancelled': 'İPTAL EDİLDİ',
+  'contract.result.completed': 'TAMAMLANDI',
+  'contract.result.delivered': 'TESLİM EDİLDİ',
+  'contract.result.missed_stock': 'KAÇTI — TEDARİKÇİ STOĞU',
+  'contract.result.missed_funds': 'KAÇTI — ALICI NAKDİ',
+  'contract.next': 'Sonraki teslimat',
+  'contract.last': 'Son sonuç',
+
+  'toast.contract_proposal': '📜 {name} tedarik kontratı öneriyor: {qty} × {product} @ {price}',
+  'toast.contract_now_active': 'Tedarik kontratın artık aktif! 🤝',
+  'toast.contract_completed': 'Kontrat tamamlandı: {qty} × {product}.',
+  'toast.contract_proposed': '{name} oyuncusuna kontrat önerildi.',
+  'toast.contract_accepted': 'Tedarik kontratın kabul edildi!',
+  'toast.contract_active': 'Kontrat aktif. Teslimatlar başlayacak.',
+  'toast.contract_rejected': 'Kontrat reddedildi.',
+  'toast.contract_cancelled': 'Kontrat iptal edildi.',
+
+  'toast.welcome.farm': 'Yeni çiftliğine hoş geldin!',
+  'toast.welcome.coffee_shop': 'Kahve dükkânın açıldı!',
+  'toast.welcome.bakery': 'Fırının açıldı — fırınlar sıcak!',
+  'toast.welcome.mini_market': 'Marketin işe hazır!',
+
+  'info.trades': 'Tamamlanan ticaretler',
+  'info.supplies': 'Tedarik edebilir',
+  'info.supplies.none': 'ticarete uygun ürün yok',
+
+  'err.contract_not_found': 'Kontrat bulunamadı.',
+  'err.business_gone': 'Bu işletme artık mevcut değil.',
+  'err.contract_self': 'Kendinle kontrat yapamazsın.',
+  'err.contract_bad_supply': 'Bu işletme seninkine bu ürünü tedarik edemez.',
+  'err.contract_qty_range': 'Miktar 1-{max} arasında olmalı.',
+  'err.contract_price_range': 'Birim fiyat ${min}-${max} arasında olmalı.',
+  'err.contract_deliveries_range': 'Teslimat sayısı {min}-{max} arasında olmalı.',
+  'err.contract_only_supplier_accept': 'Bu kontratı yalnızca tedarikçi kabul edebilir.',
+  'err.contract_not_pending': 'Kontrat artık beklemede değil.',
+  'err.contract_only_supplier_reject': 'Bu kontratı yalnızca tedarikçi reddedebilir.',
+  'err.contract_not_yours': 'Bu kontrat sana ait değil.',
+  'err.contract_not_cancellable': 'Kontrat iptal edilemez.',
+  'err.contract_state_changed': 'Kontrat durumu değişti, çalıştırma iptal edildi.',
+  'err.farms_use_market': 'Çiftlikler pazar üzerinden satar.',
+  'err.retail_price_range': 'Fiyat ${min}-${max} arasında olmalı.',
+  'err.only_farms_production': 'Yalnızca çiftlikler üretim seçer.',
+  'err.farm_product_choice': 'Çiftlikler Süt veya Buğday üretir.',
+
+  'biz.title': '{icon} {owner} — {name}',
+  'biz.sold.coffee_shop': 'Satılan kahve',
+  'biz.sold.bakery': 'Satılan ekmek',
+  'biz.sold.mini_market': 'Satılan ürün',
+  'biz.sold.default': 'Satılan adet',
+  'biz.units_produced': 'Üretilen adet',
+  'biz.producing': 'Üretiyor',
+  'biz.hint.coffee_shop': 'Süt ve çekirdeği Pazar’dan (oyuncu ilanları) ya da Merkez Toptancı’dan (mavi depo) tedarik et.',
+  'biz.hint.bakery': 'Buğdayı Pazar’dan (oyuncu çiftlikleri) ya da Merkez Toptancı’dan (buğday ${wheat}) tedarik et. Her ekmek 1 buğday tüketir.',
+  'biz.hint.mini_market': 'Ekmek ve sütü Pazar’dan (oyuncu fırınları ve çiftlikleri) ya da Merkez Toptancı’dan tedarik et. Kârın perakende marjıdır.',
+  'biz.hint.farm2': 'Sütünü veya buğdayını Pazar’da sat — dükkânların ve fırınların buna ihtiyacı var! Merkez Toptancı süt için ${milk}, buğday için ${wheat} alıyor; sen bunun altına in.',
+
+  'prod.rate.generic': 'dakikada {n}',
+  'prod.capacity.per_product': 'Depo kapasitesi (ürün başına)',
+  'prod.units_lifetime': 'Üretilen adet (toplam)',
+  'prod.hint2': 'Üretim çevrimdışıyken bile otomatik sürer (8 saate kadar). Süt kahvecilere ve marketlere, buğday fırınlara gider. Değiştirmek mevcut stoğu korur.',
+
+  'price.bread_retail': '🍞 Ekmek perakende fiyatı',
+  'price.milk_retail': '🥛 Süt perakende fiyatı',
+  'price.set_bread': 'Ekmek fiyatını ayarla',
+  'price.set_milk': 'Süt fiyatını ayarla',
+  'price.hint.market': 'Referans fiyatlar: ekmek $20, süt $18. Ucuz fiyat daha çok müşteri çeker ve itibarını yükseltir; referansın ~%20 üstü müşteriyi kaçırır. Perakende fiyatının altına mal alarak marj kazanırsın.',
+  'price.current.bread': 'Güncel ekmek fiyatı',
+  'price.current.coffee': 'Güncel kahve fiyatı',
+  'price.hint.bakery': 'Baz fiyat $20. Her ekmek 1 buğday tüketir. Ucuz ekmek daha çok müşteri çeker; ~$24 üzeri fiyat trafiği yavaşlatır ve yıldızlarını düşürür.',
+
+  'upg.units_per_min': 'Adet / dk',
+  'upg.customers_per_min.per_product': 'Müşteri / dk (ürün başına)',
+  'upg.shelf_capacity': 'Raf kapasitesi (ürün başına)',
+  'upg.bake_speed': 'Pişirme hızı',
+
+  'info.company': 'Şirket',
+  'info.online': '🟢 çevrimiçi',
+  'info.offline': '⚪ çevrimdışı',
+  'info.supplies_label': 'Tedarik',
+  'info.retailer_no_supply': 'Perakendeci (tedarik yok)',
+  'info.successful_trades': 'Başarılı ticaret',
+  'info.propose_btn': '📜 Tedarik Kontratı Öner',
+  'info.cannot_contract': 'Senin işletme türün bununla tedarik kontratı kuramaz.',
+  'info.choose_business_first': 'Başkalarıyla ticaret için bir işletme seç.',
+
+  'contract.propose_title': 'Tedarik kontratı öner',
+  'contract.qty_short': 'Miktar',
+  'contract.per_unit': '/adet',
+  'contract.deliveries_label': 'Teslimat',
+  'contract.freq_hint': 'oyun gününde bir (~{secs} sn)',
+  'contract.withdraw': 'Geri çek',
+  'contract.awaiting_supplier': 'tedarikçi bekleniyor',
+  'contract.left': '{n} kaldı',
+  'contract.next_in': 'sonraki ~{secs} sn',
+  'contract.deliveries_total': '{n} teslimat · toplam {total}',
+  'contract.dir.from': '{name} tarafından',
+  'contract.dir.to': '{name} işletmesine',
+
+  'tab.active': 'Aktif',
+  'contracts.empty.incoming': 'Gelen öneri yok. Başkaları işletmene tıklayarak kontrat önerebilir.',
+  'contracts.empty.outgoing': 'Bekleyen önerin yok. Öneri yapmak için başka bir oyuncunun işletmesine tıkla.',
+  'contracts.empty.active': 'Henüz aktif kontrat yok.',
+  'contracts.empty.history': 'Geçmiş kontrat yok.',
+
+  'dev.add_wheat': '+ 100 Buğday',
+  'dev.add_bread': '+ 100 Ekmek',
+
+  'obj.farm.produce2': 'Süt veya Buğday üret',
+  'obj.bakery.open': 'Fırınını aç',
+  'obj.bakery.wheat': 'Buğday edin',
+  'obj.bakery.sale': 'İlk ekmeğini sat',
+  'obj.bakery.buy_wheat': 'Başka bir oyuncudan buğday al',
+  'obj.bakery.upgrade': 'Fırınını yükselt',
+  'obj.market.openbiz': 'Marketini aç',
+  'obj.market.stock': 'Ekmek veya süt stokla',
+  'obj.market.sale': 'İlk perakende satışını yap',
+  'obj.market.buy_stock': 'Başka bir oyuncudan mal al',
+  'obj.market.upgrade': 'Marketini yükselt',
+
+  'away.tagline.generic': 'İşletmen {dur} boyunca servise devam etti.',
+  'away.units_produced': 'Üretilen adet',
+  'away.items_sold': 'Satılan ürün',
+};
+
+const DICTS: Record<Lang, Dict> = { en, tr };
+
+// ---------------- lookup ----------------
+
+/**
+ * Params whose values are themselves translatable identifiers get resolved
+ * before interpolation, so `{product}` reads "Süt" rather than "milk".
+ */
+const PARAM_PREFIX: Record<string, string> = {
+  product: 'product.',
+  bizType: 'biz.',
+};
+
+function resolveParam(key: string, value: string | number): string {
+  const prefix = PARAM_PREFIX[key];
+  if (prefix && typeof value === 'string') {
+    const suffix = key === 'bizType' ? `${value}.lower` : value;
+    const dict = DICTS[current];
+    const hit = dict[prefix + suffix] ?? en[prefix + suffix];
+    if (hit) return hit;
+  }
+  return String(value);
+}
+
+/** Translate `key` in the active language, interpolating `{name}` params. */
+export function t(key: string, params?: MsgParams): string {
+  const template = DICTS[current][key] ?? en[key] ?? key;
+  if (!params) return template;
+  return template.replace(/\{(\w+)\}/g, (whole, name: string) =>
+    name in params ? resolveParam(name, params[name]) : whole
+  );
+}
+
+// ---------------- formatting helpers ----------------
+
+/** Money, always in game dollars but grouped per the active locale. */
+export function fmtMoney(n: number): string {
+  return '$' + Math.round(n).toLocaleString(current === 'tr' ? 'tr-TR' : 'en-US');
+}
+
+export function fmtNumber(n: number): string {
+  return n.toLocaleString(current === 'tr' ? 'tr-TR' : 'en-US');
+}
+
+export function productName(id: ProductId): string {
+  return t(`product.${id}`);
+}
+
+export function bizTypeName(type: BusinessType): string {
+  return t(`biz.${type}`);
+}
+
+/** Apply the initial language to the document shell. */
+export function applyDocumentLang(): void {
+  document.documentElement.lang = current;
+  document.title = t('app.title');
+}

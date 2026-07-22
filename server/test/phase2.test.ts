@@ -45,7 +45,7 @@ describe('bakery', () => {
     const cash0 = p.cash;
     world.simulate(biz, 300, true);
     expect(biz.coffeeSold).toBe(0); // no wheat -> nothing sold
-    expect(biz.status).toBe('OUT OF STOCK');
+    expect(biz.status).toBe('out_of_stock');
     biz.inv.get('wheat')!.qty = 60;
     world.simulate(biz, 300, true);
     expect(biz.coffeeSold).toBeGreaterThan(0);
@@ -63,7 +63,7 @@ describe('mini market', () => {
     const cash0 = p.cash;
     world.simulate(biz, 400, true);
     expect(p.cash).toBe(cash0); // empty shelves sell nothing
-    expect(biz.status).toBe('OUT OF STOCK');
+    expect(biz.status).toBe('out_of_stock');
     biz.inv.get('bread')!.qty = 50;
     biz.inv.get('milk')!.qty = 50;
     world.setPrice(pid, 22);           // bread

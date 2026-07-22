@@ -13,6 +13,7 @@ import { City, type Selectable } from './game/city.js';
 import { Actors } from './game/actors.js';
 import { Effects } from './game/effects.js';
 import { sfx } from './audio.js';
+import { t, applyDocumentLang, onLangChange } from './i18n.js';
 
 const app = document.getElementById('app')!;
 const { renderer, scene, camera } = createScene(app);
@@ -20,7 +21,11 @@ const rig = new CameraRig(camera, renderer.domElement);
 const city = new City(scene);
 const actors = new Actors(scene);
 const effects = new Effects(scene);
+applyDocumentLang();
 const ui = new UI();
+
+// Sign sprites bake their text into a texture — rebuild them on language change.
+onLangChange(() => city.syncBusinesses([...client.businesses.values()]));
 
 ui.onFocusLot = (lotId) => {
   rig.focusOn(city.lotWorldPos(lotId));
@@ -119,7 +124,7 @@ client.on('lost_customer', (e: { bizId: number; lotId: string }) => {
     if (now - (lastSalePopup.get('lost:' + e.lotId) ?? 0) < 2500) return;
     lastSalePopup.set('lost:' + e.lotId, now);
     const pos = city.lotWorldPos(e.lotId);
-    effects.popupText(pos.clone().setY(4.5), 'out of stock!', '#ff9d9d');
+    effects.popupText(pos.clone().setY(4.5), t('world.out_of_stock'), '#ff9d9d');
   }
 });
 
@@ -139,7 +144,7 @@ client.on('trade', () => {
 });
 
 client.on('unauthorized', () => {
-  ui.showAuth('Session expired — please log in again.');
+  ui.showAuth(t('auth.session_expired'));
 });
 
 // Dev-only hook for local testing/automation.

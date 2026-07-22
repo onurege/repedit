@@ -1,6 +1,7 @@
 // Builds the static city and keeps player-business meshes in sync with
 // server state. Building meshes are selectable via raycasting.
 import * as THREE from 'three';
+import { getLang } from '../i18n.js';
 import {
   CITY_EXTENT,
   ROAD_LINES,
@@ -231,9 +232,12 @@ export class City {
     for (const lot of LOTS) {
       const biz = byLot.get(lot.id);
       let key: string;
-      if (lot.kind === 'wholesale') key = 'wholesale';
-      else if (biz) key = `biz:${biz.id}:${biz.level}:${biz.ownerName}`;
-      else key = 'vacant';
+      // Language is part of the key: sign sprites bake text into a texture,
+      // so switching language must invalidate them.
+      const lang = getLang();
+      if (lot.kind === 'wholesale') key = `wholesale:${lang}`;
+      else if (biz) key = `biz:${biz.id}:${biz.level}:${biz.ownerName}:${lang}`;
+      else key = `vacant:${lang}`;
       if (this.lotState.get(lot.id) === key) continue;
       this.lotState.set(lot.id, key);
 

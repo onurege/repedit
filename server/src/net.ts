@@ -85,7 +85,7 @@ export class Net {
     w.on('biz_removed', ({ bizId }: { bizId: number; lotId: string }) => {
       // Simplest correct refresh: clients get full biz list on next join;
       // for live clients broadcast a status-less stub they interpret as removal.
-      this.broadcast({ t: 'toast', msg: 'A lot opened up in the district.', kind: 'info' });
+      this.broadcast({ t: 'toast', code: 'toast.lot_opened', kind: 'info' });
       this.broadcastBizList();
     });
     w.on('order', (o: any) => {
@@ -138,7 +138,7 @@ export class Net {
       const token = new URL(url, 'http://x').searchParams.get('token') ?? '';
       const playerId = token ? await playerIdForToken(token) : null;
       if (!playerId) {
-        this.send(ws, { t: 'error', msg: 'Invalid session. Please log in again.' });
+        this.send(ws, { t: 'error', code: 'err.invalid_session' });
         ws.close(4001, 'unauthorized');
         return;
       }
@@ -198,13 +198,7 @@ export class Net {
           break;
         case 'choose_business': {
           await world.chooseBusiness(pid, msg.type);
-          const welcome: Record<string, string> = {
-            farm: 'Welcome to your new farm!',
-            coffee_shop: 'Your coffee shop is open!',
-            bakery: 'Your bakery is open — the ovens are warm!',
-            mini_market: 'Your mini market is open for business!',
-          };
-          this.send(conn.ws, { t: 'toast', msg: welcome[msg.type] ?? 'Business opened!', kind: 'success' });
+          this.send(conn.ws, { t: 'toast', code: `toast.welcome.${msg.type}`, kind: 'success' });
           break;
         }
         case 'buy_npc':
@@ -214,7 +208,7 @@ export class Net {
         case 'order_create':
           await world.createOrder(pid, msg.side, msg.product, msg.qty, msg.price);
           this.pushOwnState(pid);
-          this.send(conn.ws, { t: 'toast', msg: 'Order placed on the marketplace.', kind: 'success' });
+          this.send(conn.ws, { t: 'toast', code: 'toast.order_placed', kind: 'success' });
           break;
         case 'order_cancel':
           await world.cancelOrder(pid, msg.orderId);
@@ -229,14 +223,15 @@ export class Net {
           }
           this.send(conn.ws, {
             t: 'toast',
-            msg: `Trade complete: ${trade.qty} × ${trade.product} @ $${trade.price}. Delivery on its way!`,
+            code: 'toast.trade_complete',
+            params: { qty: trade.qty, product: trade.product, price: trade.price },
             kind: 'success',
           });
           break;
         }
         case 'upgrade':
           await world.upgrade(pid);
-          this.send(conn.ws, { t: 'toast', msg: 'Upgrade complete!', kind: 'success' });
+          this.send(conn.ws, { t: 'toast', code: 'toast.upgrade_complete', kind: 'success' });
           break;
         case 'set_price':
           world.setPrice(pid, msg.price, msg.product);
@@ -248,40 +243,40 @@ export class Net {
           break;
         case 'contract_propose': {
           const c = await world.proposeContract(pid, msg.sellerBizId, msg.product, msg.quantity, msg.unitPrice, msg.deliveries);
-          this.send(conn.ws, { t: 'toast', msg: `Contract proposed to ${world.players.get(c.sellerId)?.name ?? 'supplier'}.`, kind: 'success' });
+          this.send(conn.ws, { t: 'toast', code: 'toast.contract_proposed', params: { name: world.players.get(c.sellerId)?.name ?? '' }, kind: 'success' });
           break;
         }
         case 'contract_accept': {
           const c = await world.acceptContract(pid, msg.contractId);
-          this.sendToPlayer(c.buyerId, { t: 'toast', msg: 'Your supply contract was accepted!', kind: 'success' });
-          this.send(conn.ws, { t: 'toast', msg: 'Contract active. Deliveries will begin.', kind: 'success' });
+          this.sendToPlayer(c.buyerId, { t: 'toast', code: 'toast.contract_accepted', kind: 'success' });
+          this.send(conn.ws, { t: 'toast', code: 'toast.contract_active', kind: 'success' });
           break;
         }
         case 'contract_reject':
           await world.rejectContract(pid, msg.contractId);
-          this.send(conn.ws, { t: 'toast', msg: 'Contract rejected.', kind: 'info' });
+          this.send(conn.ws, { t: 'toast', code: 'toast.contract_rejected', kind: 'info' });
           break;
         case 'contract_cancel':
           await world.cancelContract(pid, msg.contractId);
-          this.send(conn.ws, { t: 'toast', msg: 'Contract cancelled.', kind: 'info' });
+          this.send(conn.ws, { t: 'toast', code: 'toast.contract_cancelled', kind: 'info' });
           break;
         case 'dev': {
-          if (!config.devTools) throw new GameError('Dev tools are disabled.');
+          if (!config.devTools) throw new GameError('err.dev_disabled');
           const result = await world.devCommand(pid, msg.cmd, msg.value);
           this.pushOwnState(pid);
-          this.send(conn.ws, { t: 'toast', msg: `[dev] ${result}`, kind: 'info' });
+          this.send(conn.ws, { t: 'toast', code: 'toast.dev', params: { result }, kind: 'info' });
           if (msg.cmd === 'reset_business') this.broadcastBizList();
           break;
         }
       }
     } catch (err) {
       if (err instanceof GameError) {
-        this.send(conn.ws, { t: 'error', msg: err.message });
+        this.send(conn.ws, { t: 'error', code: err.code, params: err.params });
       } else {
         // Game messages never contain credentials, so logging the payload is safe
         // and gives enough context to diagnose economic failures.
         console.error(`[econ] action failed player=${pid} msg=${JSON.stringify(msg)}`, err);
-        this.send(conn.ws, { t: 'error', msg: 'Something went wrong on the server.' });
+        this.send(conn.ws, { t: 'error', code: 'err.server' });
       }
     }
   }
