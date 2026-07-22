@@ -83,8 +83,20 @@ npm test
 Covers inventory rules, production, cash transactions, marketplace
 creation/fulfillment/cancellation, duplicate-transaction protection (including
 concurrent double-fulfil), upgrades, offline progression, restart persistence,
-and a full Player A ↔ Player B trade integration scenario.
+the economic ledger, and a full Player A ↔ Player B trade integration scenario.
 Tests use a separate `business_district_test` database (`createdb business_district_test -O district`).
+
+Browser E2E (golden path — two players trading through the real UI). Requires
+the dev stack running and Playwright's Chromium (`npx playwright install chromium`):
+
+```bash
+npm run dev     # in one terminal
+npm run e2e     # in another
+```
+
+All money movements (NPC purchases, coffee sales, market escrow/refunds/trades,
+upgrades) are recorded in the append-only `economic_ledger` table for debugging:
+`SELECT * FROM economic_ledger WHERE player_id = $1 ORDER BY id;`
 
 ## Production build
 

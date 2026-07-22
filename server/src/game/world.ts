@@ -127,6 +127,26 @@ export interface DeliveryRec {
   arriveAtMs: number;
 }
 
+// Append-only economic ledger entry (see migrations/002).
+interface LedgerEntry {
+  playerId: number;
+  businessId: number | null;
+  type: string; // NPC_PURCHASE | CUSTOMER_SALE | MARKET_ESCROW | MARKET_REFUND | MARKET_BUY | MARKET_SELL | BUSINESS_UPGRADE
+  amount: number; // signed: positive credits player cash
+  refType: string | null;
+  refId: number | null;
+  before: number;
+  after: number;
+}
+
+const LEDGER_SQL = `INSERT INTO economic_ledger
+  (player_id, business_id, transaction_type, amount, reference_type, reference_id, balance_before, balance_after)
+  VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`;
+
+function ledgerParams(e: LedgerEntry): any[] {
+  return [e.playerId, e.businessId, e.type, e.amount, e.refType, e.refId, e.before, e.after];
+}
+
 const TRADABLE: ProductId[] = ['milk', 'beans'];
 const FAIR_COFFEE_PRICE = Math.round(PRODUCTS.coffee.basePrice * 1.2);
 
@@ -156,7 +176,11 @@ export class World extends EventEmitter {
   timeScale = 1;
   private tickTimer: ReturnType<typeof setInterval> | null = null;
   private ticksSinceFlush = 0;
+  private tickInProgress = false;
   private fulfillLocks = new Set<number>();
+  // CUSTOMER_SALE ledger entries accumulate here (simulate() is synchronous)
+  // and are persisted in batch by flush().
+  private ledgerQueue: LedgerEntry[] = [];
 
   bizByOwner(playerId: number): BizRec | undefined {
     for (const b of this.businesses.values()) if (b.ownerId === playerId) return b;
@@ -275,8 +299,21 @@ export class World extends EventEmitter {
   async flush(): Promise<void> {
     const dirtyPlayers = [...this.players.values()].filter((p) => p.dirty);
     const dirtyBiz = [...this.businesses.values()].filter((b) => b.dirty);
-    if (!dirtyPlayers.length && !dirtyBiz.length) return;
+    const ledger = this.ledgerQueue;
+    if (!dirtyPlayers.length && !dirtyBiz.length && !ledger.length) return;
+    this.ledgerQueue = [];
+    try {
+      await this.flushTx(dirtyPlayers, dirtyBiz, ledger);
+    } catch (err) {
+      // don't lose audit rows on a transient failure
+      this.ledgerQueue.unshift(...ledger);
+      throw err;
+    }
+  }
+
+  private async flushTx(dirtyPlayers: PlayerRec[], dirtyBiz: BizRec[], ledger: LedgerEntry[]): Promise<void> {
     await tx(async (c) => {
+      for (const e of ledger) await c.query(LEDGER_SQL, ledgerParams(e));
       for (const p of dirtyPlayers) {
         await c.query(
           `UPDATE players SET cash=$1, xp=$2, level=$3, last_seen=to_timestamp($4/1000.0), away_snapshot=$5 WHERE id=$6`,
@@ -318,7 +355,15 @@ export class World extends EventEmitter {
   start(): void {
     if (this.tickTimer) return;
     this.tickTimer = setInterval(() => {
-      this.tick(1 * this.timeScale).catch((err) => console.error('[world] tick error', err));
+      // Two economic ticks must never run concurrently: skip this beat if
+      // the previous tick's async persistence hasn't finished yet.
+      if (this.tickInProgress) return;
+      this.tickInProgress = true;
+      this.tick(1 * this.timeScale)
+        .catch((err) => console.error('[world] tick error', err))
+        .finally(() => {
+          this.tickInProgress = false;
+        });
     }, 1000);
   }
 
@@ -421,6 +466,11 @@ export class World extends EventEmitter {
         coffee.qty -= sold;
         const gross = sold * biz.price;
         if (sold > 0) {
+          this.ledgerQueue.push({
+            playerId: owner.id, businessId: biz.id, type: 'CUSTOMER_SALE',
+            amount: gross, refType: 'business', refId: biz.id,
+            before: owner.cash, after: owner.cash + gross,
+          });
           owner.cash += gross;
           owner.dirty = true;
           biz.revenue += gross;
@@ -615,7 +665,12 @@ export class World extends EventEmitter {
           p.id,
         ]);
         await c.query('UPDATE businesses SET expenses=$1 WHERE id=$2', [biz.expenses, biz.id]);
+        await c.query(LEDGER_SQL, ledgerParams({
+          playerId, businessId: biz.id, type: 'NPC_PURCHASE', amount: -cost,
+          refType: 'delivery', refId: delivery.id, before: p.cash + cost, after: p.cash,
+        }));
       });
+      console.log(`[econ] NPC_PURCHASE player=${playerId} ${qty}x${product} cost=$${cost} delivery=${delivery.id}`);
       this.emit('delivery', delivery);
       this.emit('purchase', { playerId, product, qty, cost });
     } catch (err) {
@@ -690,6 +745,7 @@ export class World extends EventEmitter {
       }
     });
     this.deliveries.delete(d.id);
+    console.log(`[econ] DELIVERY_DONE id=${d.id} ${d.qty}x${d.product} -> biz=${d.toBusinessId}`);
     this.emit('delivery_done', d);
   }
 
@@ -738,6 +794,13 @@ export class World extends EventEmitter {
            ON CONFLICT (business_id, product) DO UPDATE SET qty=$3, reserved=$4`,
           [biz.id, product, rec.qty, rec.reserved]
         );
+        if (side === 'buy') {
+          const cost = qty * price;
+          await c.query(LEDGER_SQL, ledgerParams({
+            playerId, businessId: biz.id, type: 'MARKET_ESCROW', amount: -cost,
+            refType: 'order', refId: ins.rows[0].id, before: p.cash + cost, after: p.cash,
+          }));
+        }
         return ins.rows[0];
       });
       const order: OrderRec = {
@@ -791,6 +854,13 @@ export class World extends EventEmitter {
     await tx(async (c) => {
       await c.query("UPDATE market_orders SET status='cancelled', remaining=0 WHERE id=$1", [orderId]);
       await c.query('UPDATE players SET cash=$1 WHERE id=$2', [p.cash, p.id]);
+      if (order.side === 'buy' && remaining > 0) {
+        const refund = remaining * order.price;
+        await c.query(LEDGER_SQL, ledgerParams({
+          playerId, businessId: biz.id, type: 'MARKET_REFUND', amount: refund,
+          refType: 'order', refId: orderId, before: p.cash - refund, after: p.cash,
+        }));
+      }
       const rec = inv(biz, order.product);
       await c.query(
         `INSERT INTO inventories (business_id, product, qty, reserved) VALUES ($1,$2,$3,$4)
@@ -893,6 +963,18 @@ export class World extends EventEmitter {
            VALUES ($1,$2,$3,$4,$5,$6) RETURNING id, created_at`,
           [orderId, buyer.id, seller.id, order.product, qty, order.price]
         );
+        const newTradeId = ins.rows[0].id;
+        await c.query(LEDGER_SQL, ledgerParams({
+          playerId: seller.id, businessId: sellerBiz.id, type: 'MARKET_SELL', amount,
+          refType: 'trade', refId: newTradeId, before: seller.cash - amount, after: seller.cash,
+        }));
+        if (order.side === 'sell') {
+          // buyer pays now (buy-order escrow was already recorded at creation)
+          await c.query(LEDGER_SQL, ledgerParams({
+            playerId: buyer.id, businessId: buyerBiz.id, type: 'MARKET_BUY', amount: -amount,
+            refType: 'trade', refId: newTradeId, before: buyer.cash + amount, after: buyer.cash,
+          }));
+        }
         return ins.rows[0];
       });
       if (order.remaining === 0) this.orders.delete(orderId);
@@ -905,6 +987,10 @@ export class World extends EventEmitter {
         sellerName: seller.name,
         at: new Date(tradeId.created_at).getTime(),
       };
+      console.log(
+        `[econ] TRADE id=${trade.id} order=${orderId} ${qty}x${order.product} @$${order.price} ` +
+          `seller=${seller.id} buyer=${buyer.id} delivery=${delivery.id}`
+      );
       this.emit('delivery', delivery);
       this.emit('trade', trade);
       this.emit('order', order);
@@ -951,7 +1037,12 @@ export class World extends EventEmitter {
         await c.query('UPDATE businesses SET level=$1, expenses=$2 WHERE id=$3', [
           biz.level, biz.expenses, biz.id,
         ]);
+        await c.query(LEDGER_SQL, ledgerParams({
+          playerId, businessId: biz.id, type: 'BUSINESS_UPGRADE', amount: -cost,
+          refType: 'business', refId: biz.id, before: p.cash + cost, after: p.cash,
+        }));
       });
+      console.log(`[econ] BUSINESS_UPGRADE player=${playerId} biz=${biz.id} level=${biz.level} cost=$${cost}`);
       this.emit('upgraded', { biz });
     } catch (err) {
       p.cash += cost;

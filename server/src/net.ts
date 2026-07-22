@@ -240,7 +240,9 @@ export class Net {
       if (err instanceof GameError) {
         this.send(conn.ws, { t: 'error', msg: err.message });
       } else {
-        console.error('[net] action failed', err);
+        // Game messages never contain credentials, so logging the payload is safe
+        // and gives enough context to diagnose economic failures.
+        console.error(`[econ] action failed player=${pid} msg=${JSON.stringify(msg)}`, err);
         this.send(conn.ws, { t: 'error', msg: 'Something went wrong on the server.' });
       }
     }
