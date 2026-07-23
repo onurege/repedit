@@ -359,6 +359,11 @@ export class UI {
         <div class="stat"><span class="k">${t('hud.reputation')}</span><span class="v" id="st-rep">★ 3.0</span></div>
         <div class="sep"></div>
         <div class="stat"><span class="k">${t('hud.online')}</span><span class="v" id="st-online">1</span></div>
+        <div class="sep"></div>
+        <button class="account-btn" id="hud-logout" title="${t('hud.logout')}">
+          <span class="acc-name" id="st-username"></span>
+          <span class="acc-icon">⎋</span>
+        </button>
       </div>
       <div class="company-bar" id="company-bar"></div>
       <div class="nav">
@@ -422,6 +427,10 @@ export class UI {
       sfx.click();
       client.send({ t: 'get_announcements' });
       this.openPanel('news');
+    });
+    document.getElementById('hud-logout')!.addEventListener('click', () => {
+      sfx.click();
+      if (confirm(t('hud.logout.confirm'))) client.logout();
     });
     document.getElementById('nav-dev')!.addEventListener('click', () => {
       sfx.click();
@@ -529,6 +538,7 @@ export class UI {
     (document.getElementById('st-rep') as HTMLElement).textContent =
       '★ ' + (biz ? biz.reputation.toFixed(1) : you.reputation.toFixed(1));
     (document.getElementById('st-online') as HTMLElement).textContent = String(client.online);
+    (document.getElementById('st-username') as HTMLElement).textContent = you.name;
     this.updateContractBadge();
     this.renderCompanyBar();
     this.renderEventBanner();
