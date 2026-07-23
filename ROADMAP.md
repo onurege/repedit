@@ -71,7 +71,7 @@ offline progression, full persistence. **This phase is implemented.**
 - Day/night cycle and weather
 - Better traffic and pedestrian simulation
 - Construction/upgrade animations
-- Larger city with districts
+- ~~Larger city with districts~~ — shipped in V2.6 (Old Town + Green Valley)
 - Visual polish pass
 
 ## PHASE 5 — Economic MMO
@@ -80,5 +80,9 @@ offline progression, full persistence. **This phase is implemented.**
 - Banking, loans, real estate ownership
 - Advanced business relationships (mergers, franchises)
 - Multi-city architecture
+
+## NEXT — V2.7 — Social Competition & Living Economy
+
+Not started. Do not implement ahead of schedule.
 
 **Phases 2–5 are documented only. Do not implement ahead of schedule.**

@@ -330,6 +330,9 @@ export class Net {
         case 'get_wholesale':
           this.send(conn.ws, { t: 'wholesale', wholesale: world.toWholesaleState() });
           break;
+        case 'city_status':
+          this.send(conn.ws, { t: 'city_status', status: world.getCityStatus() });
+          break;
         case 'get_brief': {
           const brief = await world.buildBrief(pid, null);
           if (brief) this.send(conn.ws, { t: 'brief', brief });

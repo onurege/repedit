@@ -4,7 +4,7 @@
 import * as THREE from 'three';
 import {
   roadPath, pointAlongPath, pathLength, nearestRoadPoint,
-  ROAD_LINES, ROAD_SPAN, ROAD_HALF_WIDTH, lotById,
+  ROAD_HALF_WIDTH, lotById, DISTRICTS, districtById,
   type DeliveryPub, type Vec2,
 } from '@district/shared';
 import { makeVan, makePerson, makeCar } from './buildings.js';
@@ -98,12 +98,19 @@ export class Actors {
     if (!lot) return;
     const door: Vec2 = { x: lot.x, z: lot.z };
     const roadPt = nearestRoadPoint(door);
-    // start somewhere along the road ~12 units from the entrance
+    // Start ~12 units along the road, clamped to the lot's own district so a
+    // customer never walks off the end of its road network.
+    const home = districtById(lot.district);
+    const span = home?.roadSpan ?? 48;
+    const ox = home?.origin.x ?? 0;
+    const oz = home?.origin.z ?? 0;
+    const clampX = (v: number) => Math.max(ox - span, Math.min(ox + span, v));
+    const clampZ = (v: number) => Math.max(oz - span, Math.min(oz + span, v));
     const off = 12 * (this.rnd() > 0.5 ? 1 : -1);
     const start: Vec2 =
       Math.abs(roadPt.x - door.x) > Math.abs(roadPt.z - door.z)
-        ? { x: roadPt.x, z: Math.max(-ROAD_SPAN, Math.min(ROAD_SPAN, roadPt.z + off)) }
-        : { x: Math.max(-ROAD_SPAN, Math.min(ROAD_SPAN, roadPt.x + off)), z: roadPt.z };
+        ? { x: roadPt.x, z: clampZ(roadPt.z + off) }
+        : { x: clampX(roadPt.x + off), z: roadPt.z };
     const path = [start, roadPt, { x: door.x + (this.rnd() - 0.5) * 2, z: door.z + 2.5 }];
     const mesh = makePerson(Math.floor(this.rnd() * 1e6));
     mesh.position.set(start.x, 0, start.z);
@@ -141,10 +148,16 @@ export class Actors {
     }
   }
 
+  /** A random point on a random district's road grid. */
   private randomRoadPoint(): Vec2 {
-    const line = ROAD_LINES[Math.floor(this.rnd() * ROAD_LINES.length)];
-    const p = -ROAD_SPAN + this.rnd() * ROAD_SPAN * 2;
-    return this.rnd() > 0.5 ? { x: line, z: p } : { x: p, z: line };
+    const d = DISTRICTS[Math.floor(this.rnd() * DISTRICTS.length)];
+    const p = -d.roadSpan + this.rnd() * d.roadSpan * 2;
+    if (this.rnd() > 0.5) {
+      const line = d.roadLines.vertical[Math.floor(this.rnd() * d.roadLines.vertical.length)];
+      return { x: d.origin.x + line, z: d.origin.z + p };
+    }
+    const line = d.roadLines.horizontal[Math.floor(this.rnd() * d.roadLines.horizontal.length)];
+    return { x: d.origin.x + p, z: d.origin.z + line };
   }
 
   private newAmbientPath(a: Ambient): void {

@@ -8,6 +8,7 @@ import type {
   CityEventType, CityEventStatus, CityEventEffects, DemandCategory,
   StockCategory,
 } from './defs.js';
+import type { DistrictId } from './city.js';
 import type {
   AlertKind, AlertSeverity, OpportunityKind,
   AnnouncementType, AnnouncementPriority,
@@ -43,6 +44,7 @@ export type ClientMsg =
   | { t: 'tutorial_skip' }
   | { t: 'get_announcements' }
   | { t: 'create_announcement'; title: string; message: string; kind: AnnouncementType; priority: AnnouncementPriority; durationSecs?: number }
+  | { t: 'city_status' }
   | { t: 'ping' };
 
 // ---------- server -> client ----------
@@ -99,6 +101,7 @@ export interface BizPub {
   companyName: string;
   type: BusinessType;
   lotId: string;
+  district: DistrictId; // derived from the lot; districts share one economy
   level: number;
   status: BizStatus;
   reputation: number;   // public: star rating
@@ -392,6 +395,44 @@ export interface AwayReport {
   coffeeSold: number;
 }
 
+// ---------- districts & city status (V2.6) ----------
+
+/** Live occupancy for one district, used by the district selector. */
+export interface DistrictOccupancy {
+  id: DistrictId;
+  nameKey: string;
+  unlockOrder: number;
+  total: number;      // buildable lots
+  occupied: number;
+  available: number;
+  /** Free lots per business type, so the UI can show real expansion room. */
+  freeByType: Partial<Record<BusinessType, number>>;
+}
+
+/**
+ * Cheap, city-wide public aggregates. Contains no private information —
+ * never cash, inventory, contracts or ledger data.
+ */
+export interface CityStatus {
+  companies: number;
+  businesses: number;
+  occupiedLots: number;
+  totalLots: number;
+  activeDeliveries: number;
+  districts: DistrictOccupancy[];
+  recent: CityActivity[];
+}
+
+/** A recent, public city happening shown in the living-city feed. */
+export interface CityActivity {
+  kind: 'business_opened' | 'business_upgraded';
+  companyName: string;
+  bizType: BusinessType;
+  district: DistrictId;
+  level: number;
+  at: number; // epoch ms
+}
+
 export type ServerMsg =
   | {
       t: 'welcome';
@@ -436,4 +477,5 @@ export type ServerMsg =
   | { t: 'tutorial'; state: TutorialState }
   | { t: 'announcements'; active: AnnouncementPub[]; history: AnnouncementPub[] }
   | { t: 'announcement'; announcement: AnnouncementPub }  // live broadcast
+  | { t: 'city_status'; status: CityStatus }
   | { t: 'pong' };

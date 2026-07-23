@@ -265,6 +265,15 @@ button { font-family: inherit; }
   background: rgba(255,255,255,0.98); border-radius: 16px; padding: 12px 14px;
   box-shadow: 0 16px 40px rgba(15,23,42,0.28); border: 1px solid #e2e8f0;
 }
+/* Mira shares the bottom-right corner with the side panel and sits above it
+   (z-index 13), which made the panel's lower controls unclickable while the
+   tutorial was on screen. Slide her clear whenever a panel is open. */
+.panel.visible ~ .mira,
+.panel.visible ~ .mira-note { right: 430px; }
+@media (max-width: 900px) {
+  .panel.visible ~ .mira,
+  .panel.visible ~ .mira-note { right: 16px; bottom: 8px; }
+}
 .mira-av { font-size: 40px; line-height: 1; align-self: flex-end; }
 .mira-body { flex: 1; }
 .mira-name { font-weight: 800; font-size: 14px; }
@@ -433,3 +442,50 @@ button { font-family: inherit; }
 }
 #langbar button:hover { background: #eef2f7; color: #334155; }
 #langbar button.active { background: #2563eb; color: #fff; }
+
+/* ---- V2.6: district selector & grouped business chips ---- */
+.district-bar {
+  /* Sits directly above the main nav; both are centred, so the offset must
+     clear the nav's height (~54px) plus its 16px bottom inset. */
+  position: absolute; left: 50%; transform: translateX(-50%); bottom: 80px; z-index: 60;
+  display: flex; align-items: stretch; gap: 6px; padding: 5px; pointer-events: auto;
+  background: rgba(255, 255, 255, 0.93); border: 1px solid #dbe3ee;
+  border-radius: 12px; box-shadow: 0 3px 14px rgba(15, 23, 42, 0.16);
+}
+.district-title {
+  display: flex; align-items: center; padding: 0 8px;
+  border: 0; background: transparent; cursor: pointer; font-family: inherit;
+  font-size: 10.5px; font-weight: 800; letter-spacing: 0.9px;
+  text-transform: uppercase; color: #94a3b8;
+}
+.district-cell {
+  display: flex; flex-direction: column; gap: 1px; align-items: flex-start;
+  border: 1px solid transparent; background: #f1f5f9; cursor: pointer;
+  padding: 6px 12px; border-radius: 9px; font: inherit; text-align: left;
+}
+.district-cell:hover { background: #e2e8f0; border-color: #cbd5e1; }
+.district-cell.full { opacity: 0.72; }
+.dc-name { font-size: 12.5px; font-weight: 700; color: #1e293b; line-height: 1.1; }
+.dc-meta { font-size: 10.5px; font-weight: 600; color: #64748b; line-height: 1.1; }
+.district-cell.full .dc-meta { color: #b45309; }
+
+.biz-group { display: inline-flex; align-items: center; gap: 3px; }
+.biz-group + .biz-group { margin-left: 8px; padding-left: 8px; border-left: 1px solid #dbe3ee; }
+.biz-group-label {
+  font-size: 9.5px; font-weight: 800; letter-spacing: 0.6px; text-transform: uppercase;
+  color: #94a3b8; cursor: pointer; padding: 2px 3px; border-radius: 5px;
+}
+.biz-group-label:hover { color: #2563eb; background: #eff6ff; }
+
+.mira-note { position: fixed; right: 16px; bottom: 92px; z-index: 120; max-width: 340px; pointer-events: auto; }
+
+.open-group + .open-group { margin-top: 10px; }
+.open-group-head {
+  display: flex; align-items: center; justify-content: space-between;
+  font-size: 10.5px; font-weight: 800; letter-spacing: 0.8px; text-transform: uppercase;
+  color: #94a3b8; padding: 4px 2px 6px; border-bottom: 1px dashed #e2e8f0; margin-bottom: 6px;
+}
+.open-group-head span { color: #64748b; font-weight: 700; letter-spacing: 0; }
+
+.district-bar:empty { display: none; }
+.district-title:hover { color: #2563eb; }

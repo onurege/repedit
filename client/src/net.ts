@@ -19,6 +19,7 @@ import type {
   CompanyProfile,
   CityMarket,
   MorningBrief,
+  CityStatus,
   TutorialState,
   UpdatePub,
   AnnouncementPub,
@@ -57,6 +58,7 @@ export class GameClient {
   cityMarket: CityMarket | null = null;
   wholesale: WholesaleState | null = null;
   brief: MorningBrief | null = null;
+  cityStatus: CityStatus | null = null;
   tutorial: TutorialState | null = null;
   updatesUnseen: UpdatePub[] = [];
   updatesAll: UpdatePub[] = [];
@@ -312,6 +314,11 @@ export class GameClient {
       case 'city_market':
         this.cityMarket = msg.market;
         this.emit('city_market', msg.market);
+        this.emit('update');
+        break;
+      case 'city_status':
+        this.cityStatus = msg.status;
+        this.emit('city_status', msg.status);
         this.emit('update');
         break;
       case 'wholesale':

@@ -26,6 +26,20 @@ FARM ──produces──▶ MILK ──marketplace──▶ COFFEE SHOP ──s
 - An NPC wholesaler ("Central Wholesale") guarantees supply so nobody is ever
   blocked by another player being offline — but player milk is cheaper.
 
+## The city
+
+The world is split into districts that share one economy:
+
+| District | Role | Lots |
+|---|---|---|
+| **Old Town** | the original commercial centre | 18 |
+| **Green Valley** | first expansion, more open and greener | 24 |
+
+A company may own businesses in any district on one company-wide management
+capacity pool. The marketplace, contracts, Central Wholesale, rankings, market
+share and city events are all city-wide. Deliveries drive between districts over
+a connecting highway. See `DECISIONS.md` for how to add another district.
+
 ## Quick start (Docker)
 
 ```bash
@@ -97,11 +111,28 @@ npm run dev            # in one terminal
 npm run e2e            # golden path: Farm ↔ Coffee Shop milk trade
 npm run e2e:chain      # Phase 2: Farm → Bakery → Mini Market chain
 npm run e2e:contract   # Phase 3: recurring supply contract (Farm → Bakery)
+npm run e2e:company    # V2.1: company, multi-business, management capacity
+npm run e2e:rankings   # V2.2: market share & city rankings
+npm run e2e:events     # V2.3: city events & dynamic demand
+npm run e2e:experience # V2.4: Mira tutorial, brief, What's New
+npm run e2e:wholesale  # V2.5: finite wholesale & market integrity
+npm run e2e:districts  # V2.6: districts, expansion & cross-district delivery
 ```
 
 Each E2E creates fresh persistent businesses; the shared city has a limited
-number of lots, so reset the dev database (`TRUNCATE ... RESTART IDENTITY`) and
-restart the server if you run them many times.
+number of lots, so reset the dev database and restart the server if you run
+them many times:
+
+```bash
+docker compose exec db psql -U district -d business_district \
+  -c "DROP SCHEMA public CASCADE; CREATE SCHEMA public;"
+npm run migrate
+```
+
+Run them **one at a time from a fresh database**. `e2e:rankings` and
+`e2e:experience` assert on city-wide aggregates (market share, city rank,
+upcoming events), so businesses left behind by an earlier suite will make them
+fail even though the code is correct.
 
 All money movements (NPC purchases, coffee sales, market escrow/refunds/trades,
 upgrades) are recorded in the append-only `economic_ledger` table for debugging:
