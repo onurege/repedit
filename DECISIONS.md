@@ -174,3 +174,38 @@
 - **Inflation guardrails:** bounded demand multiplier, time-limited events,
   existing per-business customer/stock caps and price sensitivity. No taxes or
   sinks added (deferred).
+
+## V2.4 — Player experience & live-service foundation
+
+- **The brief is derived, not a new ledger.** The Morning Business Brief /
+  Offline Report V2 aggregates across all a company's businesses from existing
+  sources — `economic_ledger` (revenue, net cash flow, contract deliveries) and
+  `company_activity` (per-product final sales) — plus live demand/market state.
+  It is computed on connect / on request, never per tick. It shows **net cash
+  flow**, explicitly labelled — never a fabricated "profit".
+- **One opportunity, deterministic rules.** A single most-important
+  recommendation is chosen by a fixed priority ladder (upcoming event on a sold
+  product → high current demand → farm supplier opening → first upgrade → try
+  the marketplace). No AI, no scoring model — legible and testable.
+- **Alerts are prioritized and deduped**, capped at six, sorted
+  critical→warning→info, derived from live business state and contract results.
+- **New players are caught up, returning players see updates once.** Creating a
+  player's tutorial row seeds `player_seen_updates` with all current release
+  notes, so a brand-new player gets Mira instead of an update backlog; the
+  connect flow resolves the tutorial *before* reading unseen updates to avoid a
+  race. Existing players see each new update exactly once via `ack_update`.
+- **Tutorial is non-blocking and resumable.** Mira is a corner avatar, not a
+  modal wall; steps highlight the relevant UI. Progress (`tutorial_progress`)
+  persists and resumes after restart; it can be skipped at any time and never
+  un-skips. Completing "create your first business" auto-advances step 1.
+- **Announcements are admin-only broadcasts, not chat.** Gated by a
+  `players.is_admin` flag; server-side validation caps title/message length,
+  strips angle brackets, and rate-limits to 5/min per admin. Priority drives the
+  UI weight (critical banner → important banner → normal badge only); expiry is
+  honoured for the active list while history is retained.
+- **Camera matches RTS/tycoon conventions**: left-click selects (unchanged),
+  right-drag orbits, middle-drag pans, wheel zooms, WASD still pans. Purely
+  client-side; no gameplay impact.
+- **No economic surface touched.** V2.4 reads existing state and adds
+  communication/onboarding UI only — market share and rankings still derive
+  from real committed activity; prices and trades are unchanged.

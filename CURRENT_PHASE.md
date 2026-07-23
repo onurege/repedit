@@ -1,4 +1,44 @@
-# V2.3 — DYNAMIC CITY DEMAND & CITY EVENTS (current)
+# V2.4 — PLAYER EXPERIENCE & LIVE-SERVICE FOUNDATION (current)
+
+Makes the game welcoming to new players and worth returning to, without any
+economic changes. When a player enters they immediately understand what
+happened while away, what changed in the city, what needs attention, and what
+to do next.
+
+- **Morning Business Brief** on session return: aggregates while-away revenue,
+  net cash flow, production and per-product sales *across all the company's
+  businesses* (from the ledger + `company_activity`), plus current demand /
+  market share, the active/upcoming event, prioritized alerts and one
+  opportunity — with a "Go to Business" shortcut. Doubles as **Offline Report
+  V2**. Honest numbers only (net cash flow, never a fake "profit").
+- **Business alerts** (deduped, prioritized): low input stock, sold out, missed
+  contract, business not operating, storage full — actionable, not spammy.
+- **Opportunity**: exactly one deterministic, rule-based recommendation
+  (stock up before an announced event → produce more in high demand → farm
+  supplier opening → first upgrade → try the marketplace). No AI.
+- **What's New**: a persistent, per-player release-notes system (`UPDATES` +
+  `player_seen_updates`) — a player sees each update once; brand-new players are
+  auto-caught-up so they get the tutorial, not a backlog. Full **update
+  history** browsable in the News panel.
+- **Mira**, a friendly business-advisor avatar (bottom-right), gives a gentle,
+  skippable, 9-step tutorial. Progress persists (`tutorial_progress`) and
+  resumes after restart; completing "create your first business" auto-advances.
+- **Global announcements**: admins (a `players.is_admin` flag) publish
+  broadcast messages (`announcements`) with type + priority; players see a
+  banner by priority, a nav badge, and full history — validated, length-capped,
+  HTML-stripped, rate-limited, admin-only. Not chat.
+- **Improved camera**: WASD + **left-click select**, **right-drag rotate**,
+  **middle-drag pan**, **wheel zoom** — an RTS/tycoon feel.
+
+All reports are computed on connect/on request (never per tick). Other players'
+data stays public-only. Full EN/TR localization. All 93 unit tests (incl. 17
+new experience tests) and seven browser E2Es (golden-path, supply-chain,
+contract, company, rankings, events, experience) pass; production build
+succeeds.
+
+---
+
+# V2.3 — DYNAMIC CITY DEMAND & CITY EVENTS
 
 The first **dynamic economy** layer. The city now runs scheduled events that
 shift consumer demand, so players can read an upcoming situation, prepare

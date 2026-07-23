@@ -7,6 +7,10 @@ import type {
   BusinessType, ProductId, RankingCategory,
   CityEventType, CityEventStatus, CityEventEffects, DemandCategory,
 } from './defs.js';
+import type {
+  AlertKind, AlertSeverity, OpportunityKind,
+  AnnouncementType, AnnouncementPriority,
+} from './content.js';
 
 // ---------- client -> server ----------
 // Actions that target one of the player's businesses carry an optional
@@ -31,6 +35,12 @@ export type ClientMsg =
   | { t: 'get_rankings' }
   | { t: 'get_company_profile'; companyId: number }
   | { t: 'get_city_market' }
+  | { t: 'get_brief' }
+  | { t: 'ack_update'; updateId: string }
+  | { t: 'tutorial_advance'; step: number }
+  | { t: 'tutorial_skip' }
+  | { t: 'get_announcements' }
+  | { t: 'create_announcement'; title: string; message: string; kind: AnnouncementType; priority: AnnouncementPriority; durationSecs?: number }
   | { t: 'ping' };
 
 // ---------- server -> client ----------
@@ -48,6 +58,7 @@ export interface PlayerPriv {
   xp: number;
   level: number;
   reputation: number;
+  isAdmin: boolean;
 }
 
 export interface InventoryEntry {
@@ -207,6 +218,82 @@ export interface CityMarket {
   serverTime: number;
 }
 
+// ---------- V2.4: player experience & live service ----------
+
+export interface BusinessAlert {
+  kind: AlertKind;
+  severity: AlertSeverity;
+  bizId: number;
+  lotId: string;
+  bizType: BusinessType;
+  product?: ProductId;
+  value?: number;      // e.g. remaining stock units
+}
+
+export interface Opportunity {
+  kind: OpportunityKind;
+  product?: ProductId;
+  bizId?: number;
+  lotId?: string;
+}
+
+export interface BriefSale {
+  product: ProductId;
+  units: number;
+}
+
+export interface BriefMarket {
+  product: ProductId;
+  demandCategory: DemandCategory;
+  demandDelta: number;
+  share: number | null;   // 0..1, null if no activity
+  rank: number | null;
+}
+
+/** The Morning Business Brief shown on session return. */
+export interface MorningBrief {
+  playerName: string;
+  companyName: string;
+  awaySeconds: number;         // 0 when the player wasn't meaningfully away
+  revenue: number;             // while away (gross inflows)
+  netCashFlow: number;         // while away (signed)
+  unitsProduced: number;       // aggregate produced while away
+  sales: BriefSale[];          // final NPC sales while away, by product
+  contractsCompleted: number;  // contract deliveries while away
+  contractsMissed: number;     // contracts currently in a missed state
+  market: BriefMarket[];       // products this company sells
+  activeEvent: CityEventPub | null;
+  upcomingEvent: CityEventPub | null;
+  alerts: BusinessAlert[];
+  opportunity: Opportunity | null;
+}
+
+export interface TutorialState {
+  currentStep: number;    // 0 = not started, TUTORIAL_LAST_STEP+ = done
+  completedSteps: number[];
+  skipped: boolean;
+  done: boolean;
+}
+
+export interface UpdatePub {
+  id: string;
+  version: string;
+  titleKey: string;
+  taglineKey: string;
+  featureKeys: string[];
+}
+
+export interface AnnouncementPub {
+  id: number;
+  title: string;
+  message: string;
+  kind: AnnouncementType;
+  priority: AnnouncementPriority;
+  createdAt: number;
+  startsAt: number;
+  expiresAt: number | null;
+}
+
 export interface BizPriv extends BizPub {
   inventory: Partial<Record<ProductId, InventoryEntry>>;
   price: number;   // retail price (coffee / bread)
@@ -323,4 +410,9 @@ export type ServerMsg =
   | { t: 'rankings'; rankings: CityRankings }
   | { t: 'company_profile'; profile: CompanyProfile }
   | { t: 'city_market'; market: CityMarket }
+  | { t: 'brief'; brief: MorningBrief }
+  | { t: 'updates'; unseen: UpdatePub[]; all: UpdatePub[] }
+  | { t: 'tutorial'; state: TutorialState }
+  | { t: 'announcements'; active: AnnouncementPub[]; history: AnnouncementPub[] }
+  | { t: 'announcement'; announcement: AnnouncementPub }  // live broadcast
   | { t: 'pong' };

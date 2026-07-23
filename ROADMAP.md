@@ -43,11 +43,19 @@ offline progression, full persistence. **This phase is implemented.**
 - City Market panel, HUD banner, demand overview — **implemented**
 - Deferred to V2.4: Morning Business Brief, offline report v2
 
-## V2.4 — Morning Business Brief & Offline Report v2  (next)
+## V2.4 — Player Experience & Live-Service Foundation  ✅
 
-- Start-of-session brief summarising demand, events and opportunities
-- Richer "while you were away" report
-- **Documented only. Do not implement ahead of schedule.**
+- Morning Business Brief + Offline Report v2 (company-aggregated) — **implemented**
+- Business alerts + one deterministic opportunity — **implemented**
+- What's New + update history + per-player seen-tracking — **implemented**
+- Mira new-player tutorial (persistent, skippable) — **implemented**
+- Admin global announcements (banner/history, admin-only) — **implemented**
+- RTS-style mouse camera controls — **implemented**
+
+## V2.5 — (next; documented only)
+
+- **Do not implement ahead of schedule.** No economic mechanics, taxes, fees,
+  banks, loans, employees, new products/businesses, or social systems here.
 
 ## PHASE 4 — Living City
 

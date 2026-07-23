@@ -187,7 +187,21 @@ export class Net {
       this.send(ws, { t: 'city_market', market: this.world.toCityMarket() });
       this.world.recentTrades().then((trades) => this.send(ws, { t: 'trades', trades }));
       this.world.contractsForPlayer(playerId).then((contracts) => this.send(ws, { t: 'contracts', contracts }));
-      if (awayReport) this.send(ws, { t: 'away', report: awayReport });
+      // V2.4 player experience: tutorial state, "What's New", brief, announcements.
+      // Resolve the tutorial first — creating it seeds a new player's "seen
+      // updates" so they get the tutorial, not an update backlog.
+      this.world.getTutorial(playerId)
+        .then((state) => {
+          this.send(ws, { t: 'tutorial', state });
+          return this.world.unseenUpdates(playerId);
+        })
+        .then((unseen) => this.send(ws, { t: 'updates', unseen, all: this.world.allUpdates() }))
+        .catch(() => {});
+      this.world.buildBrief(playerId, awayReport).then((brief) => {
+        if (brief) this.send(ws, { t: 'brief', brief });
+      }).catch((e) => console.error('[brief] failed', e));
+      Promise.all([this.world.activeAnnouncements(), this.world.announcementHistory()])
+        .then(([active, history]) => this.send(ws, { t: 'announcements', active, history })).catch(() => {});
       this.broadcastPlayers();
 
       ws.on('message', (raw) => this.onMessage(conn, raw.toString()));
@@ -309,6 +323,37 @@ export class Net {
         case 'get_city_market':
           this.send(conn.ws, { t: 'city_market', market: world.toCityMarket() });
           break;
+        case 'get_brief': {
+          const brief = await world.buildBrief(pid, null);
+          if (brief) this.send(conn.ws, { t: 'brief', brief });
+          break;
+        }
+        case 'ack_update':
+          await world.markUpdateSeen(pid, msg.updateId);
+          break;
+        case 'tutorial_advance': {
+          const state = await world.advanceTutorial(pid, msg.step);
+          this.send(conn.ws, { t: 'tutorial', state });
+          break;
+        }
+        case 'tutorial_skip': {
+          const state = await world.skipTutorial(pid);
+          this.send(conn.ws, { t: 'tutorial', state });
+          break;
+        }
+        case 'get_announcements': {
+          const [active, history] = await Promise.all([world.activeAnnouncements(), world.announcementHistory()]);
+          this.send(conn.ws, { t: 'announcements', active, history });
+          break;
+        }
+        case 'create_announcement': {
+          const a = await world.createAnnouncement(pid, {
+            title: msg.title, message: msg.message, kind: msg.kind, priority: msg.priority, durationSecs: msg.durationSecs,
+          });
+          this.broadcast({ t: 'announcement', announcement: a });
+          this.send(conn.ws, { t: 'toast', code: 'toast.announcement_sent', kind: 'success' });
+          break;
+        }
         case 'dev': {
           if (!config.devTools) throw new GameError('err.dev_disabled');
           const result = await world.devCommand(pid, msg.cmd, msg.value, msg.bizId);

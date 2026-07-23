@@ -1,5 +1,6 @@
-// Smooth elevated isometric-style camera.
-// WASD pan · left-drag rotate (click = select) · wheel zoom · R reset.
+// Smooth elevated isometric-style camera (RTS/tycoon feel).
+// WASD pan · LEFT click = select · RIGHT drag = rotate · MIDDLE drag = pan ·
+// wheel zoom · R reset.
 import * as THREE from 'three';
 
 const MIN_DIST = 18;
@@ -17,6 +18,7 @@ export class CameraRig {
 
   private keys = new Set<string>();
   private dragging = false;
+  private dragButton = -1;   // 0 left (select), 1 middle (pan), 2 right (rotate)
   private dragMoved = 0;
   private lastX = 0;
   private lastY = 0;
@@ -32,12 +34,12 @@ export class CameraRig {
     window.addEventListener('blur', () => this.keys.clear());
 
     dom.addEventListener('mousedown', (e) => {
-      if (e.button === 0 || e.button === 2) {
-        this.dragging = true;
-        this.dragMoved = 0;
-        this.lastX = e.clientX;
-        this.lastY = e.clientY;
-      }
+      // 0 = left (select), 1 = middle (pan), 2 = right (rotate)
+      this.dragging = true;
+      this.dragButton = e.button;
+      this.dragMoved = 0;
+      this.lastX = e.clientX;
+      this.lastY = e.clientY;
     });
     window.addEventListener('mousemove', (e) => {
       if (!this.dragging) return;
@@ -46,22 +48,29 @@ export class CameraRig {
       this.dragMoved += Math.abs(dx) + Math.abs(dy);
       this.lastX = e.clientX;
       this.lastY = e.clientY;
-      if (this.dragMoved > 6) {
+      if (this.dragButton === 2) {
+        // RIGHT drag: orbit (yaw) — horizontal; a little pitch on vertical.
         this.yaw -= dx * 0.006;
-        // slight vertical drag pans forward/back for comfort
-        const fwd = new THREE.Vector3(Math.sin(this.yaw), 0, Math.cos(this.yaw));
-        this.target.addScaledVector(fwd, dy * 0.06);
+      } else if (this.dragButton === 1) {
+        // MIDDLE drag: pan across the ground plane.
+        const scale = this.curDist * 0.0016;
+        const fwd = new THREE.Vector3(-Math.sin(this.curYaw), 0, -Math.cos(this.curYaw));
+        const right = new THREE.Vector3(-fwd.z, 0, fwd.x);
+        this.target.addScaledVector(right, -dx * scale);
+        this.target.addScaledVector(fwd, dy * scale);
         this.clampTarget();
       }
     });
     window.addEventListener('mouseup', (e) => {
       if (!this.dragging) return;
       this.dragging = false;
-      if (e.button === 0 && this.dragMoved <= 6 && this.onSelect) {
+      // LEFT click without a drag = select.
+      if (e.button === 0 && this.dragButton === 0 && this.dragMoved <= 6 && this.onSelect) {
         const ndcX = (e.clientX / window.innerWidth) * 2 - 1;
         const ndcY = -(e.clientY / window.innerHeight) * 2 + 1;
         this.onSelect(ndcX, ndcY);
       }
+      this.dragButton = -1;
     });
     dom.addEventListener('contextmenu', (e) => e.preventDefault());
     dom.addEventListener(

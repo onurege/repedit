@@ -112,6 +112,20 @@ import {
   type CityMarket,
   type ProductDemand,
   type WholesaleStatus,
+  UPDATES,
+  TUTORIAL_LAST_STEP,
+  ANNOUNCEMENT_TITLE_MAX,
+  ANNOUNCEMENT_MESSAGE_MAX,
+  type MorningBrief,
+  type BusinessAlert,
+  type Opportunity,
+  type BriefSale,
+  type BriefMarket,
+  type TutorialState,
+  type UpdatePub,
+  type AnnouncementPub,
+  type AnnouncementType,
+  type AnnouncementPriority,
 } from '@district/shared';
 import { query, tx } from '../db.js';
 
@@ -147,6 +161,7 @@ export interface PlayerRec {
   level: number;
   lastSeenMs: number;
   connections: number;
+  isAdmin: boolean;
   awaySnapshot: {
     ts: number;
     revenue: number;
@@ -299,6 +314,15 @@ const STARTING_PRODUCTS: Record<BusinessType, ProductId[]> = {
   coffee_shop: ['milk', 'beans', 'coffee'],
   bakery: ['wheat', 'bread'],
   mini_market: ['bread', 'milk'],
+};
+
+// V2.4: which final-consumer products each business type sells to NPCs, and
+// which inputs it needs (for low-stock alerts).
+const FINAL_PRODUCTS_OF: Record<BusinessType, ProductId[]> = {
+  coffee_shop: ['coffee'], bakery: ['bread'], mini_market: ['bread', 'milk'], farm: [],
+};
+const INPUTS_OF: Record<BusinessType, ProductId[]> = {
+  coffee_shop: ['milk', 'beans'], bakery: ['wheat'], mini_market: ['bread', 'milk'], farm: [],
 };
 
 function inv(biz: BizRec, product: ProductId): InvRec {
@@ -471,6 +495,7 @@ export class World extends EventEmitter {
         level: r.level,
         lastSeenMs: new Date(r.last_seen).getTime(),
         connections: 0,
+        isAdmin: r.is_admin ?? false,
         awaySnapshot: r.away_snapshot ?? null,
         dirty: false,
       });
@@ -1151,6 +1176,7 @@ export class World extends EventEmitter {
         level: r.level,
         lastSeenMs: new Date(r.last_seen).getTime(),
         connections: 0,
+        isAdmin: r.is_admin ?? false,
         awaySnapshot: r.away_snapshot ?? null,
         dirty: false,
       };
@@ -2230,6 +2256,17 @@ export class World extends EventEmitter {
       case 'clear_events':
         await this.clearEvents();
         return 'events cleared';
+      case 'reset_updates':
+        await query(`DELETE FROM player_seen_updates WHERE player_id=$1`, [playerId]);
+        return 'update history reset';
+      case 'make_admin':
+        this.player(playerId).isAdmin = true;
+        await query(`UPDATE players SET is_admin=true WHERE id=$1`, [playerId]);
+        return 'you are now admin';
+      case 'reset_tutorial':
+        await query(`DELETE FROM tutorial_progress WHERE player_id=$1`, [playerId]);
+        await query(`DELETE FROM player_seen_updates WHERE player_id=$1`, [playerId]);
+        return 'tutorial reset';
       case 'speed':
         this.timeScale = Math.min(60, Math.max(1, v || 1));
         return `time scale x${this.timeScale}`;
@@ -2252,6 +2289,7 @@ export class World extends EventEmitter {
       xp: p.xp,
       level: p.level,
       reputation: biz?.reputation ?? REP_START,
+      isAdmin: p.isAdmin,
     };
   }
 
@@ -2540,6 +2578,286 @@ export class World extends EventEmitter {
       supplierRanks,
       badges,
     };
+  }
+
+  // ============================================================
+  // V2.4 — player experience: brief, alerts, opportunity, tutorial,
+  // updates ("What's New") and admin announcements.
+  // ============================================================
+
+  /** Actionable, prioritized alerts across all of a player's businesses. */
+  computeAlerts(playerId: number): BusinessAlert[] {
+    const alerts: BusinessAlert[] = [];
+    for (const b of this.bizesByOwner(playerId)) {
+      const base = { bizId: b.id, lotId: b.lotId, bizType: b.type } as const;
+      if (b.status === 'paused_away') {
+        alerts.push({ ...base, kind: 'not_operating', severity: 'warning' });
+        continue;
+      }
+      if (b.status === 'storage_full') alerts.push({ ...base, kind: 'capacity_full', severity: 'info' });
+      if (b.status === 'out_of_stock') alerts.push({ ...base, kind: 'sold_out', severity: 'warning' });
+      for (const pr of INPUTS_OF[b.type]) {
+        const have = (b.inv.get(pr)?.qty ?? 0) + this.incomingFor(b.id, pr);
+        if (have < 10) {
+          alerts.push({ ...base, kind: 'low_stock', severity: have === 0 ? 'warning' : 'info', product: pr, value: have });
+        }
+      }
+    }
+    // Contracts currently in a missed state.
+    for (const c of this.contracts.values()) {
+      const mine = c.sellerId === playerId || c.buyerId === playerId;
+      if (mine && c.lastResult && c.lastResult.startsWith('missed')) {
+        const bizId = c.sellerId === playerId ? c.sellerBizId : c.buyerBizId;
+        const b = this.businesses.get(bizId);
+        if (b) alerts.push({ bizId: b.id, lotId: b.lotId, bizType: b.type, kind: 'missed_contract', severity: 'critical' });
+      }
+    }
+    const order: Record<string, number> = { critical: 0, warning: 1, info: 2 };
+    alerts.sort((a, b) => order[a.severity] - order[b.severity]);
+    return alerts.slice(0, 6);
+  }
+
+  /** ONE most-important, deterministic opportunity (rule-based, no AI). */
+  computeOpportunity(playerId: number, sells: Set<ProductId>, alerts: BusinessAlert[]): Opportunity | null {
+    const bizes = this.bizesByOwner(playerId);
+    const hasFarm = bizes.some((b) => b.type === 'farm');
+    // 1) An announced/active demand event for something we sell -> stock up.
+    const demandEvents = [...this.cityEvents]
+      .filter((e) => e.status === 'upcoming' || e.status === 'active')
+      .sort((a, b) => (a.status === 'upcoming' ? -1 : 1) - (b.status === 'upcoming' ? -1 : 1));
+    for (const e of demandEvents) {
+      for (const [pr, d] of Object.entries(e.effects.demand ?? {})) {
+        if ((d as number) > 0 && sells.has(pr as ProductId)) {
+          const biz = bizes.find((b) => FINAL_PRODUCTS_OF[b.type].includes(pr as ProductId));
+          return { kind: 'event_stock_up', product: pr as ProductId, bizId: biz?.id, lotId: biz?.lotId };
+        }
+      }
+    }
+    // 2) A product we sell is already in high demand -> produce more.
+    for (const pr of sells) {
+      if (this.cityDemand(pr) >= 1.10) {
+        const biz = bizes.find((b) => FINAL_PRODUCTS_OF[b.type].includes(pr));
+        return { kind: 'high_demand_produce', product: pr, bizId: biz?.id, lotId: biz?.lotId };
+      }
+    }
+    // 3) Farms benefit when inputs get scarce (Supply Disruption raises prices).
+    if (hasFarm) {
+      for (const [pr, m] of this.wholesaleMods) {
+        if (m > 1.001 && (pr === 'wheat' || pr === 'milk')) {
+          const farm = bizes.find((b) => b.type === 'farm');
+          return { kind: 'supplier_demand', product: pr, bizId: farm?.id, lotId: farm?.lotId };
+        }
+      }
+    }
+    // 4) Encourage the first upgrade.
+    const upgradable = bizes.find((b) => b.level < MAX_LEVEL);
+    if (upgradable && !alerts.some((a) => a.severity === 'critical')) {
+      return { kind: 'first_upgrade', bizId: upgradable.id, lotId: upgradable.lotId };
+    }
+    // 5) Nudge toward the marketplace.
+    return { kind: 'join_market' };
+  }
+
+  /** The Morning Business Brief. Returns null for brand-new players (no biz). */
+  async buildBrief(playerId: number, away: AwayReport | null): Promise<MorningBrief | null> {
+    const p = this.players.get(playerId);
+    const company = this.companies.get(playerId);
+    const bizes = this.bizesByOwner(playerId);
+    if (!p || !company || bizes.length === 0) return null;
+
+    const awaySeconds = away?.seconds ?? 0;
+    let revenue = 0, netCashFlow = 0, contractsCompleted = 0, unitsProduced = 0;
+    const sales: BriefSale[] = [];
+    if (awaySeconds > 60) {
+      const fromISO = new Date(Date.now() - awaySeconds * 1000).toISOString();
+      const rev = await query(
+        `SELECT COALESCE(SUM(amount),0)::bigint v FROM economic_ledger
+         WHERE player_id=$1 AND created_at>=$2 AND transaction_type = ANY($3)`,
+        [playerId, fromISO, World.REVENUE_TYPES]
+      );
+      revenue = Number(rev.rows[0].v);
+      const nt = await query(
+        `SELECT COALESCE(SUM(amount),0)::bigint v FROM economic_ledger WHERE player_id=$1 AND created_at>=$2`,
+        [playerId, fromISO]
+      );
+      netCashFlow = Number(nt.rows[0].v);
+      const cc = await query(
+        `SELECT count(*)::int n FROM economic_ledger WHERE player_id=$1 AND created_at>=$2
+         AND transaction_type IN ('CONTRACT_SELL','CONTRACT_BUY')`,
+        [playerId, fromISO]
+      );
+      contractsCompleted = cc.rows[0].n;
+      const sl = await query(
+        `SELECT product, SUM(units)::int u FROM company_activity
+         WHERE company_id=$1 AND kind='final_sale' AND created_at>=$2 GROUP BY product`,
+        [company.id, fromISO]
+      );
+      for (const r of sl.rows) if (r.u > 0) sales.push({ product: r.product, units: r.u });
+      unitsProduced = Math.max(0, away?.milkProduced ?? 0);
+    }
+
+    let contractsMissed = 0;
+    for (const c of this.contracts.values()) {
+      if ((c.sellerId === playerId || c.buyerId === playerId) && c.lastResult?.startsWith('missed')) contractsMissed++;
+    }
+
+    const sells = new Set<ProductId>();
+    for (const b of bizes) for (const pr of FINAL_PRODUCTS_OF[b.type]) sells.add(pr);
+    const market: BriefMarket[] = [];
+    const winFrom = this.windowStartISO(0);
+    for (const pr of sells) {
+      const eff = this.cityDemand(pr);
+      const units = await this.recentUnits('final_sale', pr, winFrom);
+      let cityUnits = 0;
+      for (const v of units.values()) cityUnits += v;
+      const mine = units.get(company.id) ?? 0;
+      const ranked = [...units.entries()].sort((a, b) => b[1] - a[1] || a[0] - b[0]);
+      market.push({
+        product: pr,
+        demandCategory: demandCategory(eff),
+        demandDelta: Math.round((eff - 1) * 1000) / 1000,
+        share: cityUnits > 0 && mine > 0 ? mine / cityUnits : null,
+        rank: mine > 0 ? ranked.findIndex(([cid]) => cid === company.id) + 1 : null,
+      });
+    }
+
+    const activeEvent = this.cityEvents.filter((e) => e.status === 'active').map((e) => this.toCityEventPub(e))[0] ?? null;
+    const upcomingEvent = this.cityEvents.filter((e) => e.status === 'upcoming').map((e) => this.toCityEventPub(e))[0] ?? null;
+    const alerts = this.computeAlerts(playerId);
+    const opportunity = this.computeOpportunity(playerId, sells, alerts);
+
+    return {
+      playerName: p.name, companyName: company.name, awaySeconds,
+      revenue: Math.max(0, revenue), netCashFlow, unitsProduced, sales,
+      contractsCompleted, contractsMissed, market, activeEvent, upcomingEvent, alerts, opportunity,
+    };
+  }
+
+  // ---- Tutorial ----
+  async getTutorial(playerId: number): Promise<TutorialState> {
+    const r = await query(
+      `SELECT current_step, completed_steps, skipped FROM tutorial_progress WHERE player_id=$1`,
+      [playerId]
+    );
+    if (!r.rowCount) {
+      // Brand-new player: create progress and mark existing release notes as
+      // already seen, so they get the tutorial rather than an update backlog.
+      await query(`INSERT INTO tutorial_progress (player_id) VALUES ($1) ON CONFLICT DO NOTHING`, [playerId]);
+      for (const u of UPDATES) {
+        await query(`INSERT INTO player_seen_updates (player_id, update_id) VALUES ($1,$2) ON CONFLICT DO NOTHING`, [playerId, u.id]);
+      }
+      return { currentStep: 0, completedSteps: [], skipped: false, done: false };
+    }
+    const row = r.rows[0];
+    return {
+      currentStep: row.current_step,
+      completedSteps: row.completed_steps ?? [],
+      skipped: row.skipped,
+      done: row.skipped || row.current_step > TUTORIAL_LAST_STEP,
+    };
+  }
+
+  async advanceTutorial(playerId: number, step: number): Promise<TutorialState> {
+    const cur = await this.getTutorial(playerId);
+    if (cur.skipped) return cur;
+    const completed = new Set<number>(cur.completedSteps);
+    if (step >= 1 && step <= TUTORIAL_LAST_STEP) completed.add(step);
+    const next = Math.min(TUTORIAL_LAST_STEP + 1, Math.max(cur.currentStep, step + 1));
+    await query(
+      `INSERT INTO tutorial_progress (player_id, current_step, completed_steps, updated_at)
+       VALUES ($1,$2,$3, now())
+       ON CONFLICT (player_id) DO UPDATE SET current_step=$2, completed_steps=$3, updated_at=now()`,
+      [playerId, next, JSON.stringify([...completed])]
+    );
+    return { currentStep: next, completedSteps: [...completed], skipped: false, done: next > TUTORIAL_LAST_STEP };
+  }
+
+  async skipTutorial(playerId: number): Promise<TutorialState> {
+    await query(
+      `INSERT INTO tutorial_progress (player_id, current_step, skipped, updated_at)
+       VALUES ($1,$2,true, now())
+       ON CONFLICT (player_id) DO UPDATE SET skipped=true, updated_at=now()`,
+      [playerId, TUTORIAL_LAST_STEP + 1]
+    );
+    const cur = await this.getTutorial(playerId);
+    return { ...cur, skipped: true, done: true };
+  }
+
+  // ---- Updates ("What's New") ----
+  private toUpdatePub(u: (typeof UPDATES)[number]): UpdatePub {
+    return { id: u.id, version: u.version, titleKey: u.titleKey, taglineKey: u.taglineKey, featureKeys: u.featureKeys };
+  }
+  allUpdates(): UpdatePub[] { return UPDATES.map((u) => this.toUpdatePub(u)); }
+  async unseenUpdates(playerId: number): Promise<UpdatePub[]> {
+    const seen = await query(`SELECT update_id FROM player_seen_updates WHERE player_id=$1`, [playerId]);
+    const seenSet = new Set(seen.rows.map((r) => r.update_id));
+    return UPDATES.filter((u) => !seenSet.has(u.id)).map((u) => this.toUpdatePub(u));
+  }
+  async markUpdateSeen(playerId: number, updateId: string): Promise<void> {
+    if (!UPDATES.some((u) => u.id === updateId)) return;
+    await query(
+      `INSERT INTO player_seen_updates (player_id, update_id) VALUES ($1,$2) ON CONFLICT DO NOTHING`,
+      [playerId, updateId]
+    );
+  }
+
+  // ---- Admin announcements ----
+  private announceTimes = new Map<number, number[]>(); // simple per-admin rate limit
+  private toAnnouncementPub(r: any): AnnouncementPub {
+    return {
+      id: r.id, title: r.title, message: r.message, kind: r.type, priority: r.priority,
+      createdAt: new Date(r.created_at).getTime(),
+      startsAt: new Date(r.starts_at).getTime(),
+      expiresAt: r.expires_at ? new Date(r.expires_at).getTime() : null,
+    };
+  }
+
+  isAdmin(playerId: number): boolean {
+    return this.players.get(playerId)?.isAdmin ?? false;
+  }
+
+  async createAnnouncement(
+    byId: number,
+    input: { title: string; message: string; kind: AnnouncementType; priority: AnnouncementPriority; durationSecs?: number }
+  ): Promise<AnnouncementPub> {
+    if (!this.isAdmin(byId)) throw new GameError('err.not_admin');
+    const title = (input.title ?? '').replace(/\s+/g, ' ').trim().replace(/[<>]/g, '');
+    const message = (input.message ?? '').trim().replace(/[<>]/g, '');
+    if (title.length < 3 || title.length > ANNOUNCEMENT_TITLE_MAX) throw new GameError('err.announce_title_len', { max: ANNOUNCEMENT_TITLE_MAX });
+    if (message.length < 3 || message.length > ANNOUNCEMENT_MESSAGE_MAX) throw new GameError('err.announce_msg_len', { max: ANNOUNCEMENT_MESSAGE_MAX });
+    const kinds: AnnouncementType[] = ['general', 'update', 'event', 'maintenance', 'critical'];
+    const prios: AnnouncementPriority[] = ['normal', 'important', 'critical'];
+    const kind = kinds.includes(input.kind) ? input.kind : 'general';
+    const priority = prios.includes(input.priority) ? input.priority : 'normal';
+    // Spam guard: at most 5 announcements per admin per minute.
+    const now = Date.now();
+    const recent = (this.announceTimes.get(byId) ?? []).filter((t) => now - t < 60_000);
+    if (recent.length >= 5) throw new GameError('err.announce_rate');
+    recent.push(now);
+    this.announceTimes.set(byId, recent);
+
+    const expiresAt = input.durationSecs && input.durationSecs > 0 ? new Date(now + input.durationSecs * 1000) : null;
+    const res = await query(
+      `INSERT INTO announcements (title, message, type, priority, created_by, starts_at, expires_at)
+       VALUES ($1,$2,$3,$4,$5, now(), $6) RETURNING *`,
+      [title, message, kind, priority, byId, expiresAt]
+    );
+    console.log(`[announce] #${res.rows[0].id} by=${byId} ${priority}/${kind}: ${title}`);
+    return this.toAnnouncementPub(res.rows[0]);
+  }
+
+  async activeAnnouncements(): Promise<AnnouncementPub[]> {
+    const r = await query(
+      `SELECT * FROM announcements WHERE is_active AND starts_at <= now()
+         AND (expires_at IS NULL OR expires_at > now())
+       ORDER BY created_at DESC LIMIT 20`
+    );
+    return r.rows.map((row) => this.toAnnouncementPub(row));
+  }
+
+  async announcementHistory(): Promise<AnnouncementPub[]> {
+    const r = await query(`SELECT * FROM announcements ORDER BY created_at DESC LIMIT 30`);
+    return r.rows.map((row) => this.toAnnouncementPub(row));
   }
 
   toBizPriv(b: BizRec): BizPriv {

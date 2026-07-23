@@ -18,6 +18,10 @@ import type {
   CityRankings,
   CompanyProfile,
   CityMarket,
+  MorningBrief,
+  TutorialState,
+  UpdatePub,
+  AnnouncementPub,
 } from '@district/shared';
 import { t } from './i18n.js';
 
@@ -50,6 +54,12 @@ export class GameClient {
   rankings: CityRankings | null = null;
   companyProfile: CompanyProfile | null = null;
   cityMarket: CityMarket | null = null;
+  brief: MorningBrief | null = null;
+  tutorial: TutorialState | null = null;
+  updatesUnseen: UpdatePub[] = [];
+  updatesAll: UpdatePub[] = [];
+  announcementsActive: AnnouncementPub[] = [];
+  announcementsHistory: AnnouncementPub[] = [];
   connected = false;
 
   private ws: WebSocket | null = null;
@@ -300,6 +310,31 @@ export class GameClient {
       case 'city_market':
         this.cityMarket = msg.market;
         this.emit('city_market', msg.market);
+        this.emit('update');
+        break;
+      case 'brief':
+        this.brief = msg.brief;
+        this.emit('brief', msg.brief);
+        break;
+      case 'tutorial':
+        this.tutorial = msg.state;
+        this.emit('tutorial', msg.state);
+        break;
+      case 'updates':
+        this.updatesUnseen = msg.unseen;
+        this.updatesAll = msg.all;
+        this.emit('updates', msg.unseen, msg.all);
+        break;
+      case 'announcements':
+        this.announcementsActive = msg.active;
+        this.announcementsHistory = msg.history;
+        this.emit('announcements');
+        this.emit('update');
+        break;
+      case 'announcement':
+        this.announcementsActive = [msg.announcement, ...this.announcementsActive];
+        this.announcementsHistory = [msg.announcement, ...this.announcementsHistory];
+        this.emit('announcement', msg.announcement);
         this.emit('update');
         break;
     }

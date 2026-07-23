@@ -12,6 +12,9 @@ import {
   type BizPub, type OrderPub, type AwayReport, type ProductId, type ContractPub,
   type BusinessType, type CompanyProfile, type RankingBoard, type CityRankings,
   type CityMarket, type CityEventPub, type ProductDemand, type CityEventEffects,
+  TUTORIAL_STEPS, TUTORIAL_LAST_STEP,
+  type MorningBrief, type UpdatePub, type AnnouncementPub, type BusinessAlert,
+  type Opportunity, type BriefMarket,
 } from '@district/shared';
 import { client } from '../net.js';
 import { sfx, unlockAudio } from '../audio.js';
@@ -21,7 +24,7 @@ const BIZ_ICON: Record<string, string> = {
   farm: '🐄', coffee_shop: '☕', bakery: '🥖', mini_market: '🛒',
 };
 
-type PanelKind = 'none' | 'business' | 'market' | 'wholesale' | 'dev' | 'info' | 'contracts' | 'rankings' | 'profile' | 'citymarket';
+type PanelKind = 'none' | 'business' | 'market' | 'wholesale' | 'dev' | 'info' | 'contracts' | 'rankings' | 'profile' | 'citymarket' | 'news';
 
 const EVENT_ICON: Record<string, string> = {
   city_festival: '🎉', university_week: '🎓', heat_wave: '☀️',
@@ -81,6 +84,7 @@ export class UI {
   private proposeFor: number | null = null;
   private profileCompanyId: number | null = null;
   private rankingCat = '';
+  private briefAutoShown = false;
   private flags: Record<string, boolean> = {};
   private objectivesHidden = false;
   private authError = '';
@@ -97,7 +101,16 @@ export class UI {
     onLangChange(() => this.onLanguageChanged());
     client.on('update', () => this.refresh());
     client.on('toast', (msg: string, kind: string) => this.toast(msg, kind as any));
-    client.on('away', (r: AwayReport) => this.showAway(r));
+    client.on('brief', (b: MorningBrief) => {
+      if (!this.briefAutoShown) { this.briefAutoShown = true; this.enqueueModal(() => this.showBrief(b)); }
+    });
+    client.on('updates', (unseen: UpdatePub[]) => {
+      if (unseen.length) this.enqueueModal(() => this.showWhatsNew(unseen[0]));
+    });
+    client.on('tutorial', () => this.renderMira());
+    client.on('announcement', (a: AnnouncementPub) => {
+      this.toast(`📢 ${a.title}`, a.priority === 'critical' ? 'error' : 'info');
+    });
     client.on('level_up', (level: number) => {
       sfx.levelUp();
       this.toast(t('toast.level_up', { level }), 'success');
@@ -355,6 +368,7 @@ export class UI {
         <button id="nav-contracts">${t('nav.contracts')} <span id="nav-contracts-badge"></span></button>
         <button id="nav-citymarket">${t('nav.citymarket')} <span id="nav-event-badge"></span></button>
         <button id="nav-rankings">${t('nav.rankings')}</button>
+        <button id="nav-news">${t('nav.news')} <span id="nav-news-badge"></span></button>
         <button id="nav-dev" style="display:none">${t('nav.dev')}</button>
       </div>
       <div class="panel" id="panel">
@@ -364,6 +378,8 @@ export class UI {
       </div>
       <div class="objectives" id="objectives" style="display:none"></div>
       <div class="event-banner" id="event-banner" style="display:none"></div>
+      <div class="announce-banner" id="announce-banner" style="display:none"></div>
+      <div class="mira" id="mira" style="display:none"></div>
       <div class="controls-hint">${t('hud.controls')}</div>
     `;
     document.body.appendChild(this.hud);
@@ -401,6 +417,11 @@ export class UI {
     document.getElementById('nav-rankings')!.addEventListener('click', () => {
       sfx.click();
       this.openRankings();
+    });
+    document.getElementById('nav-news')!.addEventListener('click', () => {
+      sfx.click();
+      client.send({ t: 'get_announcements' });
+      this.openPanel('news');
     });
     document.getElementById('nav-dev')!.addEventListener('click', () => {
       sfx.click();
@@ -472,6 +493,7 @@ export class UI {
     document.getElementById('nav-contracts')!.classList.toggle('active', this.panelKind === 'contracts');
     document.getElementById('nav-citymarket')!.classList.toggle('active', this.panelKind === 'citymarket');
     document.getElementById('nav-rankings')!.classList.toggle('active', this.panelKind === 'rankings');
+    document.getElementById('nav-news')!.classList.toggle('active', this.panelKind === 'news');
     document.getElementById('nav-dev')!.classList.toggle('active', this.panelKind === 'dev');
   }
 
@@ -509,6 +531,8 @@ export class UI {
     this.updateContractBadge();
     this.renderCompanyBar();
     this.renderEventBanner();
+    this.renderAnnounceBanner();
+    this.renderMira();
     this.renderObjectives();
     if (this.panelKind !== 'none') this.renderPanel();
   }
@@ -717,6 +741,9 @@ export class UI {
         break;
       case 'citymarket':
         this.renderCityMarketPanel(title, tabs, body);
+        break;
+      case 'news':
+        this.renderNewsPanel(title, tabs, body);
         break;
     }
   }
@@ -1441,6 +1468,294 @@ export class UI {
       <span class="eb-name">${t(`event.${major.type}`)}</span>
       <span class="eb-time">${t('event.ends_in', { time: countdown(major.endsAt) })}</span>`;
     el.onclick = () => { sfx.click(); client.send({ t: 'get_city_market' }); this.openPanel('citymarket'); };
+  }
+
+  // Sequential modal manager so the brief and What's New never overlap.
+  private modalOpen = false;
+  private modalQueue: Array<() => void> = [];
+  private enqueueModal(fn: () => void): void {
+    this.modalQueue.push(fn);
+    if (!this.modalOpen) this.runNextModal();
+  }
+  private runNextModal(): void {
+    const next = this.modalQueue.shift();
+    if (!next) { this.modalOpen = false; return; }
+    this.modalOpen = true;
+    next();
+  }
+  private modalClosed(): void { this.modalOpen = false; this.runNextModal(); }
+
+  // ================= V2.4: brief / alerts / opportunity =================
+
+  private alertText(a: BusinessAlert): string {
+    const biz = t(`biz.${a.bizType}`);
+    const params = { biz, product: a.product ? pName(a.product) : '', value: a.value ?? 0 };
+    return t(`alert.${a.kind}`, params);
+  }
+
+  private opportunityText(o: Opportunity): string {
+    return t(`opp.${o.kind}`, { product: o.product ? pName(o.product) : '' });
+  }
+
+  private marketLineHtml(m: BriefMarket): string {
+    const pct = Math.round(m.demandDelta * 100);
+    const cat = t(`demand.${m.demandCategory}`);
+    const shareTxt = m.share != null
+      ? ` · ${t('brief.share', { pct: (m.share * 100).toFixed(1) })}${m.rank ? ` (#${m.rank})` : ''}`
+      : '';
+    return `<div class="kv"><span class="k">${PRODUCTS[m.product].emoji} ${pName(m.product)}</span>
+      <span class="v">${cat} ${pct >= 0 ? '+' : ''}${pct}%${shareTxt}</span></div>`;
+  }
+
+  /** Morning Business Brief (also the Offline Report V2) shown on return. */
+  showBrief(brief: MorningBrief): void {
+    if (document.getElementById('brief-overlay')) return;
+    const overlay = document.createElement('div');
+    overlay.className = 'overlay modal';
+    overlay.id = 'brief-overlay';
+    const hrs = Math.floor(brief.awaySeconds / 3600);
+    const mins = Math.floor((brief.awaySeconds % 3600) / 60);
+    const dur = hrs > 0 ? t('away.hours', { h: hrs, m: mins }) : t('away.minutes', { m: mins });
+
+    const awayBlock = brief.awaySeconds > 60 ? `
+      <h4 class="brief-h">${t('brief.while_away', { dur })}</h4>
+      <div class="kv"><span class="k">${t('profile.recent_revenue')}</span><span class="v pos">${fmt(brief.revenue)}</span></div>
+      <div class="kv"><span class="k">${t('profile.recent_net')}</span><span class="v ${brief.netCashFlow >= 0 ? 'pos' : 'neg'}">${brief.netCashFlow >= 0 ? '+' : ''}${fmt(brief.netCashFlow)}</span></div>
+      ${brief.unitsProduced > 0 ? `<div class="kv"><span class="k">${t('brief.produced')}</span><span class="v">${brief.unitsProduced}</span></div>` : ''}
+      ${brief.sales.length ? `<div class="kv"><span class="k">${t('brief.sold')}</span><span class="v">${brief.sales.map((s) => `${PRODUCTS[s.product].emoji} ${s.units}`).join('  ')}</span></div>` : ''}
+      ${brief.contractsCompleted > 0 ? `<div class="kv"><span class="k">${t('brief.deliveries')}</span><span class="v">${brief.contractsCompleted}</span></div>` : ''}
+    ` : `<div class="hint">${t('brief.no_away')}</div>`;
+
+    const eventBlock = (brief.upcomingEvent || brief.activeEvent) ? `
+      <h4 class="brief-h">${t('citymarket.events')}</h4>
+      ${brief.activeEvent ? this.eventCardHtml(brief.activeEvent, 'active') : ''}
+      ${brief.upcomingEvent ? this.eventCardHtml(brief.upcomingEvent, 'upcoming') : ''}` : '';
+
+    const marketBlock = brief.market.length ? `
+      <h4 class="brief-h">${t('citymarket.demand')}</h4>
+      ${brief.market.map((m) => this.marketLineHtml(m)).join('')}` : '';
+
+    const alertsBlock = brief.alerts.length ? `
+      <h4 class="brief-h">${t('brief.attention')}</h4>
+      ${brief.alerts.map((a) => `<div class="alert-row ${a.severity}">⚠ ${this.alertText(a)}</div>`).join('')}` : '';
+
+    const oppBlock = brief.opportunity ? `
+      <div class="opp-box"><div class="opp-head">💡 ${t('brief.opportunity')}</div>
+      <div>${this.opportunityText(brief.opportunity)}</div></div>` : '';
+
+    overlay.innerHTML = `
+      <div class="card brief-card">
+        <div class="brief-hi">${t('brief.good_morning', { name: brief.playerName })}</div>
+        <h1>🏢 ${brief.companyName}</h1>
+        <div class="brief-scroll">
+          ${awayBlock}
+          ${marketBlock}
+          ${eventBlock}
+          ${alertsBlock}
+          ${oppBlock}
+        </div>
+        <div class="mkt-row">
+          <button class="btn primary" id="brief-go">${t('brief.go_business')}</button>
+          <button class="btn ghost" id="brief-close">${t('brief.dismiss')}</button>
+        </div>
+      </div>`;
+    document.body.appendChild(overlay);
+    const close = () => { overlay.remove(); this.modalClosed(); };
+    overlay.querySelector('#brief-close')!.addEventListener('click', () => { sfx.click(); close(); });
+    overlay.querySelector('#brief-go')!.addEventListener('click', () => {
+      sfx.click();
+      const bizId = brief.opportunity?.bizId;
+      if (bizId != null && client.myBusinesses.has(bizId)) { client.selectBiz(bizId); this.openBusiness(); }
+      else this.openBusiness();
+      close();
+    });
+  }
+
+  // ================= V2.4: What's New / News =================
+
+  private updateModalHtml(u: UpdatePub): string {
+    return `
+      <div class="update-badge">${u.version}</div>
+      <h1>${t(u.titleKey)}</h1>
+      <div class="tagline">${t(u.taglineKey)}</div>
+      <div class="update-features">
+        ${u.featureKeys.map((k) => `<div class="feat">✓ ${t(k)}</div>`).join('')}
+      </div>`;
+  }
+
+  showWhatsNew(u: UpdatePub): void {
+    if (document.getElementById('whatsnew-overlay')) return;
+    const overlay = document.createElement('div');
+    overlay.className = 'overlay modal';
+    overlay.id = 'whatsnew-overlay';
+    overlay.innerHTML = `
+      <div class="card">
+        ${this.updateModalHtml(u)}
+        <button class="btn primary" id="wn-ok">${t('update.got_it')}</button>
+        <div class="hint" id="wn-all">${t('update.see_all')}</div>
+      </div>`;
+    document.body.appendChild(overlay);
+    const done = () => {
+      // Mark every currently-unseen update as seen so the backlog doesn't stack.
+      for (const up of client.updatesUnseen) client.send({ t: 'ack_update', updateId: up.id });
+      client.updatesUnseen = [];
+      overlay.remove();
+      this.modalClosed();
+    };
+    overlay.querySelector('#wn-ok')!.addEventListener('click', () => { sfx.click(); done(); });
+    overlay.querySelector('#wn-all')!.addEventListener('click', () => {
+      sfx.click(); done(); client.send({ t: 'get_announcements' }); this.newsTab = 'updates'; this.openPanel('news');
+    });
+  }
+
+  private newsTab = 'announcements';
+  private renderNewsPanel(title: HTMLElement, tabs: HTMLElement, body: HTMLElement): void {
+    title.textContent = t('news.title');
+    const tab = this.tabBar(tabs, [
+      { id: 'announcements', label: t('news.tab.announcements') },
+      { id: 'updates', label: t('news.tab.updates') },
+    ]);
+    this.newsTab = tab;
+    if (tab === 'updates') {
+      const rows = client.updatesAll.map((u) => `
+        <div class="news-update">
+          <div class="nu-head"><span class="update-badge sm">${u.version}</span> <b>${t(u.titleKey)}</b></div>
+          <div class="nu-tag">${t(u.taglineKey)}</div>
+          ${u.featureKeys.map((k) => `<div class="feat sm">✓ ${t(k)}</div>`).join('')}
+        </div>`).join('');
+      this.setBody(body, rows || `<p class="hint">${t('news.empty')}</p>`);
+      return;
+    }
+    // Announcements tab.
+    const adminBtn = client.you?.isAdmin
+      ? `<button class="btn small primary" id="ann-new" style="margin-bottom:10px">${t('news.compose')}</button>` : '';
+    const list = client.announcementsHistory.length
+      ? client.announcementsHistory.map((a) => this.announcementCardHtml(a)).join('')
+      : `<p class="hint">${t('news.no_announcements')}</p>`;
+    this.setBody(body, adminBtn + list, (b) => {
+      b.querySelector('#ann-new')?.addEventListener('click', () => { sfx.click(); this.showComposeAnnouncement(); });
+    });
+  }
+
+  private announcementCardHtml(a: AnnouncementPub): string {
+    const when = new Date(a.createdAt).toLocaleString(getLang() === 'tr' ? 'tr-TR' : 'en-US');
+    const expired = a.expiresAt != null && a.expiresAt < Date.now();
+    return `<div class="ann-card ${a.priority} ${expired ? 'expired' : ''}">
+      <div class="ann-head"><span class="ann-title">📢 ${escapeHtml(a.title)}</span>
+        <span class="ann-kind">${t(`ann.kind.${a.kind}`)}</span></div>
+      <div class="ann-msg">${escapeHtml(a.message)}</div>
+      <div class="ann-when">${when}${expired ? ` · ${t('news.expired')}` : ''}</div>
+    </div>`;
+  }
+
+  /** Admin-only announcement composer. */
+  private showComposeAnnouncement(): void {
+    if (document.getElementById('compose-overlay')) return;
+    const overlay = document.createElement('div');
+    overlay.className = 'overlay modal';
+    overlay.id = 'compose-overlay';
+    const kinds = ['general', 'update', 'event', 'maintenance', 'critical'];
+    const prios = ['normal', 'important', 'critical'];
+    overlay.innerHTML = `
+      <div class="card" style="width:min(460px,94vw)">
+        <h1>${t('news.compose')}</h1>
+        <div class="field"><label>${t('news.field.title')}</label><input id="ann-title" maxlength="80" /></div>
+        <div class="field"><label>${t('news.field.message')}</label><textarea id="ann-message" maxlength="500" rows="3" style="width:100%"></textarea></div>
+        <div class="mkt-row">
+          <select id="ann-kind">${kinds.map((k) => `<option value="${k}">${t(`ann.kind.${k}`)}</option>`).join('')}</select>
+          <select id="ann-priority">${prios.map((p) => `<option value="${p}">${t(`ann.prio.${p}`)}</option>`).join('')}</select>
+        </div>
+        <div class="auth-error" id="ann-err"></div>
+        <div class="mkt-row">
+          <button class="btn primary" id="ann-send">${t('news.send')}</button>
+          <button class="btn ghost" id="ann-cancel">${t('company.cancel')}</button>
+        </div>
+      </div>`;
+    document.body.appendChild(overlay);
+    overlay.querySelector('#ann-cancel')!.addEventListener('click', () => overlay.remove());
+    overlay.querySelector('#ann-send')!.addEventListener('click', () => {
+      const title = (overlay.querySelector('#ann-title') as HTMLInputElement).value.trim();
+      const message = (overlay.querySelector('#ann-message') as HTMLTextAreaElement).value.trim();
+      const kind = (overlay.querySelector('#ann-kind') as HTMLSelectElement).value as any;
+      const priority = (overlay.querySelector('#ann-priority') as HTMLSelectElement).value as any;
+      if (title.length < 3 || message.length < 3) {
+        (overlay.querySelector('#ann-err') as HTMLElement).textContent = t('news.too_short');
+        return;
+      }
+      client.send({ t: 'create_announcement', title, message, kind, priority });
+      overlay.remove();
+    });
+  }
+
+  private annBannerDismissed = new Set<number>();
+  private renderAnnounceBanner(): void {
+    const el = document.getElementById('announce-banner');
+    const badge = document.getElementById('nav-news-badge');
+    const active = client.announcementsActive.filter((a) => !this.annBannerDismissed.has(a.id));
+    if (badge) {
+      const n = client.announcementsActive.length;
+      badge.textContent = n ? String(n) : '';
+      badge.className = active.some((a) => a.priority === 'critical') ? 'badge live' : (n ? 'badge' : '');
+    }
+    if (!el) return;
+    // Show the highest-priority active, non-dismissed announcement.
+    const order: Record<string, number> = { critical: 0, important: 1, normal: 2 };
+    const top = [...active].sort((a, b) => order[a.priority] - order[b.priority])[0];
+    if (!top || top.priority === 'normal') { el.style.display = 'none'; return; }
+    if (el.dataset.aid === String(top.id)) return;
+    el.dataset.aid = String(top.id);
+    el.style.display = '';
+    el.className = `announce-banner ${top.priority}`;
+    el.innerHTML = `<span class="ab-icon">📢</span><span class="ab-title">${escapeHtml(top.title)}</span>
+      <span class="ab-msg">${escapeHtml(top.message)}</span><button class="ab-x" id="ab-x">✕</button>`;
+    el.querySelector('#ab-x')!.addEventListener('click', () => {
+      this.annBannerDismissed.add(top.id);
+      el.style.display = 'none';
+      el.dataset.aid = '';
+    });
+  }
+
+  // ================= V2.4: Mira tutorial =================
+
+  private miraStep1Sent = false;
+  private renderMira(): void {
+    const el = document.getElementById('mira');
+    if (!el) return;
+    const tut = client.tutorial;
+    if (!tut || tut.skipped || tut.done) { el.style.display = 'none'; return; }
+    // Completing "create your first business" auto-advances step 1.
+    if (client.company && tut.currentStep === 0) {
+      if (!this.miraStep1Sent) { this.miraStep1Sent = true; client.send({ t: 'tutorial_advance', step: 1 }); }
+      el.style.display = 'none';
+      return;
+    }
+    const display = tut.currentStep === 0 ? 1 : tut.currentStep;
+    if (display > TUTORIAL_LAST_STEP) { el.style.display = 'none'; return; }
+    const stepDef = TUTORIAL_STEPS[display - 1];
+    if (el.dataset.step === String(display) && el.style.display !== 'none') return;
+    el.dataset.step = String(display);
+    el.style.display = '';
+    el.innerHTML = `
+      <div class="mira-av">👩‍💼</div>
+      <div class="mira-body">
+        <div class="mira-name">Mira <span class="mira-role">${t('mira.role')}</span></div>
+        <div class="mira-title">${t(stepDef.titleKey)} <span class="mira-step">${display}/${TUTORIAL_LAST_STEP}</span></div>
+        <div class="mira-msg">${t(stepDef.messageKey)}</div>
+        <div class="mira-actions">
+          <button class="btn small primary" id="mira-next">${display >= TUTORIAL_LAST_STEP ? t('mira.finish') : t('mira.continue')}</button>
+          <button class="btn small ghost" id="mira-skip">${t('mira.skip')}</button>
+        </div>
+      </div>`;
+    el.querySelector('#mira-next')!.addEventListener('click', () => {
+      sfx.click();
+      client.send({ t: 'tutorial_advance', step: display });
+    });
+    el.querySelector('#mira-skip')!.addEventListener('click', () => {
+      sfx.click();
+      client.send({ t: 'tutorial_skip' });
+    });
+    document.querySelectorAll('.tut-highlight').forEach((e) => e.classList.remove('tut-highlight'));
+    if (stepDef.highlight) document.getElementById(stepDef.highlight)?.classList.add('tut-highlight');
   }
 
   private renderDevPanel(title: HTMLElement, tabs: HTMLElement, body: HTMLElement): void {

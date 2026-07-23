@@ -157,7 +157,7 @@ client.on('unauthorized', () => {
 
 // Dev-only hook for local testing/automation.
 if ((import.meta as any).env?.DEV) {
-  (window as any).__bd = { client, ui };
+  (window as any).__bd = { client, ui, rig, city };
 }
 
 // ---------- boot ----------
