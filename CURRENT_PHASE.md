@@ -1,4 +1,43 @@
-# V2.5 — ECONOMIC DEPTH & MARKET INTEGRITY (current)
+# V2.6 — CITY EXPANSION, DISTRICTS & LIVING CITY (current)
+
+Old Town had reached its practical lot capacity. Rather than enlarging the old
+map, the city became **district-based** so capacity can be added again and
+again. One economy, several places.
+
+- **Districts are data.** `shared/src/city.ts` declares `DISTRICTS`: each has an
+  `id`, world `origin`, ground size, road lines, a visual `theme` and its lots
+  in district-local coordinates. World-space `LOTS`, `ROAD_SEGMENTS` and
+  `CITY_BOUNDS` are all derived. Adding District 3 is a definition plus a
+  connector — no schema, company, marketplace, contract or delivery rewrite.
+- **Old Town is District 1.** Every original lot id and coordinate is unchanged,
+  so existing businesses, companies, contracts, orders, inventories and
+  reputation survive untouched and resolve to Old Town automatically. **No
+  migration was needed**: a lot's district is derived from its definition, not
+  stored per business.
+- **Green Valley is District 2.** 24 lots — 6 each of farm / coffee shop /
+  bakery / mini market, deliberately balanced so no type becomes the next
+  bottleneck (Old Town has only 3 bakery and 3 market lots). Visually distinct:
+  wider road spacing, open blocks, denser greenery, a village green instead of
+  the plaza, and an entrance monument.
+- **One connected road graph.** Pathfinding moved off the hard-coded 3×3 grid
+  onto an arbitrary set of axis-aligned segments, cut at endpoints, crossings
+  and projections. Districts plus `CONNECTORS` form a single component, so a
+  delivery van physically drives the inter-district highway instead of
+  teleporting — and route length still matches the server's delivery timing.
+- **One city economy.** Marketplace, contracts, Central Wholesale, market share,
+  rankings, city events, dynamic demand and market integrity remain city-wide;
+  management capacity remains company-wide. A company can own businesses in
+  several districts on one capacity pool.
+- **Navigation & visibility.** A district selector shows live occupancy and
+  travels the camera (no reload, no reconnect); pan bounds now cover the whole
+  city. Business chips and the open-business dialog group by district. A city
+  status panel reports real aggregates and recent public openings.
+- **Communication.** V2.6 What's New (EN/TR); the city expansion announcement is
+  seeded exactly once; one contextual Mira hint when the centre gets crowded.
+- **Graceful ceiling.** When every district is built out, business creation is
+  refused cleanly (`err.city_full`) with cash and capacity intact.
+
+## Previous — V2.5 — ECONOMIC DEPTH & MARKET INTEGRITY
 
 Turns the economy from "produce → sell → grow" into "analyze → predict → trade
 → manage risk → protect reputation", by making the Central Wholesale a finite

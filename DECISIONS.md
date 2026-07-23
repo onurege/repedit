@@ -241,3 +241,52 @@
 - **Balancing left progression intact.** Opening/upgrade costs and cash
   generation are unchanged; the emergency premium is the only new sink and
   scarcity self-limits runaway buying. Adjust later only if telemetry demands.
+
+## V2.6 — City expansion & districts
+
+- **The city expands; the old map does not grow.** Old Town hit its lot ceiling.
+  Adding lots around the edge would have diluted land scarcity and postponed the
+  problem by one release. Making the city district-based solves it structurally:
+  capacity is added by appending a district, and the same move works for
+  District 3, 4, 5.
+- **No database migration.** A lot's district is a property of its *definition*,
+  not of a business row. Lots have never lived in the database — they are code
+  constants — so a `districts`/`lots` table would only duplicate that data and
+  add a migration that can fail on live data. Because every Old Town lot id and
+  coordinate is unchanged, existing businesses resolve to Old Town for free.
+  This was the single biggest risk-reducer in the release.
+- **One road graph, not one per district.** Pathfinding was a hard-coded 3×3
+  grid. It now builds from an arbitrary list of axis-aligned segments, so
+  districts and their connectors form one connected component. Cross-district
+  deliveries therefore *drive* — the visible route and the server's timing come
+  from the same shared function, as they always have.
+- **Districts are spatial, not economic.** No district bonuses, demand, taxes,
+  land prices or NPC prices. Marketplace, wholesale, market share, rankings,
+  events and integrity stay city-wide; management capacity stays company-wide.
+  Economic specialisation is deliberately deferred until there is real player
+  data showing where districts diverge.
+- **A first business spills over; an expansion does not.** `chooseBusiness`
+  prefers the earliest-unlocked district and falls through to later ones only
+  when the centre is full, so newcomers still start in the established centre.
+  Deliberate expansion (`openBusiness`) always takes an explicit lot — the
+  player chooses where to grow, and is never silently relocated.
+- **The lot race needed no new machinery.** `businesses.lot_id` is already
+  `UNIQUE`, and `openBusiness` re-checks occupancy inside its transaction.
+  Green Valley inherits both guarantees; the loser keeps cash and capacity.
+- **The announcement is seeded once, keyed on content.** The expansion notice is
+  written by the system (not an admin) and matched on a marker embedded in the
+  message, so a restart or redeploy never re-posts it.
+
+### Adding District 3
+
+1. Append a `DistrictDef` to `DISTRICTS` in `shared/src/city.ts` — unique `id`,
+   world `origin` (keep ground pads roughly adjacent), road lines, lots in
+   district-local coordinates.
+2. Add a `CONNECTORS` entry joining it to an existing district so the road graph
+   stays one connected component.
+3. Add `district.<id>.name` / `.sign` to both i18n dictionaries and a `THEMES`
+   entry in `client/src/game/city.ts`.
+4. Add a What's New entry and let `seedExpansionAnnouncement` post its notice.
+
+Lots, pathfinding, occupancy, camera bounds, city status and the district
+selector all derive from the definition and need no further changes.

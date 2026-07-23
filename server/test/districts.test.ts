@@ -19,6 +19,7 @@ import {
   type DistrictId,
 } from '@district/shared';
 import { GameError } from '../src/game/world.js';
+import { query } from '../src/db.js';
 import { resetDb, newPlayer, loadedWorld } from './helpers.js';
 
 describe('district definitions', () => {
@@ -266,6 +267,23 @@ describe('districts in the running world', () => {
     // The player survives the refusal with their cash intact.
     expect(world.players.get(extra)!.cash).toBeGreaterThan(0);
     expect(world.bizByOwner(extra)).toBeUndefined();
+  });
+
+  it('shows V2.6 as unseen to a player who existed before the release', async () => {
+    const world = await loadedWorld();
+    const pid = await newPlayer(world, 'veteran');
+    // Registering marks the current release notes as seen. A player who
+    // existed *before* V2.6 shipped has no seen-row for it — reproduce that.
+    await world.getTutorial(pid);
+    await query('DELETE FROM player_seen_updates WHERE player_id=$1 AND update_id=$2', [pid, 'v2_6']);
+
+    const unseen = await world.unseenUpdates(pid);
+    expect(unseen.map((u) => u.id)).toContain('v2_6');
+    expect(world.allUpdates().map((u) => u.id)).toContain('v2_6');
+
+    // Acknowledging it clears it, and it stays cleared.
+    await world.markUpdateSeen(pid, 'v2_6');
+    expect((await world.unseenUpdates(pid)).map((u) => u.id)).not.toContain('v2_6');
   });
 
   it('keeps district assignment across a world reload', async () => {
