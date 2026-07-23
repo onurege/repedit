@@ -94,7 +94,9 @@ for (let i = 0; i < 2; i++) {
     await page.waitForFunction(() => !document.getElementById('brief-overlay'), { timeout: 5000 });
   } else if (await page.$('#whatsnew-overlay')) {
     const wn = await page.$eval('#whatsnew-overlay', (el) => el.textContent || '');
-    check("What's New appears with the latest version", /V2\.4/.test(wn), wn.slice(0, 40));
+    // The newest release note should be what pops (whatever the latest version is).
+    const latest = await page.evaluate(() => window.__bd.client.updatesAll[0]?.version);
+    check("What's New appears with the latest version", wn.includes(latest), `${latest} · ${wn.slice(0, 40)}`);
     sawWhatsNew = true;
     await page.click('#wn-ok');
     await page.waitForFunction(() => !document.getElementById('whatsnew-overlay'), { timeout: 5000 });
