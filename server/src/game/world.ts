@@ -65,12 +65,19 @@ import {
   LOTS,
   lotById,
   lotsOfKind,
+  DISTRICTS,
+  districtLots,
+  DEFAULT_DISTRICT,
   WHOLESALE_LOT_ID,
   roadPath,
   pathLength,
   type PlayerPriv,
   type PlayerPub,
   type BizPub,
+  type DistrictId,
+  type DistrictOccupancy,
+  type CityStatus,
+  type CityActivity,
   type BizPriv,
   type OrderPub,
   type DeliveryPub,
@@ -214,6 +221,7 @@ export interface BizRec {
   companyId: number;
   type: BusinessType;
   lotId: string;
+  createdAtMs: number;
   level: number;
   price: number;
   price2: number;      // mini market milk retail price
@@ -570,6 +578,7 @@ export class World extends EventEmitter {
         companyId: r.company_id ?? this.companies.get(r.player_id)?.id ?? 0,
         type: r.type,
         lotId: r.lot_id,
+        createdAtMs: new Date(r.created_at).getTime(),
         level: r.level,
         price: r.price,
         price2: r.price2 ?? DEFAULT_RETAIL_MILK_PRICE,
@@ -693,6 +702,7 @@ export class World extends EventEmitter {
       });
     }
     await this.processWholesale(now);
+    await this.seedExpansionAnnouncement();
 
     await this.flush();
     console.log(
@@ -1564,6 +1574,7 @@ export class World extends EventEmitter {
       companyId,
       type,
       lotId,
+      createdAtMs: Date.now(),
       level: 1,
       price: type === 'coffee_shop' ? DEFAULT_COFFEE_PRICE : DEFAULT_BREAD_PRICE,
       price2: DEFAULT_RETAIL_MILK_PRICE,
@@ -1591,8 +1602,15 @@ export class World extends EventEmitter {
     if (this.bizByOwner(playerId)) throw new GameError('err.already_own_business');
     if (!STARTING_PRODUCTS[type]) throw new GameError('err.unknown_business_type');
     const taken = new Set([...this.businesses.values()].map((b) => b.lotId));
-    const lot = lotsOfKind(type).find((l) => !taken.has(l.id));
-    if (!lot) throw new GameError('err.no_free_lots');
+    // Prefer the earliest-unlocked district so new players start in the
+    // established centre; spill into later districts only once it is full.
+    const order = new Map(DISTRICTS.map((d) => [d.id, d.unlockOrder]));
+    const lot = lotsOfKind(type)
+      .filter((l) => !taken.has(l.id))
+      .sort((a, b) => (order.get(a.district) ?? 99) - (order.get(b.district) ?? 99))[0];
+    // Distinguish "this type is taken everywhere" from "the whole city is
+    // built out", so the UI can explain that expansion land is coming.
+    if (!lot) throw new GameError(this.cityIsFull() ? 'err.city_full' : 'err.no_free_lots');
 
     const company = await this.ensureCompany(playerId);
     const bizId = await tx((c) => this.insertBusinessRow(c, playerId, company.id, type, lot.id));
@@ -2615,11 +2633,83 @@ export class World extends EventEmitter {
       companyName: company?.name ?? (owner ? defaultCompanyName(owner.name) : '???'),
       type: b.type,
       lotId: b.lotId,
+      district: lotById(b.lotId)?.district ?? DEFAULT_DISTRICT,
       level: b.level,
       status: b.status,
       reputation: Math.round(b.reputation * 100) / 100,
       supplies: SELLER_SUPPLIES[b.type] ?? [],
       tradeCount: b.tradeCount,
+    };
+  }
+
+  // ---------------- districts & city status (V2.6) ----------------
+
+  /** Lot ids currently occupied by a business. */
+  private occupiedLotIds(): Set<string> {
+    return new Set([...this.businesses.values()].map((b) => b.lotId));
+  }
+
+  /**
+   * Live occupancy per district, including free lots per business type so the
+   * UI can tell a player *what* they can still build, not just how many.
+   */
+  districtOccupancy(): DistrictOccupancy[] {
+    const taken = this.occupiedLotIds();
+    return [...DISTRICTS]
+      .sort((a, b) => a.unlockOrder - b.unlockOrder)
+      .map((d) => {
+        const lots = districtLots(d.id);
+        const free = lots.filter((l) => !taken.has(l.id));
+        const freeByType: Partial<Record<BusinessType, number>> = {};
+        for (const l of free) {
+          const t = l.kind as BusinessType;
+          freeByType[t] = (freeByType[t] ?? 0) + 1;
+        }
+        return {
+          id: d.id,
+          nameKey: d.nameKey,
+          unlockOrder: d.unlockOrder,
+          total: lots.length,
+          occupied: lots.length - free.length,
+          available: free.length,
+          freeByType,
+        };
+      });
+  }
+
+  /** True when no district has a free lot of any type. */
+  cityIsFull(): boolean {
+    return this.districtOccupancy().every((d) => d.available === 0);
+  }
+
+  /**
+   * Cheap public city aggregates for the status panel. Everything here is
+   * derived from in-memory state — no queries, no analytics tables — and is
+   * strictly public: no cash, inventory, contract or ledger data.
+   */
+  getCityStatus(): CityStatus {
+    const districts = this.districtOccupancy();
+    const recent: CityActivity[] = [...this.businesses.values()]
+      .sort((a, b) => b.createdAtMs - a.createdAtMs)
+      .slice(0, 6)
+      .map((b) => ({
+        kind: 'business_opened' as const,
+        companyName:
+          this.companies.get(b.ownerId)?.name ??
+          defaultCompanyName(this.players.get(b.ownerId)?.name ?? '???'),
+        bizType: b.type,
+        district: lotById(b.lotId)?.district ?? DEFAULT_DISTRICT,
+        level: b.level,
+        at: b.createdAtMs,
+      }));
+    return {
+      companies: this.companies.size,
+      businesses: this.businesses.size,
+      occupiedLots: districts.reduce((n, d) => n + d.occupied, 0),
+      totalLots: districts.reduce((n, d) => n + d.total, 0),
+      activeDeliveries: [...this.deliveries.values()].filter((d) => d.status === 'in_transit').length,
+      districts,
+      recent,
     };
   }
 
@@ -3152,6 +3242,30 @@ export class World extends EventEmitter {
     );
     console.log(`[announce] #${res.rows[0].id} by=${byId} ${priority}/${kind}: ${title}`);
     return this.toAnnouncementPub(res.rows[0]);
+  }
+
+  /**
+   * Post the city-expansion announcement exactly once, ever. Keyed on a
+   * marker in the title so a server restart (or a redeploy) never re-posts
+   * it; it is created by the system, not an admin, so it bypasses the
+   * admin-only createAnnouncement path.
+   */
+  async seedExpansionAnnouncement(): Promise<void> {
+    const MARKER = '[v2.6-expansion]';
+    const existing = await query('SELECT 1 FROM announcements WHERE message LIKE $1 LIMIT 1', [`%${MARKER}%`]);
+    if (existing.rowCount) return;
+    const newLots = DISTRICTS
+      .filter((d) => d.unlockOrder > 1)
+      .reduce((n, d) => n + districtLots(d.id).length, 0);
+    await query(
+      `INSERT INTO announcements (title, message, type, priority, created_by, starts_at, expires_at)
+       VALUES ($1,$2,'update','important',NULL, now(), NULL)`,
+      [
+        'THE CITY IS EXPANDING',
+        `Green Valley is now open for business. ${newLots} new commercial lots are available. ${MARKER}`,
+      ]
+    );
+    console.log(`[announce] seeded city expansion announcement (${newLots} lots)`);
   }
 
   async activeAnnouncements(): Promise<AnnouncementPub[]> {

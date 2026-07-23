@@ -32,6 +32,10 @@ ui.onFocusLot = (lotId) => {
   city.highlightLot(lotId);
 };
 ui.onCloseCity = () => city.highlightLot(null);
+ui.onFocusDistrict = (id) => {
+  city.highlightLot(null);
+  rig.focusDistrict(id);
+};
 
 // ---------- selection ----------
 const raycaster = new THREE.Raycaster();
@@ -67,7 +71,15 @@ rig.onSelect = (x, y) => {
 };
 
 // ---------- state -> world sync ----------
+// District occupancy and city status are cheap server aggregates; refresh
+// them on connect and on a slow timer rather than every tick.
+let cityStatusTimer: ReturnType<typeof setInterval> | null = null;
 client.on('welcome', () => {
+  client.send({ t: 'city_status' });
+  if (cityStatusTimer) clearInterval(cityStatusTimer);
+  cityStatusTimer = setInterval(() => {
+    if (client.connected) client.send({ t: 'city_status' });
+  }, 15000);
   document.getElementById('auth-overlay')?.remove();
   ui.showHud();
   if (!client.myBiz) ui.showChoose();

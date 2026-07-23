@@ -2,11 +2,20 @@
 // WASD pan · LEFT click = select · RIGHT drag = rotate · MIDDLE drag = pan ·
 // wheel zoom · R reset.
 import * as THREE from 'three';
+import { CITY_BOUNDS, districtById, type DistrictId } from '@district/shared';
 
 const MIN_DIST = 18;
-const MAX_DIST = 110;
+const MAX_DIST = 150;
 const PITCH = THREE.MathUtils.degToRad(52);
-const PAN_LIMIT = 85;
+// Panning is bounded by the union of every district plus a margin, so the
+// player can reach the whole city but never drift into empty space.
+const PAN_MARGIN = 26;
+const PAN = {
+  minX: CITY_BOUNDS.minX - PAN_MARGIN,
+  maxX: CITY_BOUNDS.maxX + PAN_MARGIN,
+  minZ: CITY_BOUNDS.minZ - PAN_MARGIN,
+  maxZ: CITY_BOUNDS.maxZ + PAN_MARGIN,
+};
 
 export class CameraRig {
   target = new THREE.Vector3(0, 0, 10);
@@ -94,9 +103,17 @@ export class CameraRig {
     this.dist = Math.min(this.dist, 40);
   }
 
+  /** Move the camera to a district's centre, framing the whole district. */
+  focusDistrict(id: DistrictId): void {
+    const d = districtById(id);
+    if (!d) return;
+    this.target.set(d.origin.x, 0, d.origin.z);
+    this.dist = Math.min(MAX_DIST, Math.max(MIN_DIST, d.groundHalf * 1.15));
+  }
+
   private clampTarget(): void {
-    this.target.x = THREE.MathUtils.clamp(this.target.x, -PAN_LIMIT, PAN_LIMIT);
-    this.target.z = THREE.MathUtils.clamp(this.target.z, -PAN_LIMIT, PAN_LIMIT);
+    this.target.x = THREE.MathUtils.clamp(this.target.x, PAN.minX, PAN.maxX);
+    this.target.z = THREE.MathUtils.clamp(this.target.z, PAN.minZ, PAN.maxZ);
   }
 
   update(dt: number): void {

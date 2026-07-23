@@ -478,3 +478,51 @@ function mulberry(seed: number) {
     return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
   };
 }
+
+/**
+ * Roadside district marker: a low monument with a name board, used at each
+ * district's entrance so players can see where one district ends and the
+ * next begins without a UI overlay.
+ */
+export function makeDistrictSign(title: string, sub: string, accent: number): THREE.Group {
+  const g = new THREE.Group();
+  // stone base + two posts carrying the board
+  g.add(box(7.2, 0.5, 1.8, 0xcfc9b8, 0, 0, 0, false));
+  g.add(box(0.35, 3.0, 0.35, 0x8b7355, -2.6, 0.5, 0));
+  g.add(box(0.35, 3.0, 0.35, 0x8b7355, 2.6, 0.5, 0));
+  const board = box(6.6, 2.1, 0.22, 0xf7f3e8, 0, 2.6, 0);
+  g.add(board);
+  g.add(box(6.6, 0.34, 0.26, accent, 0, 3.5, 0.02)); // accent header strip
+
+  const canvas = document.createElement('canvas');
+  canvas.width = 512;
+  canvas.height = 168;
+  const c = canvas.getContext('2d')!;
+  // Opaque pill: the plate floats over grass, tarmac and buildings alike.
+  c.fillStyle = 'rgba(255, 253, 247, 0.96)';
+  c.beginPath();
+  c.roundRect(8, 8, 496, 152, 34);
+  c.fill();
+  c.lineWidth = 6;
+  c.strokeStyle = `#${accent.toString(16).padStart(6, '0')}`;
+  c.beginPath();
+  c.roundRect(8, 8, 496, 152, 34);
+  c.stroke();
+  c.textAlign = 'center';
+  c.fillStyle = '#1f2937';
+  c.font = 'bold 62px system-ui, sans-serif';
+  c.fillText(title.slice(0, 18), 256, 78);
+  c.fillStyle = '#6b7280';
+  c.font = '600 34px system-ui, sans-serif';
+  c.fillText(sub.slice(0, 26), 256, 126);
+  const tex = new THREE.CanvasTexture(canvas);
+  tex.anisotropy = 4;
+  // The plate floats above the monument rather than sitting on the board:
+  // a camera-facing sprite pinned to a fixed board clips through it as soon
+  // as the camera rotates.
+  const spr = new THREE.Sprite(new THREE.SpriteMaterial({ map: tex, transparent: true, depthTest: true }));
+  spr.scale.set(9.5, 3.1, 1);
+  spr.position.set(0, 5.6, 0);
+  g.add(spr);
+  return g;
+}

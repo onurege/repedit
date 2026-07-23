@@ -17,6 +17,16 @@ export interface UpdateDef {
 // Newest first. Adding an entry makes it pop for players who haven't seen it.
 export const UPDATES: UpdateDef[] = [
   {
+    id: 'v2_6',
+    version: 'V2.6',
+    titleKey: 'update.v2_6.title',
+    taglineKey: 'update.v2_6.tagline',
+    featureKeys: [
+      'update.v2_6.f1', 'update.v2_6.f2', 'update.v2_6.f3',
+      'update.v2_6.f4', 'update.v2_6.f5',
+    ],
+  },
+  {
     id: 'v2_5',
     version: 'V2.5',
     titleKey: 'update.v2_5.title',

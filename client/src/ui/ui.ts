@@ -8,6 +8,7 @@ import {
   PRODUCTS, NPC_WHOLESALE_PRICES, FARM_LEVELS, SHOP_LEVELS, BAKERY_LEVELS, MARKET_LEVELS,
   MAX_LEVEL, xpForLevel, MAX_PLAYER_LEVEL, contractableProducts, BAD_STATUSES,
   CONTRACT_FREQUENCY_SECS, LOTS, BUSINESS_CAPACITY, businessOpenCost,
+  DISTRICTS, type DistrictId, type DistrictOccupancy,
   companyCapacity, COMPANY_NAME_MIN, COMPANY_NAME_MAX,
   type BizPub, type OrderPub, type AwayReport, type ProductId, type ContractPub,
   type BusinessType, type CompanyProfile, type RankingBoard, type CityRankings,
@@ -24,7 +25,7 @@ const BIZ_ICON: Record<string, string> = {
   farm: '🐄', coffee_shop: '☕', bakery: '🥖', mini_market: '🛒',
 };
 
-type PanelKind = 'none' | 'business' | 'market' | 'wholesale' | 'dev' | 'info' | 'contracts' | 'rankings' | 'profile' | 'citymarket' | 'news';
+type PanelKind = 'none' | 'business' | 'market' | 'wholesale' | 'dev' | 'info' | 'contracts' | 'rankings' | 'profile' | 'citymarket' | 'news' | 'citystatus';
 
 const EVENT_ICON: Record<string, string> = {
   city_festival: '🎉', university_week: '🎓', heat_wave: '☀️',
@@ -92,6 +93,7 @@ export class UI {
 
   onFocusLot: ((lotId: string) => void) | null = null;
   onCloseCity: (() => void) | null = null;
+  onFocusDistrict: ((id: DistrictId) => void) | null = null;
 
   constructor() {
     this.root = document.getElementById('app')!;
@@ -376,6 +378,7 @@ export class UI {
         <button id="nav-news">${t('nav.news')} <span id="nav-news-badge"></span></button>
         <button id="nav-dev" style="display:none">${t('nav.dev')}</button>
       </div>
+      <div class="district-bar" id="district-bar"></div>
       <div class="panel" id="panel">
         <div class="panel-head"><h2 id="panel-title">${t('panel.title')}</h2><button class="close" id="panel-close">✕</button></div>
         <div class="panel-tabs" id="panel-tabs"></div>
@@ -541,6 +544,7 @@ export class UI {
     (document.getElementById('st-username') as HTMLElement).textContent = you.name;
     this.updateContractBadge();
     this.renderCompanyBar();
+    this.renderDistrictBar();
     this.renderEventBanner();
     this.renderAnnounceBanner();
     this.renderMira();
@@ -549,6 +553,56 @@ export class UI {
   }
 
   // ================= COMPANY BAR / MY BUSINESSES =================
+
+  private lastDistrictHTML = '';
+
+  /**
+   * Compact district selector: name, live occupancy, and a click to travel.
+   * Occupancy comes from the server's city status, so the numbers are real.
+   */
+  private renderDistrictBar(): void {
+    const bar = document.getElementById('district-bar');
+    if (!bar) return;
+    const status = client.cityStatus;
+    // Fall back to definition-only rows until the first city_status arrives,
+    // so the selector is usable immediately after connecting.
+    const rows: DistrictOccupancy[] = status?.districts ?? DISTRICTS
+      .slice()
+      .sort((a, b) => a.unlockOrder - b.unlockOrder)
+      .map((d) => ({
+        id: d.id, nameKey: d.nameKey, unlockOrder: d.unlockOrder,
+        total: 0, occupied: 0, available: 0, freeByType: {},
+      }));
+
+    const cells = rows
+      .map((d) => {
+        const full = d.total > 0 && d.available === 0;
+        const meta = d.total > 0
+          ? `${d.occupied}/${d.total}${full ? ` · ${t('district.full')}` : ` · ${t('district.available', { n: d.available })}`}`
+          : '—';
+        return `<button class="district-cell ${full ? 'full' : ''}" data-district-go="${d.id}" title="${t('district.occupancy', { occupied: d.occupied, total: d.total })}">
+          <span class="dc-name">${t(d.nameKey)}</span>
+          <span class="dc-meta">${meta}</span>
+        </button>`;
+      })
+      .join('');
+    const html = `<button class="district-title" id="dc-status" title="${t('citystatus.title')}">${t('district.city')}</button>${cells}`;
+    if (html === this.lastDistrictHTML) return;
+    this.lastDistrictHTML = html;
+    bar.innerHTML = html;
+    bar.querySelector('#dc-status')!.addEventListener('click', () => {
+      sfx.click();
+      this.openPanel('citystatus');
+      client.send({ t: 'city_status' });
+    });
+    bar.querySelectorAll('[data-district-go]').forEach((el) =>
+      el.addEventListener('click', () => {
+        sfx.click();
+        this.onFocusDistrict?.((el as HTMLElement).dataset.districtGo as DistrictId);
+        this.maybeHintExpansion();
+      })
+    );
+  }
 
   private lastCompanyHTML = '';
 
@@ -563,10 +617,28 @@ export class UI {
     }
     const used = mine.reduce((s, b) => s + (BUSINESS_CAPACITY[b.type] ?? 0), 0);
     const cap = companyCapacity(company.level);
-    const chips = mine
-      .map((b) => {
-        const sel = b.id === client.selectedBizId;
-        return `<button class="biz-chip ${sel ? 'active' : ''}" data-biz-chip="${b.id}" title="${bizName(b.type)}">${BIZ_ICON[b.type] ?? '🏪'}</button>`;
+    // Group the chips by district so a multi-district company reads as
+    // "OLD TOWN: bakery, market | GREEN VALLEY: farm".
+    const order = new Map(DISTRICTS.map((d) => [d.id, d.unlockOrder]));
+    const groups = new Map<DistrictId, typeof mine>();
+    for (const b of mine) {
+      const d = (b.district ?? 'old_town') as DistrictId;
+      if (!groups.has(d)) groups.set(d, []);
+      groups.get(d)!.push(b);
+    }
+    const chips = [...groups.entries()]
+      .sort((a, b) => (order.get(a[0]) ?? 99) - (order.get(b[0]) ?? 99))
+      .map(([districtId, list]) => {
+        const inner = list
+          .map((b) => {
+            const sel = b.id === client.selectedBizId;
+            return `<button class="biz-chip ${sel ? 'active' : ''}" data-biz-chip="${b.id}" title="${bizName(b.type)} · ${t(`district.${districtId}.name`)}">${BIZ_ICON[b.type] ?? '🏪'}</button>`;
+          })
+          .join('');
+        const label = groups.size > 1
+          ? `<span class="biz-group-label" data-district="${districtId}" title="${t('district.label')}">${t(`district.${districtId}.name`)}</span>`
+          : '';
+        return `<span class="biz-group">${label}${inner}</span>`;
       })
       .join('');
     const canOpen = used < cap; // at least the cheapest (farm=2) might still not fit, checked on open
@@ -588,6 +660,12 @@ export class UI {
             this.openPanel('business');
             this.onFocusLot?.(b.lotId);
           }
+        })
+      );
+      bar.querySelectorAll('[data-district]').forEach((el) =>
+        el.addEventListener('click', () => {
+          sfx.click();
+          this.onFocusDistrict?.((el as HTMLElement).dataset.district as DistrictId);
         })
       );
       bar.querySelector('#co-open')!.addEventListener('click', () => {
@@ -614,17 +692,30 @@ export class UI {
     const occupied = new Set([...client.businesses.values()].map((b) => b.lotId));
     const vacant = LOTS.filter((l) => l.kind !== 'wholesale' && !occupied.has(l.id));
 
-    const rows = vacant
-      .map((l) => {
-        const type = l.kind as BusinessType;
-        const need = BUSINESS_CAPACITY[type];
-        const fitsCap = used + need <= cap;
-        const disabled = !fitsCap || cash < cost;
-        return `<button class="open-lot ${disabled ? 'disabled' : ''}" data-lot="${l.id}" data-type="${type}" ${disabled ? 'disabled' : ''}>
-          <span class="icon">${BIZ_ICON[type] ?? '🏪'}</span>
-          <span class="ol-main"><b>${bizName(type)}</b><br/><span class="cap">${l.id}</span></span>
-          <span class="ol-meta">${t('company.needs_cap', { need })}${fitsCap ? '' : ` <span class="neg">${t('company.no_cap')}</span>`}</span>
-        </button>`;
+    // Grouped by district so the player picks *where* to expand, not just what.
+    const order = new Map(DISTRICTS.map((d) => [d.id, d.unlockOrder]));
+    const byDistrict = new Map<DistrictId, typeof vacant>();
+    for (const l of vacant) {
+      if (!byDistrict.has(l.district)) byDistrict.set(l.district, []);
+      byDistrict.get(l.district)!.push(l);
+    }
+    const rows = [...byDistrict.entries()]
+      .sort((a, b) => (order.get(a[0]) ?? 99) - (order.get(b[0]) ?? 99))
+      .map(([districtId, lots]) => {
+        const inner = lots
+          .map((l) => {
+            const type = l.kind as BusinessType;
+            const need = BUSINESS_CAPACITY[type];
+            const fitsCap = used + need <= cap;
+            const disabled = !fitsCap || cash < cost;
+            return `<button class="open-lot ${disabled ? 'disabled' : ''}" data-lot="${l.id}" data-type="${type}" ${disabled ? 'disabled' : ''}>
+              <span class="icon">${BIZ_ICON[type] ?? '🏪'}</span>
+              <span class="ol-main"><b>${bizName(type)}</b><br/><span class="cap">${t(`district.${districtId}.name`)} · ${l.id}</span></span>
+              <span class="ol-meta">${t('company.needs_cap', { need })}${fitsCap ? '' : ` <span class="neg">${t('company.no_cap')}</span>`}</span>
+            </button>`;
+          })
+          .join('');
+        return `<div class="open-group"><div class="open-group-head">${t(`district.${districtId}.name`)} <span>${lots.length}</span></div>${inner}</div>`;
       })
       .join('');
 
@@ -749,6 +840,9 @@ export class UI {
         break;
       case 'profile':
         this.renderProfilePanel(title, tabs, body);
+        break;
+      case 'citystatus':
+        this.renderCityStatusPanel(title, tabs, body);
         break;
       case 'citymarket':
         this.renderCityMarketPanel(title, tabs, body);
@@ -1758,6 +1852,49 @@ export class UI {
   // ================= V2.4: Mira tutorial =================
 
   private miraStep1Sent = false;
+  // ---- V2.6: one contextual expansion hint (not a tutorial chapter) ----
+
+  private expansionHintShown = false;
+
+  /**
+   * Show Mira's expansion tip exactly once, when the player first engages
+   * with districts or runs out of room in the original centre. Persisted per
+   * player so it never nags across sessions.
+   */
+  maybeHintExpansion(): void {
+    if (this.expansionHintShown || !client.you) return;
+    const flagKey = `bd_hint_expansion_${client.you.id}`;
+    if (localStorage.getItem(flagKey)) { this.expansionHintShown = true; return; }
+    // Only meaningful once an expansion district actually has room.
+    const rows = client.cityStatus?.districts ?? [];
+    const home = rows.find((d) => d.unlockOrder === 1);
+    const expansion = rows.find((d) => d.unlockOrder > 1 && d.available > 0);
+    if (!expansion) return;
+    if (home && home.available > 3) return; // the centre is still roomy
+
+    this.expansionHintShown = true;
+    localStorage.setItem(flagKey, '1');
+    const el = document.createElement('div');
+    el.className = 'mira mira-note';
+    el.innerHTML = `
+      <div class="mira-av">👩‍💼</div>
+      <div class="mira-body">
+        <div class="mira-name">Mira <span class="mira-role">${t('mira.role')}</span></div>
+        <div class="mira-msg">${t('mira.expansion_hint', {
+          home: t(home?.nameKey ?? 'district.old_town.name'),
+          expansion: t(expansion.nameKey),
+        })}</div>
+        <div class="mira-actions">
+          <button class="btn small primary" id="mira-note-ok">${t('mira.got_it')}</button>
+        </div>
+      </div>`;
+    document.body.appendChild(el);
+    el.querySelector('#mira-note-ok')!.addEventListener('click', () => {
+      sfx.click();
+      el.remove();
+    });
+  }
+
   private renderMira(): void {
     const el = document.getElementById('mira');
     if (!el) return;
@@ -1796,6 +1933,58 @@ export class UI {
     });
     document.querySelectorAll('.tut-highlight').forEach((e) => e.classList.remove('tut-highlight'));
     if (stepDef.highlight) document.getElementById(stepDef.highlight)?.classList.add('tut-highlight');
+  }
+
+  /**
+   * Public city status: real aggregates plus a short feed of recent business
+   * openings. Everything here is already public — never cash, inventory,
+   * contracts or ledger data.
+   */
+  private renderCityStatusPanel(title: HTMLElement, tabs: HTMLElement, body: HTMLElement): void {
+    title.textContent = t('citystatus.title');
+    tabs.innerHTML = '';
+    const st = client.cityStatus;
+    if (!st) {
+      this.setBody(body, `<p class="hint">${t('citystatus.loading')}</p>`);
+      client.send({ t: 'city_status' });
+      return;
+    }
+    const districtRows = st.districts
+      .map((d) => {
+        const full = d.available === 0;
+        const free = Object.entries(d.freeByType)
+          .filter(([, n]) => (n ?? 0) > 0)
+          .map(([type, n]) => `${BIZ_ICON[type] ?? '🏪'} ${n}`)
+          .join('  ');
+        return `<div class="kv"><span class="k">${t(d.nameKey)}</span><span class="v">
+          ${d.occupied}/${d.total}${full ? ` · <b class="neg">${t('district.full')}</b>` : ` · ${t('district.available', { n: d.available })}`}
+          ${free ? `<br/><span class="cap">${free}</span>` : ''}
+        </span></div>`;
+      })
+      .join('');
+
+    const feed = st.recent.length
+      ? st.recent
+          .map((a) => `<div class="trade-row">${BIZ_ICON[a.bizType] ?? '🏪'} ${t('citystatus.opened', {
+              company: escapeHtml(a.companyName),
+              biz: bizName(a.bizType),
+              district: t(`district.${a.district}.name`),
+            })}</div>`)
+          .join('')
+      : `<p class="hint">${t('citystatus.no_activity')}</p>`;
+
+    const allFull = st.districts.every((d) => d.available === 0);
+    this.setBody(body, `
+      ${allFull ? `<div class="bigstatus bad">${t('city.expansion_capacity')}</div>` : ''}
+      <div class="kv"><span class="k">${t('citystatus.companies')}</span><span class="v">${st.companies}</span></div>
+      <div class="kv"><span class="k">${t('citystatus.businesses')}</span><span class="v">${st.businesses}</span></div>
+      <div class="kv"><span class="k">${t('citystatus.occupied')}</span><span class="v">${st.occupiedLots} / ${st.totalLots}</span></div>
+      <div class="kv"><span class="k">${t('citystatus.deliveries')}</span><span class="v">${st.activeDeliveries}</span></div>
+      <h4 style="font-size:13px;color:#334155;margin:14px 0 6px">${t('citystatus.districts')}</h4>
+      ${districtRows}
+      <h4 style="font-size:13px;color:#334155;margin:14px 0 6px">${t('citystatus.recent')}</h4>
+      ${feed}
+      <div class="hint">${t('district.selector.hint')}</div>`);
   }
 
   private renderDevPanel(title: HTMLElement, tabs: HTMLElement, body: HTMLElement): void {
