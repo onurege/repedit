@@ -1,4 +1,49 @@
-# V2.4 — PLAYER EXPERIENCE & LIVE-SERVICE FOUNDATION (current)
+# V2.5 — ECONOMIC DEPTH & MARKET INTEGRITY (current)
+
+Turns the economy from "produce → sell → grow" into "analyze → predict → trade
+→ manage risk → protect reputation", by making the Central Wholesale a finite
+institution and adding a fair, hidden market-integrity system. No banks, loans,
+taxes, or social systems.
+
+- **Finite Central Wholesale.** Wheat, Milk and Coffee Beans now have a finite
+  **daily stock** (`wholesale_supply`, migration 009) at a base price, resetting
+  once per wholesale day. Stock decreases as players buy and can hit **OUT OF
+  STOCK** — which naturally pushes players to the marketplace. Reset is
+  idempotent and restart-safe (advances by whole days on catch-up).
+- **Never blocked.** Past depletion an **emergency reserve** stays available —
+  expensive (2.5×) and capped per purchase — so new players are never
+  progression-blocked while hoarding is discouraged.
+- **Speculation is encouraged, never punished.** Buying low, holding, preparing
+  for an announced event and reselling high are all legitimate and carry no
+  penalty on their own.
+- **Hidden market-integrity system** (`company_integrity`). Each company has a
+  private score (starts 100) and a gradual state ladder NORMAL → WATCHLIST →
+  INVESTIGATING → CONFIRMED. It combines *weak* signals over multiple days
+  (cornering >50% of a product's daily stock, depleting into the emergency
+  reserve, repeated extreme-price resale). No single action ever flags a day;
+  only **sustained** abuse escalates. The score is never exposed.
+- **Reputation consequences.** Only a CONFIRMED, sustained manipulator takes a
+  **recoverable** company-reputation penalty and a vague public profile warning
+  ("⚠ Recent Market Violation") — never money removed, inventory deleted, or a
+  ban, and never revealing why.
+- **Scarcity UI.** The wholesale panel shows remaining/daily stock, a stock bar,
+  IN STOCK / LIMITED / LOW STOCK / OUT OF STOCK, the (event-adjusted) unit
+  price, and a reset countdown — encouraging strategic planning.
+- **Ledger + performance.** Wholesale purchases (incl. emergency) and integrity
+  violations are recorded in the existing ledger. Detection is event-driven
+  (counters on committed purchases/listings) with periodic per-day evaluation —
+  no expensive continuous scans.
+- **Balancing** was reviewed; progression (opening/upgrade costs) is unchanged.
+  The new money sink is the emergency premium, and scarcity self-limits
+  cash generation — deliberately minimal adjustments.
+
+All 103 unit tests (incl. 10 new wholesale/integrity tests) and eight browser
+E2Es (golden-path, supply-chain, contract, company, rankings, events,
+experience, wholesale) pass; production build succeeds.
+
+---
+
+# V2.4 — PLAYER EXPERIENCE & LIVE-SERVICE FOUNDATION
 
 Makes the game welcoming to new players and worth returning to, without any
 economic changes. When a player enters they immediately understand what

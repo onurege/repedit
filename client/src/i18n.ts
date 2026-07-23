@@ -681,6 +681,18 @@ const en: Dict = {
   'tut.8.msg': 'Trade goods with other players on the Market. Buy cheap inputs, sell your surplus.',
   'tut.9.title': 'Contracts',
   'tut.9.msg': 'Set up recurring supply contracts for steady trade. You\'re ready — good luck!',
+
+  // ---- V2.5: finite wholesale & market integrity ----
+  'wholesale.hint2': 'The Central Wholesale restocks daily. When it runs low, buy from other players on the Market — or plan ahead before big events.',
+  'wholesale.remaining': '{remaining} / {daily} today',
+  'wholesale.resets_in': 'Resets in {time}',
+  'wholesale.emergency_price': '⚠ ${price}/unit (emergency)',
+  'stock.out_of_stock': 'OUT OF STOCK',
+  'stock.low': 'LOW STOCK',
+  'stock.limited': 'LIMITED',
+  'stock.normal': 'IN STOCK',
+  'warning.market_violation': 'Recent Market Violation',
+  'err.wholesale_limited': 'Only {left} left in daily stock — emergency supply is limited to {cap} per purchase.',
 };
 
 const tr: Dict = {
@@ -1282,6 +1294,18 @@ const tr: Dict = {
   'tut.8.msg': 'Diğer oyuncularla Pazarda mal takas et. Ucuz girdi al, fazlanı sat.',
   'tut.9.title': 'Sözleşmeler',
   'tut.9.msg': 'İstikrarlı ticaret için düzenli tedarik sözleşmeleri kur. Hazırsın — bol şans!',
+
+  // ---- V2.5: sınırlı toptan & pazar bütünlüğü ----
+  'wholesale.hint2': 'Merkezi Toptancı her gün stok yeniler. Azaldığında Pazardan diğer oyunculardan al — ya da büyük olaylardan önce planla.',
+  'wholesale.remaining': 'bugün {remaining} / {daily}',
+  'wholesale.resets_in': '{time} sonra yenilenir',
+  'wholesale.emergency_price': '⚠ ${price}/adet (acil)',
+  'stock.out_of_stock': 'TÜKENDİ',
+  'stock.low': 'AZ STOK',
+  'stock.limited': 'SINIRLI',
+  'stock.normal': 'STOKTA',
+  'warning.market_violation': 'Yakın Zamanda Pazar İhlali',
+  'err.wholesale_limited': 'Günlük stokta yalnızca {left} kaldı — acil tedarik alım başına {cap} ile sınırlı.',
 };
 
 const DICTS: Record<Lang, Dict> = { en, tr };

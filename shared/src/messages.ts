@@ -6,6 +6,7 @@
 import type {
   BusinessType, ProductId, RankingCategory,
   CityEventType, CityEventStatus, CityEventEffects, DemandCategory,
+  StockCategory,
 } from './defs.js';
 import type {
   AlertKind, AlertSeverity, OpportunityKind,
@@ -35,6 +36,7 @@ export type ClientMsg =
   | { t: 'get_rankings' }
   | { t: 'get_company_profile'; companyId: number }
   | { t: 'get_city_market' }
+  | { t: 'get_wholesale' }
   | { t: 'get_brief' }
   | { t: 'ack_update'; updateId: string }
   | { t: 'tutorial_advance'; step: number }
@@ -160,6 +162,7 @@ export interface CompanyProfile {
   marketShares: MarketShareEntry[];
   supplierRanks: SupplierRankEntry[];
   badges: string[];           // e.g. 'top_bread' — small profile badges
+  warning: string | null;     // V2.5: vague public trust warning, e.g. 'market_violation'
 }
 
 export interface RankingRow {
@@ -215,6 +218,23 @@ export interface CityMarket {
   wholesale: WholesaleStatus[];   // only inputs currently modified
   active: CityEventPub[];
   upcoming: CityEventPub[];
+  serverTime: number;
+}
+
+// ---------- V2.5: Central Wholesale daily supply ----------
+
+export interface WholesaleProduct {
+  product: ProductId;
+  remaining: number;
+  dailyStock: number;
+  basePrice: number;       // effective unit price (incl. active event modifier)
+  category: StockCategory;
+  resetAt: number;         // epoch ms of next daily reset
+  emergency: boolean;      // out of stock -> emergency fallback applies
+}
+
+export interface WholesaleState {
+  products: WholesaleProduct[];
   serverTime: number;
 }
 
@@ -410,6 +430,7 @@ export type ServerMsg =
   | { t: 'rankings'; rankings: CityRankings }
   | { t: 'company_profile'; profile: CompanyProfile }
   | { t: 'city_market'; market: CityMarket }
+  | { t: 'wholesale'; wholesale: WholesaleState }
   | { t: 'brief'; brief: MorningBrief }
   | { t: 'updates'; unseen: UpdatePub[]; all: UpdatePub[] }
   | { t: 'tutorial'; state: TutorialState }

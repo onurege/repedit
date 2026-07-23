@@ -449,6 +449,7 @@ export class UI {
   }
 
   openWholesale(): void {
+    client.send({ t: 'get_wholesale' });
     this.openPanel('wholesale');
   }
 
@@ -1027,20 +1028,47 @@ export class UI {
   private renderWholesalePanel(title: HTMLElement, tabs: HTMLElement, body: HTMLElement): void {
     title.textContent = t('wholesale.title');
     tabs.innerHTML = '';
-    const rows = (['beans', 'milk', 'wheat', 'bread'] as ProductId[])
-      .map((pid) => {
-        const price = NPC_WHOLESALE_PRICES[pid]!;
-        return `<div class="invrow">
-          <span class="emoji">${PRODUCTS[pid].emoji}</span>
-          <span class="name">${pName(pid)}<br/><span class="cap" style="white-space:nowrap">${t('wholesale.per_unit', { price: fmt(price) })}</span></span>
-          <input type="number" min="1" value="50" style="width:70px;padding:7px;border:1.5px solid #dbe3ee;border-radius:8px" data-npc-qty="${pid}" />
-          <button class="btn small primary" data-npc-buy="${pid}">${t('wholesale.buy')}</button>
+    const ws = client.wholesale;
+    const limited = new Map((ws?.products ?? []).map((p) => [p.product, p]));
+
+    // Supply-limited products show live scarcity; bread stays an unlimited fallback.
+    const rowFor = (pid: ProductId): string => {
+      const w = limited.get(pid);
+      if (w) {
+        const catCls = w.category === 'out_of_stock' ? 'oos' : w.category === 'low' ? 'low' : w.category === 'limited' ? 'limited' : 'ok';
+        const pct = Math.min(100, Math.round((w.remaining / Math.max(1, w.dailyStock)) * 100));
+        const priceLabel = w.emergency ? t('wholesale.emergency_price', { price: fmt(w.basePrice) }) : t('wholesale.per_unit', { price: fmt(w.basePrice) });
+        return `<div class="wsrow">
+          <div class="ws-top">
+            <span class="emoji">${PRODUCTS[pid].emoji}</span>
+            <span class="ws-name">${pName(pid)}</span>
+            <span class="ws-tag ${catCls}">${t(`stock.${w.category}`)}</span>
+          </div>
+          <div class="ws-bar"><div class="${catCls}" style="width:${pct}%"></div></div>
+          <div class="ws-meta">
+            <span>${t('wholesale.remaining', { remaining: w.remaining.toLocaleString(), daily: w.dailyStock.toLocaleString() })}</span>
+            <span>${priceLabel}</span>
+            <span class="ws-reset" data-reset="${w.resetAt}">${t('wholesale.resets_in', { time: countdown(w.resetAt) })}</span>
+          </div>
+          <div class="qtyrow">
+            <input type="number" min="1" value="50" style="width:80px" data-npc-qty="${pid}" />
+            <button class="btn small primary" data-npc-buy="${pid}">${t('wholesale.buy')}</button>
+          </div>
         </div>`;
-      })
-      .join('');
+      }
+      const price = NPC_WHOLESALE_PRICES[pid]!;
+      return `<div class="invrow">
+        <span class="emoji">${PRODUCTS[pid].emoji}</span>
+        <span class="name">${pName(pid)}<br/><span class="cap" style="white-space:nowrap">${t('wholesale.per_unit', { price: fmt(price) })}</span></span>
+        <input type="number" min="1" value="50" style="width:70px;padding:7px;border:1.5px solid #dbe3ee;border-radius:8px" data-npc-qty="${pid}" />
+        <button class="btn small primary" data-npc-buy="${pid}">${t('wholesale.buy')}</button>
+      </div>`;
+    };
+
+    const rows = (['wheat', 'milk', 'beans', 'bread'] as ProductId[]).map(rowFor).join('');
     this.setBody(body, `
       ${rows}
-      <div class="hint">${t('wholesale.hint')}</div>`, (bd) => {
+      <div class="hint">${t('wholesale.hint2')}</div>`, (bd) => {
       bd.querySelectorAll('[data-npc-buy]').forEach((b) =>
         b.addEventListener('click', () => {
           const pid = (b as HTMLElement).dataset.npcBuy as ProductId;
@@ -1290,6 +1318,7 @@ export class UI {
     const online = client.players.find((pl) => pl.id === p.ownerId)?.online;
     const founded = new Date(p.foundedAt).toLocaleDateString(getLang() === 'tr' ? 'tr-TR' : 'en-US');
     const badges = p.badges.map((bd) => `<span class="profile-badge">${t(`badge.${bd}`)}</span>`).join('');
+    const warning = p.warning ? `<div class="profile-warning">⚠ ${t(`warning.${p.warning}`)}</div>` : '';
 
     const shareCards = p.marketShares.map((m) => {
       const pct = (m.share * 100).toFixed(1);
@@ -1324,6 +1353,7 @@ export class UI {
 
     const html = `
       <div class="profile-top">
+        ${warning}
         <div>${badges || ''}</div>
         <div class="kv"><span class="k">${t('info.owner')}</span><span class="v">${escapeHtml(p.ownerName)} ${t(online ? 'info.online' : 'info.offline')}</span></div>
         <div class="kv"><span class="k">${t('company.level_label')}</span><span class="v">${p.level}</span></div>

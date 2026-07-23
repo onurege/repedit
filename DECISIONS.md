@@ -209,3 +209,35 @@
 - **No economic surface touched.** V2.4 reads existing state and adds
   communication/onboarding UI only — market share and rankings still derive
   from real committed activity; prices and trades are unchanged.
+
+## V2.5 — Economic depth & market integrity
+
+- **The Central Wholesale is finite, not infinite.** Wheat/Milk/Beans have a
+  daily stock that depletes as players buy, creating real scarcity that steers
+  players to the player marketplace. An **emergency reserve** (2.5× price, capped
+  per purchase) guarantees new players are never blocked while making hoarding
+  uneconomic. Daily stock is deliberately modest so a few aggressive buyers can
+  actually deplete it.
+- **Daily reset is idempotent and restart-safe.** Each product carries its own
+  `reset_at`; on a tick past it, remaining refills to the daily stock and
+  `reset_at` advances by whole days (so downtime can't double-refill or
+  re-trigger). The first wholesale product anchors the once-per-day integrity
+  evaluation, so a day boundary evaluates each company exactly once.
+- **Integrity is a trust system, not anti-cheat.** A hidden per-company score
+  (start 100) moves on *weak, combined, repeated* signals — cornering >50% of a
+  product's daily stock, depleting it into emergency, repeated extreme-price
+  resale. A single day never confirms anything; the ladder NORMAL → WATCHLIST →
+  INVESTIGATING → CONFIRMED needs sustained abuse (≈3 flagged days). Buying,
+  holding, reselling and event-prep, on their own, generate no suspicion — false
+  positives are designed out.
+- **Consequences are proportionate and recoverable.** Only CONFIRMED applies a
+  company-reputation penalty (clamped, recoverable via normal play) and a vague
+  public warning; money and inventory are never touched and nothing is banned.
+  The reason is never revealed and the numeric score never leaves the server.
+- **Everything is derived/recorded from committed events.** Signals accrue only
+  from successful purchases/listings; wholesale purchases (incl. emergency) and
+  integrity violations are written to the existing `economic_ledger`. Detection
+  is event-driven with a once-per-day evaluation — no per-tick global scans.
+- **Balancing left progression intact.** Opening/upgrade costs and cash
+  generation are unchanged; the emergency premium is the only new sink and
+  scarcity self-limits runaway buying. Adjust later only if telemetry demands.

@@ -368,3 +368,51 @@ export const CITY_EVENT_TYPES = Object.keys(CITY_EVENTS) as CityEventType[];
 export const EVENT_GAP_MIN_SECS = 150;
 export const EVENT_GAP_MAX_SECS = 360;
 export const EVENT_TYPE_COOLDOWN_SECS = 600;
+
+// ============================================================
+// V2.5 — Central Wholesale daily supply & market integrity
+// ============================================================
+// The Central Wholesale is a finite daily institution, not an infinite shop.
+export const WHOLESALE_PRODUCTS: ProductId[] = ['wheat', 'milk', 'beans'];
+// Modest daily supply so a few aggressive buyers create real scarcity (which
+// pushes players toward the marketplace) rather than an infinite shop.
+export const WHOLESALE_DAILY_STOCK: Partial<Record<ProductId, number>> = {
+  wheat: 800, milk: 700, beans: 900,
+};
+// A "wholesale day" in real seconds. Long for live play; tests use dev resets.
+export const WHOLESALE_DAY_SECONDS = 24 * 3600;
+
+// Emergency fallback so new players are never blocked when stock runs out:
+// expensive and capped per purchase to discourage abuse.
+export const EMERGENCY_PRICE_MULT = 2.5;
+export const EMERGENCY_MAX_PER_BUY = 100;
+
+export type StockCategory = 'out_of_stock' | 'low' | 'limited' | 'normal';
+/** Remaining stock as a display category. */
+export function stockCategory(remaining: number, dailyStock: number): StockCategory {
+  if (remaining <= 0) return 'out_of_stock';
+  const pct = remaining / Math.max(1, dailyStock);
+  if (pct <= 0.15) return 'low';
+  if (pct <= 0.40) return 'limited';
+  return 'normal';
+}
+
+// ---- Market integrity (hidden economic-trust system) ----
+export type IntegrityState = 'normal' | 'watchlist' | 'investigating' | 'confirmed';
+
+export const INTEGRITY_START = 100;
+// Per-day signal weights (accumulate into a day's suspicion). Individually weak
+// so a single action never flags a day — evidence must combine and repeat.
+export const SIGNAL_HIGH_SHARE = 3;     // bought >50% of a product's daily stock
+export const SIGNAL_DEPLETION = 3;      // a buy pushed a product into emergency
+export const SIGNAL_EXTREME_RESALE = 2; // listed a sell order at >3x base price
+export const HIGH_SHARE_FRACTION = 0.5;
+export const EXTREME_RESALE_MULT = 3;
+// A day is "flagged" only when combined signals reach this (e.g. cornering the
+// supply AND depleting it, or repeated extreme-price listings).
+export const SUSPICION_DAY_THRESHOLD = 5;
+export const SCORE_DROP_PER_FLAG = 20;
+export const SCORE_RECOVER_PER_CLEAN_DAY = 10;
+// Confirmed manipulation: reputation penalty (recoverable) + public warning.
+export const REP_VIOLATION_PENALTY = 1.0;
+export const VIOLATION_WARNING_SECONDS = 3 * 24 * 3600;

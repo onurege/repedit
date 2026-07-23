@@ -66,7 +66,11 @@ check('Mira "Continue" advances the tutorial', true);
 await send({ t: 'dev', cmd: 'make_admin' });         // to publish an announcement later
 await send({ t: 'dev', cmd: 'reset_updates' });      // so "What's New" pops on return
 await send({ t: 'dev', cmd: 'event_festival', value: 90 }); // an upcoming event for the brief
-await sleep(800);
+// Wait until the event is actually scheduled before reloading (avoids a race).
+await page.waitForFunction(
+  () => (window.__bd.client.cityMarket?.upcoming ?? []).some((e) => e.type === 'city_festival'),
+  { timeout: 8000 }
+);
 
 // Reload = session return. A fresh bakery has no wheat -> low-stock/sold-out
 // alerts, plus the upcoming festival and an opportunity.

@@ -145,6 +145,9 @@ export class Net {
     w.on('city_market', () => {
       this.broadcast({ t: 'city_market', market: w.toCityMarket() });
     });
+    w.on('wholesale', () => {
+      this.broadcast({ t: 'wholesale', wholesale: w.toWholesaleState() });
+    });
     w.on('presence', () => this.broadcastPlayers());
   }
 
@@ -185,6 +188,7 @@ export class Net {
         serverTime: Date.now(),
       });
       this.send(ws, { t: 'city_market', market: this.world.toCityMarket() });
+      this.send(ws, { t: 'wholesale', wholesale: this.world.toWholesaleState() });
       this.world.recentTrades().then((trades) => this.send(ws, { t: 'trades', trades }));
       this.world.contractsForPlayer(playerId).then((contracts) => this.send(ws, { t: 'contracts', contracts }));
       // V2.4 player experience: tutorial state, "What's New", brief, announcements.
@@ -322,6 +326,9 @@ export class Net {
         }
         case 'get_city_market':
           this.send(conn.ws, { t: 'city_market', market: world.toCityMarket() });
+          break;
+        case 'get_wholesale':
+          this.send(conn.ws, { t: 'wholesale', wholesale: world.toWholesaleState() });
           break;
         case 'get_brief': {
           const brief = await world.buildBrief(pid, null);

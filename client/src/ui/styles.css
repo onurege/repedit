@@ -269,6 +269,26 @@ button { font-family: inherit; }
 .tut-highlight { animation: tutpulse 1.2s ease-in-out infinite; box-shadow: 0 0 0 3px rgba(29,78,216,0.5) !important; border-radius: 10px; }
 @keyframes tutpulse { 0%,100% { box-shadow: 0 0 0 2px rgba(29,78,216,0.4); } 50% { box-shadow: 0 0 0 5px rgba(29,78,216,0.15); } }
 
+/* ---------- V2.5: finite wholesale ---------- */
+.wsrow { border: 1px solid #e2e8f0; border-radius: 12px; padding: 10px 12px; margin-bottom: 8px; }
+.ws-top { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }
+.ws-top .emoji { font-size: 20px; }
+.ws-name { font-weight: 700; flex: 1; }
+.ws-tag { font-size: 11px; font-weight: 800; padding: 2px 8px; border-radius: 999px; letter-spacing: 0.4px; }
+.ws-tag.ok { background: #dcfce7; color: #15803d; }
+.ws-tag.limited { background: #fef9c3; color: #a16207; }
+.ws-tag.low { background: #ffedd5; color: #c2410c; }
+.ws-tag.oos { background: #fee2e2; color: #b91c1c; }
+.ws-bar { background: #e2e8f0; border-radius: 6px; height: 8px; overflow: hidden; margin-bottom: 6px; }
+.ws-bar > div { height: 100%; border-radius: 6px; }
+.ws-bar > div.ok { background: linear-gradient(90deg,#4ade80,#16a34a); }
+.ws-bar > div.limited { background: linear-gradient(90deg,#fde047,#ca8a04); }
+.ws-bar > div.low { background: linear-gradient(90deg,#fb923c,#ea580c); }
+.ws-bar > div.oos { background: #dc2626; }
+.ws-meta { display: flex; justify-content: space-between; flex-wrap: wrap; gap: 4px 10px; font-size: 11.5px; color: #64748b; margin-bottom: 8px; }
+.ws-reset { white-space: nowrap; }
+.profile-warning { background: #fef2f2; border: 1px solid #fecaca; color: #b91c1c; font-weight: 700; font-size: 13px; padding: 8px 10px; border-radius: 10px; margin-bottom: 8px; }
+
 .nav {
   position: absolute; bottom: 16px; left: 50%; transform: translateX(-50%);
   display: flex; gap: 8px; pointer-events: auto;

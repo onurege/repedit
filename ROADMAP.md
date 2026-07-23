@@ -52,10 +52,19 @@ offline progression, full persistence. **This phase is implemented.**
 - Admin global announcements (banner/history, admin-only) — **implemented**
 - RTS-style mouse camera controls — **implemented**
 
-## V2.5 — (next; documented only)
+## V2.5 — Economic Depth & Market Integrity  ✅
 
-- **Do not implement ahead of schedule.** No economic mechanics, taxes, fees,
-  banks, loans, employees, new products/businesses, or social systems here.
+- Finite Central Wholesale daily supply + emergency fallback — **implemented**
+- Supply scarcity that pushes players to the marketplace — **implemented**
+- Hidden market-integrity system (fair, multi-signal, gradual) — **implemented**
+- Reputation consequences for sustained manipulation only — **implemented**
+- Scarcity UI + reset countdown — **implemented**
+
+## V2.6 — (next; documented only)
+
+- **Do not implement ahead of schedule.** No banks, loans, taxes, employees,
+  guilds, chat, auctions, stock market, new products/businesses, or social
+  systems here.
 
 ## PHASE 4 — Living City
 

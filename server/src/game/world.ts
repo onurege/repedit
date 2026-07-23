@@ -126,6 +126,26 @@ import {
   type AnnouncementPub,
   type AnnouncementType,
   type AnnouncementPriority,
+  WHOLESALE_PRODUCTS,
+  WHOLESALE_DAILY_STOCK,
+  WHOLESALE_DAY_SECONDS,
+  EMERGENCY_PRICE_MULT,
+  EMERGENCY_MAX_PER_BUY,
+  stockCategory,
+  INTEGRITY_START,
+  SIGNAL_HIGH_SHARE,
+  SIGNAL_DEPLETION,
+  SIGNAL_EXTREME_RESALE,
+  HIGH_SHARE_FRACTION,
+  EXTREME_RESALE_MULT,
+  SUSPICION_DAY_THRESHOLD,
+  SCORE_DROP_PER_FLAG,
+  SCORE_RECOVER_PER_CLEAN_DAY,
+  REP_VIOLATION_PENALTY,
+  VIOLATION_WARNING_SECONDS,
+  type IntegrityState,
+  type WholesaleProduct,
+  type WholesaleState,
 } from '@district/shared';
 import { query, tx } from '../db.js';
 
@@ -268,6 +288,28 @@ export interface EventRec {
   major: boolean;
 }
 
+// V2.5: finite Central Wholesale daily supply for one product.
+export interface WholesaleRec {
+  product: ProductId;
+  dailyStock: number;
+  remaining: number;
+  basePrice: number;
+  resetAtMs: number;
+  dirty: boolean;
+}
+
+// V2.5: hidden per-company economic-trust record.
+export interface IntegrityRec {
+  companyId: number;
+  score: number;
+  state: IntegrityState;
+  suspicionToday: number;
+  flaggedDays: number;
+  violationUntilMs: number | null;
+  crossedHighShare: Set<ProductId>; // in-memory: 50%-crossing already scored today
+  dirty: boolean;
+}
+
 // Append-only economic ledger entry (see migrations/002).
 interface LedgerEntry {
   playerId: number;
@@ -372,6 +414,11 @@ export class World extends EventEmitter {
   private lastEventTypeAtMs = new Map<CityEventType, number>();
   private nextEventAtMs = 0;
   private marketSig = '';   // signature of current market; emit only on change
+  // V2.5: finite wholesale supply + hidden company integrity.
+  wholesale = new Map<ProductId, WholesaleRec>();
+  private integrity = new Map<number, IntegrityRec>(); // keyed by companyId
+  // Per-company per-product units bought this wholesale day (in-memory).
+  private dailyBuys = new Map<number, Map<ProductId, number>>();
   timeScale = 1;
   private tickTimer: ReturnType<typeof setInterval> | null = null;
   private ticksSinceFlush = 0;
@@ -634,6 +681,19 @@ export class World extends EventEmitter {
     this.nextEventAtMs = now + this.randInt(EVENT_GAP_MIN_SECS, EVENT_GAP_MAX_SECS) * 1000;
     await this.processEvents(now);
 
+    // V2.5: restore (or seed) wholesale supply and company integrity records.
+    await this.loadWholesale(now);
+    const intRows = await query('SELECT * FROM company_integrity');
+    for (const r of intRows.rows) {
+      this.integrity.set(r.company_id, {
+        companyId: r.company_id, score: r.score, state: r.state,
+        suspicionToday: r.suspicion_today, flaggedDays: r.flagged_days,
+        violationUntilMs: r.violation_until ? new Date(r.violation_until).getTime() : null,
+        crossedHighShare: new Set(), dirty: false,
+      });
+    }
+    await this.processWholesale(now);
+
     await this.flush();
     console.log(
       `[world] loaded ${this.players.size} players, ${this.businesses.size} businesses, ` +
@@ -782,6 +842,7 @@ export class World extends EventEmitter {
       }
     }
     await this.processEvents(now);
+    await this.processWholesale(now);
     this.ticksSinceFlush++;
     if (this.ticksSinceFlush >= 5) {
       this.ticksSinceFlush = 0;
@@ -998,6 +1059,222 @@ export class World extends EventEmitter {
       upcoming: this.cityEvents.filter((e) => e.status === 'upcoming').map((e) => this.toCityEventPub(e)),
       serverTime: Date.now(),
     };
+  }
+
+  // ============================================================
+  // V2.5 — Central Wholesale daily supply & market integrity
+  // ============================================================
+
+  /** Load (or seed) the finite wholesale supply rows. */
+  private async loadWholesale(now: number): Promise<void> {
+    const rows = await query('SELECT * FROM wholesale_supply');
+    const byProduct = new Map<string, any>(rows.rows.map((r) => [r.product, r]));
+    for (const product of WHOLESALE_PRODUCTS) {
+      const daily = WHOLESALE_DAILY_STOCK[product]!;
+      const base = NPC_WHOLESALE_PRICES[product]!;
+      const existing = byProduct.get(product);
+      if (existing) {
+        this.wholesale.set(product, {
+          product, dailyStock: existing.daily_stock, remaining: existing.remaining,
+          basePrice: existing.base_price, resetAtMs: new Date(existing.reset_at).getTime(), dirty: false,
+        });
+      } else {
+        const resetAt = new Date(now + WHOLESALE_DAY_SECONDS * 1000);
+        await query(
+          `INSERT INTO wholesale_supply (product, daily_stock, remaining, base_price, reset_at)
+           VALUES ($1,$2,$2,$3,$4) ON CONFLICT (product) DO NOTHING`,
+          [product, daily, base, resetAt]
+        );
+        this.wholesale.set(product, { product, dailyStock: daily, remaining: daily, basePrice: base, resetAtMs: resetAt.getTime(), dirty: false });
+      }
+    }
+  }
+
+  /** Per-tick: reset any wholesale product whose day has elapsed (idempotent). */
+  async processWholesale(now = Date.now()): Promise<void> {
+    let changed = false;
+    for (const ws of this.wholesale.values()) {
+      if (now >= ws.resetAtMs) {
+        // A day boundary: evaluate integrity for the day just ended, then refill.
+        await this.rolloverWholesaleDay(ws, now);
+        changed = true;
+      }
+    }
+    if (changed) this.emitWholesale();
+  }
+
+  private async rolloverWholesaleDay(ws: WholesaleRec, now: number): Promise<void> {
+    // Advance resetAt by whole days until it's in the future (guards restart).
+    let next = ws.resetAtMs;
+    let days = 0;
+    while (now >= next) { next += WHOLESALE_DAY_SECONDS * 1000; days++; }
+    ws.remaining = ws.dailyStock;
+    ws.resetAtMs = next;
+    ws.dirty = true;
+    await query('UPDATE wholesale_supply SET remaining=$1, reset_at=$2, updated_at=now() WHERE product=$3',
+      [ws.remaining, new Date(ws.resetAtMs), ws.product]);
+    // Evaluate every company's integrity once per elapsed day boundary.
+    if (this.wholesaleDayAnchor !== ws.product) return; // only the anchor product drives daily evaluation
+    for (let i = 0; i < days; i++) await this.evaluateAllIntegrity();
+    this.dailyBuys.clear();
+  }
+
+  // Use the first wholesale product as the daily-evaluation anchor, so a day
+  // boundary evaluates integrity exactly once (not once per product).
+  private wholesaleDayAnchor: ProductId = WHOLESALE_PRODUCTS[0];
+
+  private emitWholesale(): void { this.emit('wholesale'); }
+
+  toWholesaleState(): WholesaleState {
+    const products: WholesaleProduct[] = [];
+    for (const product of WHOLESALE_PRODUCTS) {
+      const ws = this.wholesale.get(product);
+      if (!ws) continue;
+      const mod = this.wholesaleModifier(product);
+      products.push({
+        product,
+        remaining: Math.max(0, ws.remaining),
+        dailyStock: ws.dailyStock,
+        basePrice: Math.max(1, Math.round(ws.basePrice * mod)),
+        category: stockCategory(ws.remaining, ws.dailyStock),
+        resetAt: ws.resetAtMs,
+        emergency: ws.remaining <= 0,
+      });
+    }
+    return { products, serverTime: Date.now() };
+  }
+
+  // ---- Hidden market-integrity system ----
+
+  private ensureIntegrity(companyId: number): IntegrityRec {
+    let rec = this.integrity.get(companyId);
+    if (!rec) {
+      rec = {
+        companyId, score: INTEGRITY_START, state: 'normal',
+        suspicionToday: 0, flaggedDays: 0, violationUntilMs: null,
+        crossedHighShare: new Set(), dirty: true,
+      };
+      this.integrity.set(companyId, rec);
+      query(`INSERT INTO company_integrity (company_id) VALUES ($1) ON CONFLICT DO NOTHING`, [companyId]).catch(() => {});
+    }
+    return rec;
+  }
+
+  /** Accrue weak manipulation signals from a committed wholesale purchase. */
+  private recordWholesaleBuy(playerId: number, product: ProductId, normalQty: number, emerQty: number, ws: WholesaleRec): void {
+    const company = this.companies.get(playerId);
+    if (!company) return;
+    const rec = this.ensureIntegrity(company.id);
+    let buys = this.dailyBuys.get(company.id);
+    if (!buys) { buys = new Map(); this.dailyBuys.set(company.id, buys); }
+    const cumulative = (buys.get(product) ?? 0) + normalQty + emerQty;
+    buys.set(product, cumulative);
+    // Signal 1: this company took a large share of a product's daily stock.
+    if (cumulative >= ws.dailyStock * HIGH_SHARE_FRACTION && !rec.crossedHighShare.has(product)) {
+      rec.crossedHighShare.add(product);
+      this.addSuspicion(rec, SIGNAL_HIGH_SHARE);
+    }
+    // Signal 2: this buy dipped into the emergency reserve (depletion).
+    if (emerQty > 0) this.addSuspicion(rec, SIGNAL_DEPLETION);
+  }
+
+  private addSuspicion(rec: IntegrityRec, amount: number): void {
+    rec.suspicionToday += amount;
+    rec.dirty = true;
+  }
+
+  /** Called once per wholesale day: adjust every company's integrity score. */
+  private async evaluateAllIntegrity(): Promise<void> {
+    for (const rec of this.integrity.values()) await this.evaluateIntegrity(rec);
+  }
+
+  private async evaluateIntegrity(rec: IntegrityRec): Promise<void> {
+    const flaggedDay = rec.suspicionToday >= SUSPICION_DAY_THRESHOLD;
+    if (flaggedDay) {
+      rec.score = Math.max(0, rec.score - SCORE_DROP_PER_FLAG);
+      rec.flaggedDays += 1;
+    } else {
+      rec.score = Math.min(INTEGRITY_START, rec.score + SCORE_RECOVER_PER_CLEAN_DAY);
+      rec.flaggedDays = Math.max(0, rec.flaggedDays - 1);
+    }
+    const prevState = rec.state;
+    rec.state = this.integrityState(rec);
+    // Only a gradual escalation to CONFIRMED applies consequences, once.
+    if (rec.state === 'confirmed' && prevState !== 'confirmed') {
+      await this.applyConfirmedConsequences(rec);
+    }
+    rec.suspicionToday = 0;
+    rec.crossedHighShare.clear();
+    rec.dirty = true;
+    await this.persistIntegrity(rec);
+  }
+
+  private integrityState(rec: IntegrityRec): IntegrityState {
+    if (rec.flaggedDays >= 3 && rec.score <= 40) return 'confirmed';
+    if (rec.flaggedDays >= 2 && rec.score <= 60) return 'investigating';
+    if (rec.flaggedDays >= 1 && rec.score <= 80) return 'watchlist';
+    return 'normal';
+  }
+
+  private async applyConfirmedConsequences(rec: IntegrityRec): Promise<void> {
+    const company = this.companyById(rec.companyId);
+    if (!company) return;
+    const owner = this.players.get(company.ownerId);
+    // Reputation penalty across the company's businesses (recoverable).
+    for (const b of this.bizesByOwner(company.ownerId)) {
+      b.reputation = Math.max(REP_MIN, b.reputation - REP_VIOLATION_PENALTY);
+      b.dirty = true;
+      this.emit('biz_pub', b);
+    }
+    rec.violationUntilMs = Date.now() + VIOLATION_WARNING_SECONDS * 1000;
+    // Audit trail (amount 0 — this is a trust event, not a cash movement).
+    if (owner) {
+      this.ledgerQueue.push({
+        playerId: owner.id, businessId: null, type: 'INTEGRITY_VIOLATION', amount: 0,
+        refType: 'company', refId: company.id, before: owner.cash, after: owner.cash,
+      });
+    }
+    console.log(`[integrity] CONFIRMED manipulation company=${rec.companyId} score=${rec.score} — reputation penalty applied`);
+  }
+
+  private async persistIntegrity(rec: IntegrityRec): Promise<void> {
+    await query(
+      `INSERT INTO company_integrity (company_id, score, state, suspicion_today, flagged_days, violation_until, updated_at)
+       VALUES ($1,$2,$3,$4,$5,$6, now())
+       ON CONFLICT (company_id) DO UPDATE SET score=$2, state=$3, suspicion_today=$4, flagged_days=$5, violation_until=$6, updated_at=now()`,
+      [rec.companyId, rec.score, rec.state, rec.suspicionToday, rec.flaggedDays,
+       rec.violationUntilMs ? new Date(rec.violationUntilMs) : null]
+    );
+    rec.dirty = false;
+  }
+
+  /** Public trust warning for a company (vague; never reveals internals). */
+  private companyWarning(companyId: number): string | null {
+    const rec = this.integrity.get(companyId);
+    if (rec && rec.violationUntilMs && rec.violationUntilMs > Date.now()) return 'market_violation';
+    return null;
+  }
+
+  /** Signal: an extreme resale listing (weak, capped once per day per company). */
+  private recordResaleSignal(playerId: number, product: ProductId, price: number): void {
+    const company = this.companies.get(playerId);
+    if (!company) return;
+    const base = PRODUCTS[product].basePrice;
+    if (price > base * EXTREME_RESALE_MULT) {
+      const rec = this.ensureIntegrity(company.id);
+      this.addSuspicion(rec, SIGNAL_EXTREME_RESALE);
+    }
+  }
+
+  /** DEV/test: force a wholesale day rollover now (refills + integrity eval). */
+  async devRolloverWholesale(now = Date.now()): Promise<void> {
+    for (const ws of this.wholesale.values()) { ws.resetAtMs = now - 1; }
+    await this.processWholesale(now);
+  }
+
+  /** Test helper: read a company's hidden integrity (never sent to clients). */
+  integrityOf(companyId: number): IntegrityRec | undefined {
+    return this.integrity.get(companyId);
   }
 
   /** Core economy simulation for one business over dt seconds. */
@@ -1406,9 +1683,7 @@ export class World extends EventEmitter {
     if (!Number.isFinite(qty) || qty < 1 || qty > MARKET_MAX_QTY) throw new GameError('err.invalid_qty');
     const baseUnit = NPC_WHOLESALE_PRICES[product];
     if (!baseUnit) throw new GameError('err.wholesale_no_product');
-    // V2.3: a Supply Disruption event temporarily raises NPC fallback prices
-    // (never removes supply — players are never progression-blocked).
-    const unit = Math.max(1, Math.round(baseUnit * this.wholesaleModifier(product)));
+    const mod = this.wholesaleModifier(product); // V2.3 event price modifier
     const cap = capacityFor(biz, product);
     if (cap <= 0) throw new GameError('err.cannot_store_product', { bizType: biz.type, product });
     const rec = inv(biz, product);
@@ -1416,7 +1691,27 @@ export class World extends EventEmitter {
     if (rec.qty + rec.reserved + incoming + qty > cap) {
       throw new GameError('err.not_enough_storage', { cap });
     }
-    const cost = unit * qty;
+
+    // V2.5: the Central Wholesale is a finite daily supplier. Buy from daily
+    // stock at the base price; past depletion an EMERGENCY reserve is available
+    // — expensive and capped per purchase, so new players are never blocked but
+    // hoarding is discouraged.
+    const ws = this.wholesale.get(product);
+    let normalQty = qty;
+    let emerQty = 0;
+    let cost: number;
+    if (ws) {
+      normalQty = Math.min(qty, Math.max(0, ws.remaining));
+      emerQty = qty - normalQty;
+      if (emerQty > EMERGENCY_MAX_PER_BUY) {
+        throw new GameError('err.wholesale_limited', { left: Math.max(0, ws.remaining), cap: EMERGENCY_MAX_PER_BUY });
+      }
+      const normalUnit = Math.max(1, Math.round(ws.basePrice * mod));
+      const emerUnit = Math.max(1, Math.round(ws.basePrice * EMERGENCY_PRICE_MULT * mod));
+      cost = normalQty * normalUnit + emerQty * emerUnit;
+    } else {
+      cost = Math.max(1, Math.round(baseUnit * mod)) * qty;
+    }
     if (p.cash < cost) throw new GameError('err.not_enough_cash', { cost });
 
     // Mutate memory synchronously, then persist.
@@ -1424,6 +1719,7 @@ export class World extends EventEmitter {
     p.dirty = true;
     biz.expenses += cost;
     biz.dirty = true;
+    if (ws && normalQty > 0) { ws.remaining -= normalQty; ws.dirty = true; }
     this.addXp(p, XP.perNpcPurchase);
 
     try {
@@ -1436,15 +1732,20 @@ export class World extends EventEmitter {
           p.id,
         ]);
         await c.query('UPDATE businesses SET expenses=$1 WHERE id=$2', [biz.expenses, biz.id]);
+        if (ws) await c.query('UPDATE wholesale_supply SET remaining=$1, updated_at=now() WHERE product=$2', [ws.remaining, product]);
         await c.query(LEDGER_SQL, ledgerParams({
-          playerId, businessId: biz.id, type: 'NPC_PURCHASE', amount: -cost,
+          playerId, businessId: biz.id, type: emerQty > 0 ? 'WHOLESALE_EMERGENCY' : 'NPC_PURCHASE', amount: -cost,
           refType: 'delivery', refId: delivery.id, before: p.cash + cost, after: p.cash,
         }));
       });
-      console.log(`[econ] NPC_PURCHASE player=${playerId} ${qty}x${product} cost=$${cost} delivery=${delivery.id}`);
+      console.log(`[econ] NPC_PURCHASE player=${playerId} ${qty}x${product} (${normalQty} stock + ${emerQty} emergency) cost=$${cost} delivery=${delivery.id}`);
+      // V2.5: feed the hidden market-integrity system (committed purchases only).
+      if (ws) this.recordWholesaleBuy(playerId, product, normalQty, emerQty, ws);
       this.emit('delivery', delivery);
       this.emit('purchase', { playerId, product, qty, cost });
+      if (ws) this.emitWholesale();
     } catch (err) {
+      if (ws && normalQty > 0) ws.remaining += normalQty; // revert stock on failure
       // Roll back the in-memory mutation on persistence failure.
       p.cash += cost;
       biz.expenses -= cost;
@@ -1588,6 +1889,9 @@ export class World extends EventEmitter {
         createdAtMs: new Date(res.created_at).getTime(),
       };
       this.orders.set(order.id, order);
+      // V2.5: an extreme resale price is a weak manipulation signal (legitimate
+      // speculation is never punished on its own — this only feeds the score).
+      if (side === 'sell') this.recordResaleSignal(playerId, product, price);
       this.emit('order', order);
       return order;
     } catch (err) {
@@ -2267,6 +2571,9 @@ export class World extends EventEmitter {
         await query(`DELETE FROM tutorial_progress WHERE player_id=$1`, [playerId]);
         await query(`DELETE FROM player_seen_updates WHERE player_id=$1`, [playerId]);
         return 'tutorial reset';
+      case 'wholesale_reset':
+        await this.devRolloverWholesale();
+        return 'wholesale day rolled over';
       case 'speed':
         this.timeScale = Math.min(60, Math.max(1, v || 1));
         return `time scale x${this.timeScale}`;
@@ -2577,6 +2884,7 @@ export class World extends EventEmitter {
       marketShares,
       supplierRanks,
       badges,
+      warning: this.companyWarning(company.id),
     };
   }
 

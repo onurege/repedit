@@ -22,6 +22,7 @@ import type {
   TutorialState,
   UpdatePub,
   AnnouncementPub,
+  WholesaleState,
 } from '@district/shared';
 import { t } from './i18n.js';
 
@@ -54,6 +55,7 @@ export class GameClient {
   rankings: CityRankings | null = null;
   companyProfile: CompanyProfile | null = null;
   cityMarket: CityMarket | null = null;
+  wholesale: WholesaleState | null = null;
   brief: MorningBrief | null = null;
   tutorial: TutorialState | null = null;
   updatesUnseen: UpdatePub[] = [];
@@ -310,6 +312,11 @@ export class GameClient {
       case 'city_market':
         this.cityMarket = msg.market;
         this.emit('city_market', msg.market);
+        this.emit('update');
+        break;
+      case 'wholesale':
+        this.wholesale = msg.wholesale;
+        this.emit('wholesale', msg.wholesale);
         this.emit('update');
         break;
       case 'brief':
