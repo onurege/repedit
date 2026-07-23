@@ -11,6 +11,7 @@ import {
   companyCapacity, COMPANY_NAME_MIN, COMPANY_NAME_MAX,
   type BizPub, type OrderPub, type AwayReport, type ProductId, type ContractPub,
   type BusinessType, type CompanyProfile, type RankingBoard, type CityRankings,
+  type CityMarket, type CityEventPub, type ProductDemand, type CityEventEffects,
 } from '@district/shared';
 import { client } from '../net.js';
 import { sfx, unlockAudio } from '../audio.js';
@@ -20,7 +21,20 @@ const BIZ_ICON: Record<string, string> = {
   farm: '🐄', coffee_shop: '☕', bakery: '🥖', mini_market: '🛒',
 };
 
-type PanelKind = 'none' | 'business' | 'market' | 'wholesale' | 'dev' | 'info' | 'contracts' | 'rankings' | 'profile';
+type PanelKind = 'none' | 'business' | 'market' | 'wholesale' | 'dev' | 'info' | 'contracts' | 'rankings' | 'profile' | 'citymarket';
+
+const EVENT_ICON: Record<string, string> = {
+  city_festival: '🎉', university_week: '🎓', heat_wave: '☀️',
+  supply_disruption: '⛔', local_market_day: '🧺',
+};
+
+/** mm:ss (or h:mm:ss) countdown from a future epoch-ms timestamp. */
+function countdown(toMs: number): string {
+  const s = Math.max(0, Math.round((toMs - Date.now()) / 1000));
+  const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), sec = s % 60;
+  const pad = (n: number) => String(n).padStart(2, '0');
+  return h > 0 ? `${h}:${pad(m)}:${pad(sec)}` : `${pad(m)}:${pad(sec)}`;
+}
 
 interface TabDef {
   id: string;
@@ -339,6 +353,7 @@ export class UI {
         <button id="nav-biz">${t('nav.business')}</button>
         <button id="nav-market">${t('nav.market')}</button>
         <button id="nav-contracts">${t('nav.contracts')} <span id="nav-contracts-badge"></span></button>
+        <button id="nav-citymarket">${t('nav.citymarket')} <span id="nav-event-badge"></span></button>
         <button id="nav-rankings">${t('nav.rankings')}</button>
         <button id="nav-dev" style="display:none">${t('nav.dev')}</button>
       </div>
@@ -348,6 +363,7 @@ export class UI {
         <div class="panel-body" id="panel-body"></div>
       </div>
       <div class="objectives" id="objectives" style="display:none"></div>
+      <div class="event-banner" id="event-banner" style="display:none"></div>
       <div class="controls-hint">${t('hud.controls')}</div>
     `;
     document.body.appendChild(this.hud);
@@ -376,6 +392,11 @@ export class UI {
     document.getElementById('nav-contracts')!.addEventListener('click', () => {
       sfx.click();
       this.openPanel('contracts');
+    });
+    document.getElementById('nav-citymarket')!.addEventListener('click', () => {
+      sfx.click();
+      client.send({ t: 'get_city_market' });
+      this.openPanel('citymarket');
     });
     document.getElementById('nav-rankings')!.addEventListener('click', () => {
       sfx.click();
@@ -449,6 +470,7 @@ export class UI {
     document.getElementById('nav-biz')!.classList.toggle('active', this.panelKind === 'business');
     document.getElementById('nav-market')!.classList.toggle('active', this.panelKind === 'market');
     document.getElementById('nav-contracts')!.classList.toggle('active', this.panelKind === 'contracts');
+    document.getElementById('nav-citymarket')!.classList.toggle('active', this.panelKind === 'citymarket');
     document.getElementById('nav-rankings')!.classList.toggle('active', this.panelKind === 'rankings');
     document.getElementById('nav-dev')!.classList.toggle('active', this.panelKind === 'dev');
   }
@@ -486,6 +508,7 @@ export class UI {
     (document.getElementById('st-online') as HTMLElement).textContent = String(client.online);
     this.updateContractBadge();
     this.renderCompanyBar();
+    this.renderEventBanner();
     this.renderObjectives();
     if (this.panelKind !== 'none') this.renderPanel();
   }
@@ -691,6 +714,9 @@ export class UI {
         break;
       case 'profile':
         this.renderProfilePanel(title, tabs, body);
+        break;
+      case 'citymarket':
+        this.renderCityMarketPanel(title, tabs, body);
         break;
     }
   }
@@ -1286,6 +1312,7 @@ export class UI {
         <div class="kv"><span class="k">${t('profile.recent_revenue')}</span><span class="v pos">${fmt(p.recentRevenue)}</span></div>
         <div class="kv"><span class="k">${t('profile.recent_net')}</span><span class="v ${p.recentNet >= 0 ? 'pos' : 'neg'}">${p.recentNet >= 0 ? '+' : ''}${fmt(p.recentNet)}</span></div>
       </div>
+      ${p.isSelf ? this.opportunitiesHtml(p) : ''}
       ${shareCards ? `<h4 class="profile-h">${t('profile.market_share')}</h4>${shareCards}` : ''}
       ${supplierRows ? `<h4 class="profile-h">${t('profile.supplier_ranks')}</h4>${supplierRows}` : ''}
       <h4 class="profile-h">${t('profile.owned_businesses')}</h4>
@@ -1310,6 +1337,112 @@ export class UI {
     });
   }
 
+  /** Optional own-profile hint: final products the company sells that are in
+   *  elevated demand right now — ties the event loop to the player's business. */
+  private opportunitiesHtml(p: CompanyProfile): string {
+    const m = client.cityMarket;
+    if (!m) return '';
+    const SELLS: Record<string, ProductId[]> = {
+      bakery: ['bread'], coffee_shop: ['coffee'], mini_market: ['bread', 'milk'], farm: [],
+    };
+    const mine = new Set<ProductId>();
+    for (const b of p.businesses) for (const pr of SELLS[b.type] ?? []) mine.add(pr);
+    const hot = m.demand.filter((d) => mine.has(d.product) && (d.category === 'high' || d.category === 'very_high'));
+    if (!hot.length) return '';
+    const rows = hot.map((d) =>
+      `<div class="opp-row">${PRODUCTS[d.product].emoji} ${pName(d.product)} — <b>${t(`demand.${d.category}`)}</b> (+${Math.round(d.delta * 100)}%)</div>`
+    ).join('');
+    return `<div class="opportunities"><h4 class="profile-h">${t('profile.opportunities')}</h4>${rows}</div>`;
+  }
+
+  // ================= CITY MARKET & EVENTS =================
+
+  private effectsHtml(effects: CityEventEffects): string {
+    const rows: string[] = [];
+    for (const [p, d] of Object.entries(effects.demand ?? {})) {
+      const pct = Math.round((d as number) * 100);
+      rows.push(`<span class="eff ${pct >= 0 ? 'pos' : 'neg'}">${PRODUCTS[p as ProductId].emoji} ${pName(p as ProductId)} ${pct >= 0 ? '+' : ''}${pct}%</span>`);
+    }
+    for (const [p, d] of Object.entries(effects.wholesale ?? {})) {
+      const pct = Math.round((d as number) * 100);
+      rows.push(`<span class="eff neg">${PRODUCTS[p as ProductId].emoji} ${pName(p as ProductId)} ${t('event.supply')} +${pct}%</span>`);
+    }
+    return `<div class="eff-row">${rows.join('')}</div>`;
+  }
+
+  private eventCardHtml(e: CityEventPub, kind: 'active' | 'upcoming'): string {
+    const icon = EVENT_ICON[e.type] ?? '📣';
+    const timeLabel = kind === 'active'
+      ? t('event.ends_in', { time: countdown(e.endsAt) })
+      : t('event.starts_in', { time: countdown(e.startsAt) });
+    return `<div class="event-card ${kind} ${e.major ? 'major' : 'minor'}">
+      <div class="ev-head"><span class="ev-name">${icon} ${t(`event.${e.type}`)}</span>
+        <span class="ev-time ${kind}">${timeLabel}</span></div>
+      ${this.effectsHtml(e.effects)}
+    </div>`;
+  }
+
+  private renderCityMarketPanel(title: HTMLElement, tabs: HTMLElement, body: HTMLElement): void {
+    title.textContent = t('citymarket.title');
+    tabs.innerHTML = '';
+    const m = client.cityMarket;
+    if (!m) {
+      this.setBody(body, `<p class="hint">${t('citymarket.loading')}</p>`);
+      return;
+    }
+    const events = [...m.active.map((e) => this.eventCardHtml(e, 'active')),
+                    ...m.upcoming.map((e) => this.eventCardHtml(e, 'upcoming'))].join('');
+    const demandRows = m.demand.map((d) => this.demandRowHtml(d)).join('');
+    const supplyRows = m.wholesale.map((w) => {
+      const pct = Math.round((w.modifier - 1) * 100);
+      return `<div class="kv"><span class="k">${PRODUCTS[w.product].emoji} ${pName(w.product)} ${t('citymarket.npc_supply')}</span>
+        <span class="v neg">${t('demand.expensive')} +${pct}%</span></div>`;
+    }).join('');
+
+    const html = `
+      ${events ? `<h4 class="profile-h">${t('citymarket.events')}</h4>${events}` : `<div class="hint">${t('citymarket.calm')}</div>`}
+      <h4 class="profile-h">${t('citymarket.demand')}</h4>
+      ${demandRows}
+      ${supplyRows ? `<h4 class="profile-h">${t('citymarket.npc_prices')}</h4>${supplyRows}` : ''}
+      <div class="hint">${t('citymarket.hint')}</div>`;
+    this.setBody(body, html);
+  }
+
+  private demandRowHtml(d: ProductDemand): string {
+    const pct = Math.round(d.delta * 100);
+    const cat = t(`demand.${d.category}`);
+    const arrow = d.trend === 'up' ? '↑' : d.trend === 'down' ? '↓' : '→';
+    const barPct = Math.min(100, Math.max(0, (d.effective - 0.5) / 1.5 * 100)); // 0.5..2.0 -> 0..100
+    const cls = d.category === 'very_high' || d.category === 'high' ? 'high'
+      : d.category === 'low' || d.category === 'very_low' ? 'low' : 'normal';
+    return `<div class="demand-row">
+      <div class="dm-head"><span>${PRODUCTS[d.product].emoji} ${pName(d.product)}</span>
+        <span class="dm-cat ${cls}">${cat} <b>${pct >= 0 ? '+' : ''}${pct}%</b> ${arrow}</span></div>
+      <div class="dm-bar"><div class="${cls}" style="width:${barPct}%"></div><span class="dm-mid"></span></div>
+    </div>`;
+  }
+
+  /** Small HUD banner while a MAJOR event is active (kept lightweight). */
+  private renderEventBanner(): void {
+    const el = document.getElementById('event-banner');
+    const badge = document.getElementById('nav-event-badge');
+    const m = client.cityMarket;
+    const major = m?.active.find((e) => e.major);
+    const upcoming = m?.upcoming.length ?? 0;
+    if (badge) {
+      const n = (m?.active.length ?? 0) + upcoming;
+      badge.textContent = n ? String(n) : '';
+      badge.className = m?.active.length ? 'badge live' : (upcoming ? 'badge' : '');
+    }
+    if (!el) return;
+    if (!major) { el.style.display = 'none'; el.onclick = null; return; }
+    el.style.display = '';
+    el.innerHTML = `<span class="eb-icon">${EVENT_ICON[major.type] ?? '📣'}</span>
+      <span class="eb-name">${t(`event.${major.type}`)}</span>
+      <span class="eb-time">${t('event.ends_in', { time: countdown(major.endsAt) })}</span>`;
+    el.onclick = () => { sfx.click(); client.send({ t: 'get_city_market' }); this.openPanel('citymarket'); };
+  }
+
   private renderDevPanel(title: HTMLElement, tabs: HTMLElement, body: HTMLElement): void {
     title.textContent = t('dev.title');
     tabs.innerHTML = '';
@@ -1325,6 +1458,15 @@ export class UI {
       <button class="btn small ghost" data-dev="speed" data-val="5">×5</button>
       <button class="btn small ghost" data-dev="speed" data-val="20">×20</button></div>
       <div class="mkt-row"><button class="btn small warn" data-dev="reset_business">${t('dev.reset')}</button></div>
+      <div class="mkt-row"><span style="font-size:13px">${t('dev.events')}</span>
+      <button class="btn small ghost" data-dev="event_festival">🎉</button>
+      <button class="btn small ghost" data-dev="event_university">🎓</button>
+      <button class="btn small ghost" data-dev="event_heatwave">☀️</button>
+      <button class="btn small ghost" data-dev="event_supply">⛔</button>
+      <button class="btn small ghost" data-dev="event_market_day">🧺</button></div>
+      <div class="mkt-row">
+      <button class="btn small ghost" data-dev="advance_events" data-val="60">${t('dev.advance')}</button>
+      <button class="btn small ghost" data-dev="clear_events">${t('dev.clear_events')}</button></div>
       <div class="kv"><span class="k">${t('dev.open_orders')}</span><span class="v">${client.orders.size}</span></div>
       <div class="kv"><span class="k">${t('dev.deliveries')}</span><span class="v">${client.deliveries.size}</span></div>
       <div class="kv"><span class="k">${t('dev.businesses')}</span><span class="v">${client.businesses.size}</span></div>

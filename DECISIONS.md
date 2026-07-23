@@ -137,3 +137,40 @@
   layered on cheaply in memory. Profiles expose only public data (company,
   public businesses, reputation, rankings, market share, trade counts) — never
   cash, inventory, contract pricing, or ledger entries.
+
+## V2.3 — Dynamic city demand & city events
+
+- **Demand is derived, never accumulated.** Effective city demand for each final
+  product is recomputed every tick as `clamp(1 + Σ active-event deltas, 0.5, 2.0)`.
+  Nothing stores a running modifier, so a double tick, a restart, or a missed
+  transition can never apply or remove an effect twice — the classic source of
+  economy corruption is designed out.
+- **Events are the dynamic source, base demand is stable.** Base demand stays
+  1.0 (no random walk in V2.3). All movement comes from a small, legible event
+  set with fixed, displayed percentage effects. Players never guess what an
+  event does.
+- **Demand changes volume, not price.** The multiplier scales the existing NPC
+  customer arrival rate only. Player retail prices and all player-to-player
+  marketplace/contract rules are untouched, preserving player-driven price
+  discovery — high demand becomes a decision (raise price vs. maximise volume).
+- **NPC fallback may get pricier, never unavailable.** Supply Disruption raises
+  NPC wholesale prices via a bounded multiplier (clamped, min 1x), so players
+  are never progression-blocked and Farm players get a real opportunity.
+- **Preparation window is mandatory.** Events are announced (UPCOMING) with a
+  lead time before they start, so a player can always make at least one
+  strategic move (stock inputs, raise production, sign a contract) first.
+- **Idempotent lifecycle.** `UPCOMING→ACTIVE→ENDED` transitions run in the tick
+  and are guarded by a SQL `WHERE status=<from>` update, so a transition can't
+  fire twice. Live events are reloaded on start and missed transitions resolved,
+  so restarts resume correctly.
+- **Scheduler keeps the economy readable.** At most one upcoming event and one
+  active *major* event; per-type cooldowns prevent repetition; randomized gaps
+  preserve stretches of normal economy. Timing constants are tuned short for
+  accelerated/idle play and tested via dev controls (trigger/advance/clear),
+  which are production-disabled.
+- **Competition stays real.** Market share and rankings are deliberately NOT
+  touched by events; a festival raises a player's share only through the extra
+  `final_sale` units it causes — statistics remain derived from committed sales.
+- **Inflation guardrails:** bounded demand multiplier, time-limited events,
+  existing per-business customer/stock caps and price sensitivity. No taxes or
+  sinks added (deferred).

@@ -281,3 +281,90 @@ export const RANKING_CATEGORIES: RankingCategory[] = [
   'recent_revenue', 'net_cash_flow', 'reputation', 'growth',
   'bread', 'coffee', 'milk_retail', 'wheat_supplier', 'milk_supplier',
 ];
+
+// ============================================================
+// V2.3 — Dynamic city demand & city events
+// ============================================================
+// City demand is server-authoritative shared state, one multiplier per final
+// consumer product. It is DERIVED from currently-active events every tick
+// (never accumulated), so restarts and double ticks can't corrupt it.
+export const DEMAND_PRODUCTS: ProductId[] = ['bread', 'coffee', 'milk'];
+
+// Effective demand is clamped to a safe band. Normal events stay well inside
+// 0.70–1.50; the hard clamp only guards against pathological stacking.
+export const DEMAND_MIN = 0.5;
+export const DEMAND_MAX = 2.0;
+export const WHOLESALE_MOD_MAX = 2.0; // NPC fallback never more than 3x, never gone
+
+export type DemandCategory = 'very_low' | 'low' | 'normal' | 'high' | 'very_high';
+
+/** Map an effective demand multiplier (1.0 = base) to a display category. */
+export function demandCategory(effective: number): DemandCategory {
+  if (effective <= 0.80) return 'very_low';
+  if (effective <= 0.93) return 'low';
+  if (effective < 1.10) return 'normal';
+  if (effective < 1.45) return 'high';   // e.g. Festival +40% reads HIGH
+  return 'very_high';                    // +50%+ (e.g. Festival coffee) reads VERY HIGH
+}
+
+export type CityEventType =
+  | 'city_festival'
+  | 'university_week'
+  | 'heat_wave'
+  | 'supply_disruption'
+  | 'local_market_day';
+
+export type CityEventStatus = 'upcoming' | 'active' | 'ended';
+
+/** Additive deltas: demand 0.40 = +40% customers; wholesale 0.30 = +30% price. */
+export interface CityEventEffects {
+  demand?: Partial<Record<ProductId, number>>;
+  wholesale?: Partial<Record<ProductId, number>>;
+}
+
+export interface CityEventDef {
+  type: CityEventType;
+  major: boolean;
+  effects: CityEventEffects;
+  announceSecs: number; // preparation lead time before it starts
+  durationSecs: number; // how long it stays ACTIVE
+  weight: number;       // relative scheduler likelihood
+}
+
+// Deliberately small, understandable set. Effects are additive percentage
+// deltas applied while the event is ACTIVE.
+export const CITY_EVENTS: Record<CityEventType, CityEventDef> = {
+  city_festival: {
+    type: 'city_festival', major: true,
+    effects: { demand: { bread: 0.40, coffee: 0.50, milk: 0.15 } },
+    announceSecs: 120, durationSecs: 240, weight: 2,
+  },
+  university_week: {
+    type: 'university_week', major: true,
+    effects: { demand: { coffee: 0.35, bread: 0.10, milk: 0.05 } },
+    announceSecs: 120, durationSecs: 240, weight: 2,
+  },
+  heat_wave: {
+    type: 'heat_wave', major: true,
+    effects: { demand: { milk: 0.25, coffee: -0.10 } },
+    announceSecs: 90, durationSecs: 200, weight: 2,
+  },
+  supply_disruption: {
+    type: 'supply_disruption', major: true,
+    effects: { wholesale: { wheat: 0.30, milk: 0.20 } },
+    announceSecs: 120, durationSecs: 240, weight: 2,
+  },
+  local_market_day: {
+    type: 'local_market_day', major: false,
+    effects: { demand: { bread: 0.20, milk: 0.20 } },
+    announceSecs: 45, durationSecs: 90, weight: 5,
+  },
+};
+
+export const CITY_EVENT_TYPES = Object.keys(CITY_EVENTS) as CityEventType[];
+
+// Scheduler timing (real seconds). Gaps preserve periods of normal economy;
+// a type won't recur within its cooldown so events don't feel repetitive.
+export const EVENT_GAP_MIN_SECS = 150;
+export const EVENT_GAP_MAX_SECS = 360;
+export const EVENT_TYPE_COOLDOWN_SECS = 600;

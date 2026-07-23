@@ -142,6 +142,9 @@ export class Net {
       this.sendToPlayer(playerId, { t: 'level_up', level });
       this.broadcastPlayers();
     });
+    w.on('city_market', () => {
+      this.broadcast({ t: 'city_market', market: w.toCityMarket() });
+    });
     w.on('presence', () => this.broadcastPlayers());
   }
 
@@ -181,6 +184,7 @@ export class Net {
         devTools: config.devTools,
         serverTime: Date.now(),
       });
+      this.send(ws, { t: 'city_market', market: this.world.toCityMarket() });
       this.world.recentTrades().then((trades) => this.send(ws, { t: 'trades', trades }));
       this.world.contractsForPlayer(playerId).then((contracts) => this.send(ws, { t: 'contracts', contracts }));
       if (awayReport) this.send(ws, { t: 'away', report: awayReport });
@@ -302,6 +306,9 @@ export class Net {
           if (profile) this.send(conn.ws, { t: 'company_profile', profile });
           break;
         }
+        case 'get_city_market':
+          this.send(conn.ws, { t: 'city_market', market: world.toCityMarket() });
+          break;
         case 'dev': {
           if (!config.devTools) throw new GameError('err.dev_disabled');
           const result = await world.devCommand(pid, msg.cmd, msg.value, msg.bizId);

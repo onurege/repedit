@@ -35,9 +35,18 @@ offline progression, full persistence. **This phase is implemented.**
 - Public Company Profile + City Rankings, linked navigation — **implemented**
 - Deferred to V2.3: dynamic city demand, city events/festivals
 
-## V2.3 — Dynamic City Demand & City Events  (next)
+## V2.3 — Dynamic City Demand & City Events  ✅
 
-- Demand that shifts by product/time; city events and festivals
+- Server-authoritative per-product demand multiplier — **implemented**
+- Five announced city events (festival, university, heat wave, supply
+  disruption, market day) with UPCOMING→ACTIVE→ENDED lifecycle — **implemented**
+- City Market panel, HUD banner, demand overview — **implemented**
+- Deferred to V2.4: Morning Business Brief, offline report v2
+
+## V2.4 — Morning Business Brief & Offline Report v2  (next)
+
+- Start-of-session brief summarising demand, events and opportunities
+- Richer "while you were away" report
 - **Documented only. Do not implement ahead of schedule.**
 
 ## PHASE 4 — Living City

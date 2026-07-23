@@ -3,7 +3,10 @@
 // The client only ever sends INTENT; the server owns all state.
 // ============================================================
 
-import type { BusinessType, ProductId, RankingCategory } from './defs.js';
+import type {
+  BusinessType, ProductId, RankingCategory,
+  CityEventType, CityEventStatus, CityEventEffects, DemandCategory,
+} from './defs.js';
 
 // ---------- client -> server ----------
 // Actions that target one of the player's businesses carry an optional
@@ -27,6 +30,7 @@ export type ClientMsg =
   | { t: 'dev'; cmd: string; value?: number; bizId?: number }
   | { t: 'get_rankings' }
   | { t: 'get_company_profile'; companyId: number }
+  | { t: 'get_city_market' }
   | { t: 'ping' };
 
 // ---------- server -> client ----------
@@ -167,6 +171,42 @@ export interface CityRankings {
   serverTime: number;
 }
 
+// ---------- V2.3: dynamic city demand & city events ----------
+
+export interface CityEventPub {
+  id: number;
+  type: CityEventType;
+  status: CityEventStatus;
+  effects: CityEventEffects;
+  announcedAt: number; // epoch ms
+  startsAt: number;    // epoch ms
+  endsAt: number;      // epoch ms
+  major: boolean;
+}
+
+/** Current city demand for one final-consumer product. */
+export interface ProductDemand {
+  product: ProductId;
+  effective: number;          // multiplier, 1.0 = base
+  delta: number;              // effective - 1 (e.g. +0.32)
+  category: DemandCategory;
+  trend: 'up' | 'down' | 'flat';
+}
+
+/** NPC wholesale price status for an input product (Supply Disruption etc.). */
+export interface WholesaleStatus {
+  product: ProductId;
+  modifier: number; // effective multiplier on the base wholesale price
+}
+
+export interface CityMarket {
+  demand: ProductDemand[];
+  wholesale: WholesaleStatus[];   // only inputs currently modified
+  active: CityEventPub[];
+  upcoming: CityEventPub[];
+  serverTime: number;
+}
+
 export interface BizPriv extends BizPub {
   inventory: Partial<Record<ProductId, InventoryEntry>>;
   price: number;   // retail price (coffee / bread)
@@ -282,4 +322,5 @@ export type ServerMsg =
   | { t: 'level_up'; level: number }
   | { t: 'rankings'; rankings: CityRankings }
   | { t: 'company_profile'; profile: CompanyProfile }
+  | { t: 'city_market'; market: CityMarket }
   | { t: 'pong' };

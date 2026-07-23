@@ -95,6 +95,23 @@ import {
   type CityRankings,
   type RankingBoard,
   type RankingRow,
+  DEMAND_PRODUCTS,
+  DEMAND_MIN,
+  DEMAND_MAX,
+  WHOLESALE_MOD_MAX,
+  demandCategory,
+  CITY_EVENTS,
+  CITY_EVENT_TYPES,
+  EVENT_GAP_MIN_SECS,
+  EVENT_GAP_MAX_SECS,
+  EVENT_TYPE_COOLDOWN_SECS,
+  type CityEventType,
+  type CityEventStatus,
+  type CityEventEffects,
+  type CityEventPub,
+  type CityMarket,
+  type ProductDemand,
+  type WholesaleStatus,
 } from '@district/shared';
 import { query, tx } from '../db.js';
 
@@ -224,6 +241,18 @@ export interface DeliveryRec {
   arriveAtMs: number;
 }
 
+// V2.3: a city event in memory (only upcoming/active are kept live).
+export interface EventRec {
+  id: number;
+  type: CityEventType;
+  status: CityEventStatus;
+  effects: CityEventEffects;
+  announcedAtMs: number;
+  startsAtMs: number;
+  endsAtMs: number;
+  major: boolean;
+}
+
 // Append-only economic ledger entry (see migrations/002).
 interface LedgerEntry {
   playerId: number;
@@ -311,6 +340,14 @@ export class World extends EventEmitter {
   orders = new Map<number, OrderRec>();
   deliveries = new Map<number, DeliveryRec>();
   contracts = new Map<number, ContractRec>();
+  // V2.3: live (upcoming + active) city events and derived demand state.
+  cityEvents: EventRec[] = [];
+  private demand = new Map<ProductId, number>();       // effective multiplier
+  private demandTrend = new Map<ProductId, 'up' | 'down' | 'flat'>();
+  private wholesaleMods = new Map<ProductId, number>();  // >1 while modified
+  private lastEventTypeAtMs = new Map<CityEventType, number>();
+  private nextEventAtMs = 0;
+  private marketSig = '';   // signature of current market; emit only on change
   timeScale = 1;
   private tickTimer: ReturnType<typeof setInterval> | null = null;
   private ticksSinceFlush = 0;
@@ -555,6 +592,23 @@ export class World extends EventEmitter {
       }
     }
 
+    // V2.3: restore live city events and resolve any transitions missed while
+    // the server was down, then derive current demand.
+    const evRows = await query(`SELECT * FROM city_events WHERE status IN ('upcoming','active')`);
+    this.cityEvents = evRows.rows.map((r) => ({
+      id: r.id,
+      type: r.event_type as CityEventType,
+      status: r.status as CityEventStatus,
+      effects: r.effects as CityEventEffects,
+      announcedAtMs: new Date(r.announced_at).getTime(),
+      startsAtMs: new Date(r.starts_at).getTime(),
+      endsAtMs: new Date(r.ends_at).getTime(),
+      major: CITY_EVENTS[r.event_type as CityEventType]?.major ?? false,
+    }));
+    for (const e of this.cityEvents) this.lastEventTypeAtMs.set(e.type, e.announcedAtMs);
+    this.nextEventAtMs = now + this.randInt(EVENT_GAP_MIN_SECS, EVENT_GAP_MAX_SECS) * 1000;
+    await this.processEvents(now);
+
     await this.flush();
     console.log(
       `[world] loaded ${this.players.size} players, ${this.businesses.size} businesses, ` +
@@ -702,6 +756,7 @@ export class World extends EventEmitter {
         await this.executeContract(c.id);
       }
     }
+    await this.processEvents(now);
     this.ticksSinceFlush++;
     if (this.ticksSinceFlush >= 5) {
       this.ticksSinceFlush = 0;
@@ -718,6 +773,206 @@ export class World extends EventEmitter {
       this.simulate(biz, step, true);
       remaining -= step;
     }
+  }
+
+  // ============================================================
+  // V2.3 — dynamic city demand & city events
+  // ============================================================
+
+  /** Effective demand multiplier for a final product (1.0 = base). */
+  cityDemand(product: ProductId): number {
+    return this.demand.get(product) ?? 1;
+  }
+
+  /** Effective NPC wholesale price multiplier for an input product. */
+  private wholesaleModifier(product: ProductId): number {
+    return this.wholesaleMods.get(product) ?? 1;
+  }
+
+  /**
+   * Recompute demand & wholesale multipliers from the currently-ACTIVE events.
+   * Derived fresh every tick (never accumulated), so a restart or a double tick
+   * can never apply or remove a modifier twice.
+   */
+  private recomputeDemand(): void {
+    const demandDelta = new Map<ProductId, number>();
+    const wholesaleDelta = new Map<ProductId, number>();
+    for (const e of this.cityEvents) {
+      if (e.status !== 'active') continue;
+      for (const [p, d] of Object.entries(e.effects.demand ?? {})) {
+        demandDelta.set(p as ProductId, (demandDelta.get(p as ProductId) ?? 0) + (d as number));
+      }
+      for (const [p, d] of Object.entries(e.effects.wholesale ?? {})) {
+        wholesaleDelta.set(p as ProductId, (wholesaleDelta.get(p as ProductId) ?? 0) + (d as number));
+      }
+    }
+    for (const p of DEMAND_PRODUCTS) {
+      const prev = this.demand.get(p) ?? 1;
+      const eff = Math.min(DEMAND_MAX, Math.max(DEMAND_MIN, 1 + (demandDelta.get(p) ?? 0)));
+      this.demand.set(p, eff);
+      const d = eff - prev;
+      if (d > 0.001) this.demandTrend.set(p, 'up');
+      else if (d < -0.001) this.demandTrend.set(p, 'down');
+      else if (!this.demandTrend.has(p)) this.demandTrend.set(p, 'flat');
+    }
+    const wm = new Map<ProductId, number>();
+    for (const [p, d] of wholesaleDelta) {
+      wm.set(p, Math.min(WHOLESALE_MOD_MAX, Math.max(1, 1 + d)));
+    }
+    this.wholesaleMods = wm;
+  }
+
+  /** Stable signature of the live event set, so we emit only on real change. */
+  private marketSignature(): string {
+    return this.cityEvents
+      .map((e) => `${e.id}:${e.status}`)
+      .sort()
+      .join('|');
+  }
+
+  private async transitionEvent(e: EventRec, to: CityEventStatus): Promise<boolean> {
+    const from = e.status;
+    // Guard on the current status so a transition can never be applied twice.
+    const res = await query(
+      `UPDATE city_events SET status=$1 WHERE id=$2 AND status=$3 RETURNING id`,
+      [to, e.id, from]
+    );
+    if (!res.rowCount) return false;
+    e.status = to;
+    console.log(`[event] ${e.type} #${e.id} ${from} -> ${to}`);
+    return true;
+  }
+
+  private randInt(min: number, max: number): number {
+    return Math.floor(min + Math.random() * (max - min + 1));
+  }
+
+  private weightedPick(types: CityEventType[]): CityEventType {
+    const total = types.reduce((s, t) => s + CITY_EVENTS[t].weight, 0);
+    let r = Math.random() * total;
+    for (const t of types) {
+      r -= CITY_EVENTS[t].weight;
+      if (r <= 0) return t;
+    }
+    return types[types.length - 1];
+  }
+
+  /** Create an UPCOMING event (announced now, starting after its lead time). */
+  async createEvent(
+    type: CityEventType,
+    opts: { announceSecs?: number; durationSecs?: number } = {},
+    now = Date.now()
+  ): Promise<EventRec> {
+    const def = CITY_EVENTS[type];
+    const announceSecs = opts.announceSecs ?? def.announceSecs;
+    const durationSecs = opts.durationSecs ?? def.durationSecs;
+    const startsAt = now + announceSecs * 1000;
+    const endsAt = startsAt + durationSecs * 1000;
+    const res = await query(
+      `INSERT INTO city_events (event_type, status, effects, announced_at, starts_at, ends_at)
+       VALUES ($1,'upcoming',$2, to_timestamp($3/1000.0), to_timestamp($4/1000.0), to_timestamp($5/1000.0))
+       RETURNING id`,
+      [type, JSON.stringify(def.effects), now, startsAt, endsAt]
+    );
+    const rec: EventRec = {
+      id: res.rows[0].id, type, status: 'upcoming', effects: def.effects,
+      announcedAtMs: now, startsAtMs: startsAt, endsAtMs: endsAt, major: def.major,
+    };
+    this.cityEvents.push(rec);
+    this.lastEventTypeAtMs.set(type, now);
+    console.log(`[event] scheduled ${type} #${rec.id} starts in ${announceSecs}s, lasts ${durationSecs}s`);
+    return rec;
+  }
+
+  /** Auto-scheduler: keeps at most one upcoming event and one active major. */
+  private async maybeScheduleEvent(now: number): Promise<boolean> {
+    if (this.cityEvents.some((e) => e.status === 'upcoming')) return false;
+    if (now < this.nextEventAtMs) return false;
+    const activeMajor = this.cityEvents.some((e) => e.status === 'active' && e.major);
+    const pool = CITY_EVENT_TYPES.filter((t) => {
+      if (activeMajor && CITY_EVENTS[t].major) return false; // never two majors
+      const last = this.lastEventTypeAtMs.get(t) ?? -Infinity;
+      return now - last >= EVENT_TYPE_COOLDOWN_SECS * 1000;   // no quick repeats
+    });
+    if (!pool.length) { this.nextEventAtMs = now + 30_000; return false; }
+    await this.createEvent(this.weightedPick(pool), {}, now);
+    this.nextEventAtMs = now + this.randInt(EVENT_GAP_MIN_SECS, EVENT_GAP_MAX_SECS) * 1000;
+    return true;
+  }
+
+  /** Per-tick event processing: transitions, scheduling, demand refresh. */
+  async processEvents(now = Date.now()): Promise<void> {
+    for (const e of this.cityEvents) {
+      if (e.status === 'upcoming' && now >= e.startsAtMs) await this.transitionEvent(e, 'active');
+    }
+    for (const e of this.cityEvents) {
+      if (e.status === 'active' && now >= e.endsAtMs) await this.transitionEvent(e, 'ended');
+    }
+    this.cityEvents = this.cityEvents.filter((e) => e.status !== 'ended');
+    await this.maybeScheduleEvent(now);
+    this.recomputeDemand();
+    const sig = this.marketSignature();
+    if (sig !== this.marketSig) {
+      this.marketSig = sig;
+      this.emit('city_market');
+    }
+  }
+
+  /** DEV: advance all live events by `seconds` (fast-forward for testing). */
+  async advanceEvents(seconds: number): Promise<void> {
+    const ms = seconds * 1000;
+    for (const e of this.cityEvents) {
+      e.announcedAtMs -= ms; e.startsAtMs -= ms; e.endsAtMs -= ms;
+    }
+    await query(
+      `UPDATE city_events SET announced_at = announced_at - ($1 || ' seconds')::interval,
+         starts_at = starts_at - ($1 || ' seconds')::interval,
+         ends_at = ends_at - ($1 || ' seconds')::interval
+       WHERE status IN ('upcoming','active')`,
+      [seconds]
+    );
+    this.nextEventAtMs -= ms;
+    await this.processEvents();
+  }
+
+  /** DEV: end every live event immediately. */
+  async clearEvents(): Promise<void> {
+    for (const e of this.cityEvents) await this.transitionEvent(e, 'ended');
+    this.cityEvents = this.cityEvents.filter((e) => e.status !== 'ended');
+    this.recomputeDemand();
+    this.marketSig = this.marketSignature();
+    this.emit('city_market');
+  }
+
+  toCityEventPub(e: EventRec): CityEventPub {
+    return {
+      id: e.id, type: e.type, status: e.status, effects: e.effects,
+      announcedAt: e.announcedAtMs, startsAt: e.startsAtMs, endsAt: e.endsAtMs, major: e.major,
+    };
+  }
+
+  toCityMarket(): CityMarket {
+    const demand: ProductDemand[] = DEMAND_PRODUCTS.map((p) => {
+      const eff = this.cityDemand(p);
+      return {
+        product: p,
+        effective: Math.round(eff * 1000) / 1000,
+        delta: Math.round((eff - 1) * 1000) / 1000,
+        category: demandCategory(eff),
+        trend: this.demandTrend.get(p) ?? 'flat',
+      };
+    });
+    const wholesale: WholesaleStatus[] = [];
+    for (const [p, m] of this.wholesaleMods) {
+      if (m > 1.001) wholesale.push({ product: p, modifier: Math.round(m * 1000) / 1000 });
+    }
+    return {
+      demand,
+      wholesale,
+      active: this.cityEvents.filter((e) => e.status === 'active').map((e) => this.toCityEventPub(e)),
+      upcoming: this.cityEvents.filter((e) => e.status === 'upcoming').map((e) => this.toCityEventPub(e)),
+      serverTime: Date.now(),
+    };
   }
 
   /** Core economy simulation for one business over dt seconds. */
@@ -768,7 +1023,8 @@ export class World extends EventEmitter {
         biz.custAccum +=
           lv.customersPerSec *
           priceDemandMultiplier(biz.price, RETAIL_BASE.coffee) *
-          repDemandMultiplier(biz.reputation) * dt;
+          repDemandMultiplier(biz.reputation) *
+          this.cityDemand('coffee') * dt;
         const arrivals = Math.floor(biz.custAccum);
         biz.custAccum -= arrivals;
         this.applyRetail(biz, owner, 'coffee', biz.price, arrivals, silent);
@@ -794,7 +1050,8 @@ export class World extends EventEmitter {
         biz.custAccum +=
           lv.customersPerSec *
           priceDemandMultiplier(biz.price, RETAIL_BASE.bread) *
-          repDemandMultiplier(biz.reputation) * dt;
+          repDemandMultiplier(biz.reputation) *
+          this.cityDemand('bread') * dt;
         const arrivals = Math.floor(biz.custAccum);
         biz.custAccum -= arrivals;
         this.applyRetail(biz, owner, 'bread', biz.price, arrivals, silent);
@@ -806,11 +1063,11 @@ export class World extends EventEmitter {
         const rep = repDemandMultiplier(biz.reputation);
         // Two independent customer streams: bread (custAccum) and milk
         // (prodAccum, unused by retail businesses otherwise).
-        biz.custAccum += lv.customersPerSec * priceDemandMultiplier(biz.price, RETAIL_BASE.bread) * rep * dt;
+        biz.custAccum += lv.customersPerSec * priceDemandMultiplier(biz.price, RETAIL_BASE.bread) * rep * this.cityDemand('bread') * dt;
         const breadArrivals = Math.floor(biz.custAccum);
         biz.custAccum -= breadArrivals;
         this.applyRetail(biz, owner, 'bread', biz.price, breadArrivals, silent);
-        biz.prodAccum += lv.customersPerSec * priceDemandMultiplier(biz.price2, RETAIL_BASE.milk) * rep * dt;
+        biz.prodAccum += lv.customersPerSec * priceDemandMultiplier(biz.price2, RETAIL_BASE.milk) * rep * this.cityDemand('milk') * dt;
         const milkArrivals = Math.floor(biz.prodAccum);
         biz.prodAccum -= milkArrivals;
         this.applyRetail(biz, owner, 'milk', biz.price2, milkArrivals, silent);
@@ -1121,8 +1378,11 @@ export class World extends EventEmitter {
     const biz = this.requireOwnedBiz(playerId, bizId);
     qty = Math.floor(qty);
     if (!Number.isFinite(qty) || qty < 1 || qty > MARKET_MAX_QTY) throw new GameError('err.invalid_qty');
-    const unit = NPC_WHOLESALE_PRICES[product];
-    if (!unit) throw new GameError('err.wholesale_no_product');
+    const baseUnit = NPC_WHOLESALE_PRICES[product];
+    if (!baseUnit) throw new GameError('err.wholesale_no_product');
+    // V2.3: a Supply Disruption event temporarily raises NPC fallback prices
+    // (never removes supply — players are never progression-blocked).
+    const unit = Math.max(1, Math.round(baseUnit * this.wholesaleModifier(product)));
     const cap = capacityFor(biz, product);
     if (cap <= 0) throw new GameError('err.cannot_store_product', { bizType: biz.type, product });
     const rec = inv(biz, product);
@@ -1948,6 +2208,28 @@ export class World extends EventEmitter {
         this.emit('company', company);
         return `company xp +${v > 0 ? v : 1000} (lvl ${company.level})`;
       }
+      case 'event_festival':
+      case 'event_university':
+      case 'event_heatwave':
+      case 'event_supply':
+      case 'event_market_day': {
+        const map: Record<string, CityEventType> = {
+          event_festival: 'city_festival', event_university: 'university_week',
+          event_heatwave: 'heat_wave', event_supply: 'supply_disruption',
+          event_market_day: 'local_market_day',
+        };
+        // A short announce window keeps dev/E2E fast while still exercising the
+        // upcoming -> active transition (v overrides the announce seconds).
+        const rec = await this.createEvent(map[cmd], { announceSecs: v > 0 ? v : 5 });
+        await this.processEvents();
+        return `event ${rec.type} #${rec.id} upcoming`;
+      }
+      case 'advance_events':
+        await this.advanceEvents(v > 0 ? v : 30);
+        return `advanced events by ${v > 0 ? v : 30}s`;
+      case 'clear_events':
+        await this.clearEvents();
+        return 'events cleared';
       case 'speed':
         this.timeScale = Math.min(60, Math.max(1, v || 1));
         return `time scale x${this.timeScale}`;

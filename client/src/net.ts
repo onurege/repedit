@@ -17,6 +17,7 @@ import type {
   CompanyPriv,
   CityRankings,
   CompanyProfile,
+  CityMarket,
 } from '@district/shared';
 import { t } from './i18n.js';
 
@@ -48,6 +49,7 @@ export class GameClient {
   contracts = new Map<number, ContractPub>();
   rankings: CityRankings | null = null;
   companyProfile: CompanyProfile | null = null;
+  cityMarket: CityMarket | null = null;
   connected = false;
 
   private ws: WebSocket | null = null;
@@ -294,6 +296,11 @@ export class GameClient {
       case 'company_profile':
         this.companyProfile = msg.profile;
         this.emit('company_profile', msg.profile);
+        break;
+      case 'city_market':
+        this.cityMarket = msg.market;
+        this.emit('city_market', msg.market);
+        this.emit('update');
         break;
     }
   }

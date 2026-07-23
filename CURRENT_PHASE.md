@@ -1,4 +1,47 @@
-# V2.2 — MARKET SHARE, COMPANY PROFILE & CITY RANKINGS (current)
+# V2.3 — DYNAMIC CITY DEMAND & CITY EVENTS (current)
+
+The first **dynamic economy** layer. The city now runs scheduled events that
+shift consumer demand, so players can read an upcoming situation, prepare
+(stock inputs, raise production, sign contracts), and profit if they
+anticipated correctly. No new economy mechanics, prices, or businesses — just
+a demand multiplier and an event schedule on top of the existing simulation.
+
+- **City demand state** for the three final products (**Bread, Coffee, Milk
+  retail**): a server-authoritative multiplier, **derived fresh each tick from
+  the currently-active events** (never accumulated), clamped to a safe band
+  (0.5–2.0; events normally stay 0.7–1.5). It multiplies the existing customer
+  arrival rate, so demand changes *how many NPCs buy* — player prices and
+  player-to-player trades are never touched.
+- **Five city events**, announced ahead of time so there's a preparation
+  window: **City Festival** (bread +40%, coffee +50%, milk +15%), **University
+  Week** (coffee +35%…), **Heat Wave** (milk +25%, coffee −10%), **Supply
+  Disruption** (raises NPC wholesale wheat +30% / milk +20% — inputs get
+  pricier, never unavailable), **Local Market Day** (small, frequent; bread &
+  milk +20%). Effects and exact percentages are always shown.
+- **Lifecycle** `UPCOMING → ACTIVE → ENDED`, persisted in `city_events`
+  (migration 007). Transitions are guarded by a status check so a double tick
+  or a restart can never apply or remove a modifier twice; demand is
+  re-derived, not toggled. A lightweight scheduler keeps at most one upcoming
+  event and one active *major* event, with per-type cooldowns and normal-economy
+  gaps between events.
+- **UI**: a **City Market** panel (active/upcoming events with live countdowns
+  and exact effects, a demand overview with VERY LOW…VERY HIGH categories and
+  trend arrows, and NPC wholesale price status), a compact HUD banner while a
+  major event is active, a nav badge, and an optional "Current Opportunities"
+  line on the player's own profile.
+- **Market share & rankings are untouched** — they keep deriving from real
+  `final_sale` activity, so a festival that boosts a player's bread sales raises
+  their bread market share *through actual sales*, never by awarding points.
+- **Dev-only controls** (trigger each event, advance event time, clear events)
+  drive tests and are disabled in production like all dev tools.
+
+All 76 unit tests (incl. 8 new event tests) and six browser E2Es (golden-path,
+supply-chain, contract, company, rankings, events) pass; production build
+succeeds.
+
+---
+
+# V2.2 — MARKET SHARE, COMPANY PROFILE & CITY RANKINGS
 
 The first city-wide **competition** layer. Players can now answer "how big is
 my company, what am I best at, and who is beating me?" — without any new
