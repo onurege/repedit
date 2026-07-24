@@ -159,6 +159,15 @@ export class Net {
       }
     });
     w.on('chat_deleted', (messageId: number) => this.broadcast({ t: 'chat_deleted', messageId }));
+    // V2.7 Phase 3: direct messaging & offers — fan out to the two parties only.
+    w.on('dm', ({ fromId, toId, message }: { fromId: number; toId: number; message: any }) => {
+      this.sendToPlayer(fromId, { t: 'dm', otherId: toId, message: { ...message, self: true } });
+      this.sendToPlayer(toId, { t: 'dm', otherId: fromId, message: { ...message, self: false } });
+    });
+    w.on('offer', (o: any) => {
+      this.sendToPlayer(o.buyerPlayer, { t: 'offer', offer: w.toOfferPub(o, o.buyerPlayer) });
+      this.sendToPlayer(o.sellerPlayer, { t: 'offer', offer: w.toOfferPub(o, o.sellerPlayer) });
+    });
     // V2.7 Phase 2: admin realtime effects.
     w.on('push_state', ({ playerId }: { playerId: number }) => this.pushOwnState(playerId));
     w.on('admin_force_logout', ({ playerId, reason }: { playerId: number; reason: string | null }) => {
@@ -521,6 +530,38 @@ export class Net {
           break;
         case 'admin_audit':
           this.send(conn.ws, { t: 'admin_audit', entries: await world.adminRecentAudit(pid, msg.limit) });
+          break;
+        // ---- V2.7 Phase 3: direct messaging & offers ----
+        case 'get_conversations':
+          this.send(conn.ws, { t: 'conversations', list: await world.listConversations(pid) });
+          break;
+        case 'get_conversation': {
+          const { messages, offers } = await world.getConversation(pid, msg.otherId);
+          this.send(conn.ws, { t: 'conversation', otherId: msg.otherId, messages, offers });
+          break;
+        }
+        case 'dm_send':
+          await world.sendDirectMessage(pid, msg.toId, msg.body);
+          break;
+        case 'dm_report':
+          await world.reportDirectMessage(pid, msg.messageId, msg.reason, msg.note);
+          this.send(conn.ws, { t: 'toast', code: 'toast.chat_reported', kind: 'info' });
+          break;
+        case 'offer_create':
+          await world.createOffer(pid, msg.toBizId, msg.side, msg.product, msg.qty, msg.unitPrice, msg.expiresSecs, msg.fromBizId);
+          break;
+        case 'offer_counter':
+          await world.counterOffer(pid, msg.offerId, msg.qty, msg.unitPrice, msg.version);
+          break;
+        case 'offer_accept':
+          await world.acceptOffer(pid, msg.offerId, msg.version);
+          this.send(conn.ws, { t: 'toast', code: 'toast.offer_accepted', kind: 'success' });
+          break;
+        case 'offer_reject':
+          await world.rejectOffer(pid, msg.offerId);
+          break;
+        case 'offer_cancel':
+          await world.cancelOffer(pid, msg.offerId);
           break;
         case 'dev': {
           if (!config.devTools) throw new GameError('err.dev_disabled');

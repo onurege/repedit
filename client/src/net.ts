@@ -29,6 +29,9 @@ import type {
   AdminPlayerRow,
   AdminPlayerDetail,
   AdminAuditEntry,
+  ConversationSummary,
+  DirectMessagePub,
+  OfferPub,
 } from '@district/shared';
 import { t } from './i18n.js';
 
@@ -72,6 +75,9 @@ export class GameClient {
   adminPlayers: AdminPlayerRow[] = [];
   adminPlayerDetail: AdminPlayerDetail | null = null;
   adminAudit: AdminAuditEntry[] = [];
+  conversations: ConversationSummary[] = [];
+  activeConv: { otherId: number; messages: DirectMessagePub[]; offers: OfferPub[] } | null = null;
+  offers = new Map<number, OfferPub>();
   tutorial: TutorialState | null = null;
   updatesUnseen: UpdatePub[] = [];
   updatesAll: UpdatePub[] = [];
@@ -387,6 +393,29 @@ export class GameClient {
         break;
       case 'force_logout':
         this.emit('force_logout', msg.reason);
+        break;
+      case 'conversations':
+        this.conversations = msg.list;
+        this.emit('dm');
+        break;
+      case 'conversation':
+        this.activeConv = { otherId: msg.otherId, messages: msg.messages, offers: msg.offers };
+        for (const o of msg.offers) this.offers.set(o.id, o);
+        this.emit('dm');
+        break;
+      case 'dm': {
+        if (this.activeConv && this.activeConv.otherId === msg.otherId) this.activeConv.messages.push(msg.message);
+        this.emit('dm', msg);
+        break;
+      }
+      case 'offer':
+        this.offers.set(msg.offer.id, msg.offer);
+        if (this.activeConv && this.activeConv.otherId === msg.offer.conversationWith) {
+          const i = this.activeConv.offers.findIndex((o) => o.id === msg.offer.id);
+          if (i >= 0) this.activeConv.offers[i] = msg.offer; else this.activeConv.offers.push(msg.offer);
+        }
+        this.emit('offer', msg.offer);
+        this.emit('dm');
         break;
       case 'wholesale':
         this.wholesale = msg.wholesale;

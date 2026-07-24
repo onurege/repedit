@@ -119,7 +119,58 @@ export interface AdminReportEntry {
   at: number;
 }
 
+// ---------- V2.7 Phase 3: Direct messaging & trade offers ----------
+
+export type OfferStatus = 'pending' | 'countered' | 'accepted' | 'rejected' | 'expired' | 'cancelled';
+export type OfferSide = 'buy' | 'sell';
+
+/** A private DM (or an offer-event marker) in a company conversation. */
+export interface DirectMessagePub {
+  id: number;
+  senderId: number | null;
+  senderName: string;
+  kind: 'text' | 'offer';
+  body: string | null;
+  offerId: number | null;
+  at: number;
+  self: boolean;
+}
+
+/** A negotiated trade offer, from the viewing player's perspective. */
+export interface OfferPub {
+  id: number;
+  conversationWith: number;   // the other player's id
+  product: ProductId;
+  side: OfferSide;            // from the ORIGINAL proposer's perspective
+  buyerPlayer: number;
+  sellerPlayer: number;
+  buyerBizId: number;
+  sellerBizId: number;
+  qty: number;               // current actionable terms
+  price: number;
+  total: number;
+  status: OfferStatus;
+  proposedBy: number;        // who made the current version
+  awaitingPlayer: number;    // who must respond
+  version: number;
+  expiresAt: number;
+  iAmBuyer: boolean;
+  canAct: boolean;           // true if it's my turn on a live offer
+}
+
+/** One entry in the conversation list. */
+export interface ConversationSummary {
+  otherId: number;
+  otherName: string;
+  otherCompany: string | null;
+  online: boolean;
+  lastBody: string | null;
+  lastAt: number;
+  unread: number;
+}
+
 export type ClientMsg =
+
 
   | { t: 'choose_business'; type: BusinessType }
   | { t: 'open_business'; lotId: string; type: BusinessType }
@@ -171,6 +222,16 @@ export type ClientMsg =
   | { t: 'admin_rename_business'; bizId: number; name: string }
   | { t: 'admin_hard_delete'; playerId: number; confirmName: string; reason?: string }
   | { t: 'admin_audit'; limit?: number }
+  // ---- V2.7 Phase 3: direct messaging & offers ----
+  | { t: 'get_conversations' }
+  | { t: 'get_conversation'; otherId: number }
+  | { t: 'dm_send'; toId: number; body: string }
+  | { t: 'dm_report'; messageId: number; reason: ChatReportReason; note?: string }
+  | { t: 'offer_create'; toBizId: number; fromBizId?: number; side: OfferSide; product: ProductId; qty: number; unitPrice: number; expiresSecs?: number }
+  | { t: 'offer_counter'; offerId: number; qty: number; unitPrice: number; version: number }
+  | { t: 'offer_accept'; offerId: number; version: number }
+  | { t: 'offer_reject'; offerId: number }
+  | { t: 'offer_cancel'; offerId: number }
   | { t: 'ping' };
 
 // ---------- server -> client ----------
@@ -618,4 +679,9 @@ export type ServerMsg =
   | { t: 'admin_player_detail'; detail: AdminPlayerDetail }
   | { t: 'admin_audit'; entries: AdminAuditEntry[] }
   | { t: 'force_logout'; reason: string | null }
+  // ---- V2.7 Phase 3: direct messaging & offers ----
+  | { t: 'conversations'; list: ConversationSummary[] }
+  | { t: 'conversation'; otherId: number; messages: DirectMessagePub[]; offers: OfferPub[] }
+  | { t: 'dm'; otherId: number; message: DirectMessagePub }
+  | { t: 'offer'; offer: OfferPub }
   | { t: 'pong' };

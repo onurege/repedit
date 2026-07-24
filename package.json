@@ -28,7 +28,8 @@
     "e2e:districts": "node e2e/districts.mjs",
     "e2e:storage": "node e2e/storage.mjs",
     "e2e:chat": "node e2e/chat.mjs",
-    "e2e:admin": "node e2e/admin.mjs"
+    "e2e:admin": "node e2e/admin.mjs",
+    "e2e:negotiation": "node e2e/negotiation.mjs"
   },
   "devDependencies": {
     "npm-run-all": "^4.1.5",

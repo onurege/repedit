@@ -451,3 +451,42 @@ foundation and the existing WebSocket stack — no parallel admin backend.
 
 Not in Phase 2 (later P0/P1 phases): direct messaging, live offers/counter
 offers, urgent city orders, rival alerts, city news, player feedback.
+
+### Phase 3 — Direct messaging & live negotiation
+
+Turns another real company into a supplier/buyer/negotiation partner in-game.
+Built on the Phase 1 WebSocket/moderation and Phase 2 audit foundations; reuses
+the marketplace/contract economic discipline and the V2.6.2 storage guard — no
+new logistics or realtime stack.
+
+- **DM architecture.** One conversation per unordered player pair
+  (`direct_conversations`), messages denormalise the author so history survives
+  deletion, unread is a per-participant read cursor (`direct_reads`). Sending is
+  length-capped, markup/control-char sanitised, rate-limited and mute-checked
+  server-side; a report is one-per-message-per-reporter. Conversations are
+  structurally private — a query only ever returns the caller's own pair.
+- **Offer state model.** A `trade_offers` head carries the current actionable
+  terms + `status` (pending / countered / accepted / rejected / expired /
+  cancelled); every version is appended to `trade_offer_versions` as immutable
+  negotiation history. Roles (buyer/seller player + business) are FIXED at
+  creation from the proposer's side; counters change only qty/price and flip
+  whose turn it is (`awaiting_player`). Only the latest version is executable.
+- **Authorization & exactly-once.** Every action is server-authorized: only a
+  participant can act, only the awaiting party can accept/counter/reject, and
+  the client-passed `version` must match (stale guard). Accept mirrors
+  fulfillOrder discipline — synchronous in-memory validate+mutate, a per-offer
+  lock, and a DB `UPDATE … WHERE status IN (pending,countered) AND version=$
+  RETURNING` guard — so a duplicate, concurrent, reconnect-replayed or spoofed
+  accept can never move money or goods twice. A client cannot alter price/qty
+  after creation; those live only server-side.
+- **Storage & delivery.** Accept reuses the V2.6.2 guard: the full quantity must
+  fit the buyer's storage (physical + incoming) or the accept is rejected — a
+  direct trade can never overflow. Execution creates exactly one delivery via
+  the existing engine; if it later can't fit on arrival, the existing
+  WAITING_FOR_STORAGE behaviour remains authoritative. Money + stock settle once
+  at accept and record `DIRECT_SELL`/`DIRECT_BUY` ledger rows.
+- **Expiration.** Offers carry a persisted `expires_at`; a tick sweep retires
+  past-deadline live offers (restart-safe), and an expired offer cannot execute.
+  The client countdown is informational only — server time is authoritative.
+
+Not in Phase 3 (later): urgent city orders, rival alerts, city news, feedback.
