@@ -10,7 +10,7 @@ import {
   CONTRACT_FREQUENCY_SECS, LOTS, BUSINESS_CAPACITY, businessOpenCost,
   DISTRICTS, type DistrictId, type DistrictOccupancy,
   companyCapacity, COMPANY_NAME_MIN, COMPANY_NAME_MAX, BUSINESS_NAME_MIN, BUSINESS_NAME_MAX,
-  type BizPub, type OrderPub, type AwayReport, type ProductId, type ContractPub,
+  type BizPub, type OrderPub, type AwayReport, type ProductId, type ContractPub, type ChatMessagePub, type ChatReportReason,
   type BusinessType, type CompanyProfile, type RankingBoard, type CityRankings,
   type CityMarket, type CityEventPub, type ProductDemand, type CityEventEffects,
   TUTORIAL_STEPS, TUTORIAL_LAST_STEP,
@@ -25,7 +25,7 @@ const BIZ_ICON: Record<string, string> = {
   farm: '🐄', coffee_shop: '☕', bakery: '🥖', mini_market: '🛒',
 };
 
-type PanelKind = 'none' | 'business' | 'market' | 'wholesale' | 'dev' | 'info' | 'contracts' | 'rankings' | 'profile' | 'citymarket' | 'news' | 'citystatus';
+type PanelKind = 'none' | 'business' | 'market' | 'wholesale' | 'dev' | 'info' | 'contracts' | 'rankings' | 'profile' | 'citymarket' | 'news' | 'citystatus' | 'chat';
 
 const EVENT_ICON: Record<string, string> = {
   city_festival: '🎉', university_week: '🎓', heat_wave: '☀️',
@@ -121,6 +121,22 @@ export class UI {
     client.on('tutorial', () => this.renderMira());
     client.on('announcement', (a: AnnouncementPub) => {
       this.toast(`📢 ${a.title}`, a.priority === 'critical' ? 'error' : 'info');
+    });
+    // V2.7 Phase 1: City Chat live updates.
+    client.on('chat', (m?: ChatMessagePub) => {
+      if (this.panelKind === 'chat') {
+        this.renderChatPanel(
+          document.getElementById('panel-title')!,
+          document.getElementById('panel-tabs')!,
+          document.getElementById('panel-body')!
+        );
+      } else if (m && !m.self) {
+        this.chatUnread++;
+        this.updateChatBadge();
+      }
+    });
+    client.on('chat_muted', () => {
+      if (client.chatMuted) this.toast(t('chat.you_are_muted'), 'error');
     });
     client.on('level_up', (level: number) => {
       sfx.levelUp();
@@ -385,6 +401,7 @@ export class UI {
         <button id="nav-citymarket">${t('nav.citymarket')} <span id="nav-event-badge"></span></button>
         <button id="nav-rankings">${t('nav.rankings')}</button>
         <button id="nav-news">${t('nav.news')} <span id="nav-news-badge"></span></button>
+        <button id="nav-chat">${t('nav.chat')} <span id="nav-chat-badge"></span></button>
         <button id="nav-dev" style="display:none">${t('nav.dev')}</button>
       </div>
       <div class="district-bar" id="district-bar"></div>
@@ -439,6 +456,12 @@ export class UI {
       sfx.click();
       client.send({ t: 'get_announcements' });
       this.openPanel('news');
+    });
+    document.getElementById('nav-chat')!.addEventListener('click', () => {
+      sfx.click();
+      client.send({ t: 'get_chat' });
+      this.chatUnread = 0;
+      this.openPanel('chat');
     });
     document.getElementById('hud-logout')!.addEventListener('click', () => {
       sfx.click();
@@ -516,6 +539,7 @@ export class UI {
     document.getElementById('nav-citymarket')!.classList.toggle('active', this.panelKind === 'citymarket');
     document.getElementById('nav-rankings')!.classList.toggle('active', this.panelKind === 'rankings');
     document.getElementById('nav-news')!.classList.toggle('active', this.panelKind === 'news');
+    document.getElementById('nav-chat')!.classList.toggle('active', this.panelKind === 'chat');
     document.getElementById('nav-dev')!.classList.toggle('active', this.panelKind === 'dev');
   }
 
@@ -903,6 +927,9 @@ export class UI {
         break;
       case 'citymarket':
         this.renderCityMarketPanel(title, tabs, body);
+        break;
+      case 'chat':
+        this.renderChatPanel(title, tabs, body);
         break;
       case 'news':
         this.renderNewsPanel(title, tabs, body);
@@ -1823,6 +1850,89 @@ export class UI {
   }
 
   private newsTab = 'announcements';
+  private chatUnread = 0;
+
+  // ================= V2.7 Phase 1: City Chat =================
+
+  private updateChatBadge(): void {
+    const badge = document.getElementById('nav-chat-badge');
+    if (!badge) return;
+    badge.textContent = this.chatUnread > 0 ? String(Math.min(99, this.chatUnread)) : '';
+    badge.className = this.chatUnread > 0 ? 'badge' : '';
+  }
+
+  private renderChatPanel(title: HTMLElement, tabs: HTMLElement, body: HTMLElement): void {
+    title.textContent = t('chat.title');
+    tabs.innerHTML = '';
+    const rows = client.chat.map((m) => this.chatRow(m)).join('');
+    const muted = client.chatMuted;
+    const composer = muted
+      ? `<div class="chat-muted">${t('chat.muted_notice')}</div>`
+      : `<div class="chat-composer">
+           <input id="chat-input" maxlength="280" placeholder="${t('chat.placeholder')}" />
+           <button class="btn small primary" id="chat-send">${t('chat.send')}</button>
+         </div>`;
+    // Preserve what the user is typing across the 1 Hz refreshes.
+    const active = document.activeElement as HTMLInputElement | null;
+    const typed = active?.id === 'chat-input' ? active.value : '';
+
+    const html = `<div class="chat-log" id="chat-log">${rows || `<p class="hint">${t('chat.empty')}</p>`}</div>${composer}`;
+    if (html !== this.lastChatHTML) {
+      this.lastChatHTML = html;
+      body.innerHTML = html;
+      const log = document.getElementById('chat-log');
+      if (log) log.scrollTop = log.scrollHeight;
+      const input = document.getElementById('chat-input') as HTMLInputElement | null;
+      if (input) {
+        input.value = typed;
+        const submit = () => {
+          const v = input.value.trim();
+          if (!v) return;
+          client.send({ t: 'chat_send', body: v });
+          input.value = '';
+        };
+        document.getElementById('chat-send')!.addEventListener('click', submit);
+        input.addEventListener('keydown', (e) => { if ((e as KeyboardEvent).key === 'Enter') submit(); });
+      }
+      body.querySelectorAll('[data-chat-report]').forEach((el) =>
+        el.addEventListener('click', () => this.reportChatMessage(parseInt((el as HTMLElement).dataset.chatReport!, 10)))
+      );
+      body.querySelectorAll('[data-chat-del]').forEach((el) =>
+        el.addEventListener('click', () => {
+          client.send({ t: 'admin_delete_chat', messageId: parseInt((el as HTMLElement).dataset.chatDel!, 10) });
+          sfx.click();
+        })
+      );
+    }
+    this.chatUnread = 0;
+    this.updateChatBadge();
+  }
+  private lastChatHTML = '';
+
+  private chatRow(m: ChatMessagePub): string {
+    const time = new Date(m.at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+    if (m.kind === 'system') {
+      return `<div class="chat-row system"><span class="chat-sys">SYSTEM</span> <span class="chat-body">${escapeHtml(m.body)}</span></div>`;
+    }
+    const who = m.companyName ? `${escapeHtml(m.authorName)} · ${escapeHtml(m.companyName)}` : escapeHtml(m.authorName);
+    const mod = client.canModerate ? `<button class="chat-act" data-chat-del="${m.id}" title="${t('chat.delete')}">🗑</button>` : '';
+    const report = m.self ? '' : `<button class="chat-act" data-chat-report="${m.id}" title="${t('chat.report')}">⚑</button>`;
+    return `<div class="chat-row ${m.self ? 'self' : ''}">
+      <div class="chat-meta"><span class="chat-who">${who}</span><span class="chat-time">${time}</span>${report}${mod}</div>
+      <div class="chat-body">${escapeHtml(m.body)}</div>
+    </div>`;
+  }
+
+  private reportChatMessage(messageId: number): void {
+    const reasons: ChatReportReason[] = ['spam', 'harassment', 'offensive', 'other'];
+    const labels = reasons.map((r, i) => `${i + 1}) ${t(`chat.reason.${r}`)}`).join('  ');
+    const pick = prompt(`${t('chat.report_prompt')}\n${labels}`, '1');
+    if (!pick) return;
+    const idx = parseInt(pick, 10) - 1;
+    if (idx < 0 || idx >= reasons.length) return;
+    client.send({ t: 'chat_report', messageId, reason: reasons[idx] });
+    sfx.click();
+  }
   private renderNewsPanel(title: HTMLElement, tabs: HTMLElement, body: HTMLElement): void {
     title.textContent = t('news.title');
     const tab = this.tabBar(tabs, [

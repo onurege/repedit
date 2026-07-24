@@ -149,6 +149,20 @@ export class Net {
       this.broadcast({ t: 'wholesale', wholesale: w.toWholesaleState() });
     });
     w.on('presence', () => this.broadcastPlayers());
+    // V2.7 Phase 1: City Chat realtime fan-out.
+    w.on('chat', (m: any) => {
+      // Send each client its own `self` flag so the sender's line renders as theirs.
+      for (const c of this.conns) {
+        const self = m.authorName === this.world.players.get(c.playerId)?.name && m.kind === 'user';
+        this.send(c.ws, { t: 'chat', message: { ...m, self } });
+      }
+    });
+    w.on('chat_deleted', (messageId: number) => this.broadcast({ t: 'chat_deleted', messageId }));
+    w.on('player_muted', ({ playerId, until, reason }: { playerId: number; until: number | null; reason: string | null }) => {
+      // until:0 is the "unmuted" signal; otherwise the player is now muted.
+      const muted = until !== 0;
+      this.sendToPlayer(playerId, { t: 'chat_muted', muted, until: muted ? until : null, reason: muted ? reason : null });
+    });
   }
 
   private broadcastBizList(): void {
@@ -206,6 +220,13 @@ export class Net {
       }).catch((e) => console.error('[brief] failed', e));
       Promise.all([this.world.activeAnnouncements(), this.world.announcementHistory()])
         .then(([active, history]) => this.send(ws, { t: 'announcements', active, history })).catch(() => {});
+      // V2.7 Phase 1: seed recent City Chat on connect.
+      this.send(ws, {
+        t: 'chat_history',
+        messages: this.world.recentChat().map((m) => ({ ...m, self: m.authorName === p.name && m.kind === 'user' })),
+        muted: this.world.isMuted(playerId),
+        canModerate: this.world.isAdmin(playerId),
+      });
       this.broadcastPlayers();
 
       ws.on('message', (raw) => this.onMessage(conn, raw.toString()));
@@ -368,6 +389,40 @@ export class Net {
           });
           this.broadcast({ t: 'announcement', announcement: a });
           this.send(conn.ws, { t: 'toast', code: 'toast.announcement_sent', kind: 'success' });
+          break;
+        }
+        // ---- V2.7 Phase 1: City Chat + moderation ----
+        case 'get_chat': {
+          this.send(conn.ws, {
+            t: 'chat_history',
+            messages: world.recentChat().map((m) => ({ ...m, self: m.authorName === world.players.get(pid)?.name })),
+            muted: world.isMuted(pid),
+            canModerate: world.isAdmin(pid),
+          });
+          break;
+        }
+        case 'chat_send': {
+          await world.sendChat(pid, msg.body);
+          // broadcast handled by the 'chat' world event
+          break;
+        }
+        case 'chat_report': {
+          await world.reportChat(pid, msg.messageId, msg.reason, msg.note);
+          this.send(conn.ws, { t: 'toast', code: 'toast.chat_reported', kind: 'info' });
+          break;
+        }
+        case 'admin_delete_chat': {
+          await world.adminDeleteChat(pid, msg.messageId);
+          break;
+        }
+        case 'admin_mute': {
+          await world.adminMute(pid, msg.playerId, msg.minutes, msg.reason);
+          this.send(conn.ws, { t: 'toast', code: 'toast.player_muted', kind: 'success' });
+          break;
+        }
+        case 'admin_unmute': {
+          await world.adminUnmute(pid, msg.playerId);
+          this.send(conn.ws, { t: 'toast', code: 'toast.player_unmuted', kind: 'success' });
           break;
         }
         case 'dev': {
