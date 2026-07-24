@@ -17,6 +17,15 @@ export interface UpdateDef {
 // Newest first. Adding an entry makes it pop for players who haven't seen it.
 export const UPDATES: UpdateDef[] = [
   {
+    // V2.7 — competitive live-ops layer (chat, admin, negotiation, and the
+    // Phase 4 urgent orders / rival alerts / city news).
+    id: 'v2_7',
+    version: 'V2.7',
+    titleKey: 'update.v2_7.title',
+    taglineKey: 'update.v2_7.tagline',
+    featureKeys: ['update.v2_7.f1', 'update.v2_7.f2', 'update.v2_7.f3'],
+  },
+  {
     // V2.5.1 — balancing hotfix (import commodity availability). Small patch
     // note, not a feature release.
     id: 'v2_5_1',

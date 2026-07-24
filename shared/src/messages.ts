@@ -232,6 +232,12 @@ export type ClientMsg =
   | { t: 'offer_accept'; offerId: number; version: number }
   | { t: 'offer_reject'; offerId: number }
   | { t: 'offer_cancel'; offerId: number }
+  // ---- V2.7 Phase 4: urgent city orders, rival alerts, city news ----
+  | { t: 'get_urgent_orders' }
+  | { t: 'urgent_fulfill'; orderId: number; bizId?: number }
+  | { t: 'get_city_news' }
+  | { t: 'admin_create_urgent'; product: ProductId; qty: number; reward: number; durationSecs?: number; kind?: string }
+  | { t: 'admin_cancel_urgent'; orderId: number; reason?: string }
   | { t: 'ping' };
 
 // ---------- server -> client ----------
@@ -478,6 +484,10 @@ export interface MorningBrief {
   upcomingEvent: CityEventPub | null;
   alerts: BusinessAlert[];
   opportunity: Opportunity | null;
+  // V2.7 Phase 4 — minimal integration: the current live city order (if any)
+  // and the player's most recent unseen rival alert (if any).
+  urgentOrder?: UrgentOrderPub | null;
+  rivalAlert?: RivalAlert | null;
 }
 
 export interface TutorialState {
@@ -684,4 +694,60 @@ export type ServerMsg =
   | { t: 'conversation'; otherId: number; messages: DirectMessagePub[]; offers: OfferPub[] }
   | { t: 'dm'; otherId: number; message: DirectMessagePub }
   | { t: 'offer'; offer: OfferPub }
+  // ---- V2.7 Phase 4: urgent city orders, rival alerts, city news ----
+  | { t: 'urgent_orders'; orders: UrgentOrderPub[] }   // full snapshot (connect / request)
+  | { t: 'urgent_order'; order: UrgentOrderPub }        // single upsert (realtime)
+  | { t: 'rival_alerts'; alerts: RivalAlert[] }          // snapshot on connect
+  | { t: 'rival_alert'; alert: RivalAlert }              // realtime push to the affected player
+  | { t: 'city_news'; items: CityNewsItem[] }            // bounded feed snapshot
+  | { t: 'city_news_item'; item: CityNewsItem }          // realtime append
   | { t: 'pong' };
+
+// ---------- V2.7 Phase 4 domain types ----------
+
+export type UrgentOrderStatus = 'upcoming' | 'active' | 'fulfilled' | 'expired' | 'cancelled';
+// A short-lived city procurement opportunity. Exactly one company can win it.
+// The payload is fully public: it never carries any viewer's private state.
+export interface UrgentOrderPub {
+  id: number;
+  kind: string;                    // locale-independent flavour code (see URGENT_ORDER_KINDS)
+  product: ProductId;
+  requiredQty: number;
+  reward: number;
+  status: UrgentOrderStatus;
+  startsAt: number;
+  expiresAt: number;
+  winnerCompanyId: number | null;  // set once fulfilled
+  winnerName: string | null;       // winning company's public name
+  fulfilledAt: number | null;
+  serverTime: number;              // authoritative clock for the countdown
+}
+
+// A rival alert derived only from committed market data. `id` is a stable
+// dedupe key; `params` carries render values that are public/derived only.
+export type RivalAlertType = 'market_share_overtaken' | 'price_undercut';
+export interface RivalAlert {
+  id: string;
+  type: RivalAlertType;
+  product: ProductId;
+  rivalName: string;               // rival company's public name
+  at: number;
+  params: MsgParams;               // never secrets — units/prices only
+}
+
+// A city-news item generated from a real committed event. Rendered client-side
+// via i18n from `params`; the payload is privacy-safe (no cash/inventory/etc).
+export type CityNewsType =
+  | 'city_order_win'
+  | 'major_deal'
+  | 'market_leader_change'
+  | 'business_opened'
+  | 'wholesale_low';
+export interface CityNewsItem {
+  id: number;
+  type: CityNewsType;
+  at: number;
+  actorName: string | null;        // public company/player name
+  product: ProductId | null;
+  params: MsgParams;               // extra render values — never secrets
+}

@@ -16,6 +16,7 @@ import {
   TUTORIAL_STEPS, TUTORIAL_LAST_STEP,
   type MorningBrief, type UpdatePub, type AnnouncementPub, type BusinessAlert,
   type Opportunity, type BriefMarket,
+  type RivalAlert, type CityNewsItem, type UrgentOrderPub,
 } from '@district/shared';
 import { client } from '../net.js';
 import { sfx, unlockAudio } from '../audio.js';
@@ -153,6 +154,24 @@ export class UI {
     client.on('admin', () => {
       if (this.panelKind === 'admin') this.renderAdminPanel(
         document.getElementById('panel-title')!, document.getElementById('panel-tabs')!, document.getElementById('panel-body')!);
+    });
+    // V2.7 Phase 4: urgent orders, rival alerts, city news.
+    client.on('urgent_order', (o?: any) => {
+      this.renderUrgentBanner();
+      if (this.panelKind === 'admin' && this.adminTab === 'orders') { this.lastBodyHTML = ''; this.renderPanel(); }
+      // Loss feedback: only players who actually attempted this order hear about
+      // the loss (server already sends the winner a success toast).
+      if (o && o.status === 'fulfilled' && this.urgentAttempted.has(o.id) && o.winnerCompanyId !== client.company?.id) {
+        this.toast(t('urgent.won_by', { name: o.winnerName ?? '???' }), 'info');
+      }
+    });
+    client.on('rival_alert', (a?: RivalAlert) => {
+      if (!a) return;
+      const key = a.type === 'price_undercut' ? 'rival.price_undercut' : 'rival.market_share_overtaken';
+      this.toast(t(key, a.params), 'info');
+    });
+    client.on('city_news_item', () => {
+      if (this.panelKind === 'news' && this.newsTab === 'city') { this.lastBodyHTML = ''; this.renderPanel(); }
     });
     client.on('level_up', (level: number) => {
       sfx.levelUp();
@@ -434,6 +453,7 @@ export class UI {
         <div class="panel-body" id="panel-body"></div>
       </div>
       <div class="objectives" id="objectives" style="display:none"></div>
+      <div class="urgent-banner" id="urgent-banner" style="display:none"></div>
       <div class="event-banner" id="event-banner" style="display:none"></div>
       <div class="announce-banner" id="announce-banner" style="display:none"></div>
       <div class="mira" id="mira" style="display:none"></div>
@@ -478,6 +498,7 @@ export class UI {
     document.getElementById('nav-news')!.addEventListener('click', () => {
       sfx.click();
       client.send({ t: 'get_announcements' });
+      client.send({ t: 'get_city_news' });
       this.openPanel('news');
     });
     document.getElementById('nav-chat')!.addEventListener('click', () => {
@@ -510,6 +531,11 @@ export class UI {
       this.closePanel();
     });
     this.panel = document.getElementById('panel')!;
+    // Keep the urgent-order countdown live (cheap; only touches the banner).
+    if (this.urgentTimer) clearInterval(this.urgentTimer);
+    this.urgentTimer = setInterval(() => {
+      if (this.hud.classList.contains('visible')) this.renderUrgentBanner();
+    }, 1000);
   }
 
   showHud(): void {
@@ -615,6 +641,7 @@ export class UI {
     this.updateContractBadge();
     this.renderCompanyBar();
     this.renderDistrictBar();
+    this.renderUrgentBanner();
     this.renderEventBanner();
     this.renderAnnounceBanner();
     this.renderMira();
@@ -1751,6 +1778,43 @@ export class UI {
   }
 
   /** Small HUD banner while a MAJOR event is active (kept lightweight). */
+  /**
+   * V2.7 Phase 4 — the non-blocking urgent-order HUD banner. Shows the soonest
+   * city order to expire, a live countdown, and a Fulfil action when one of the
+   * player's businesses holds enough unreserved stock. The server is the sole
+   * authority on expiry and the single winner.
+   */
+  private renderUrgentBanner(): void {
+    const el = document.getElementById('urgent-banner');
+    if (!el) return;
+    const now = Date.now();
+    const order = [...client.urgentOrders.values()]
+      .filter((o) => o.status === 'active' && o.expiresAt > now)
+      .sort((a, b) => a.expiresAt - b.expiresAt)[0];
+    if (!order) { el.style.display = 'none'; el.onclick = null; el.innerHTML = ''; return; }
+    // Can I fulfil? Need ONE business holding enough unreserved stock.
+    const eligibleBiz = [...client.myBusinesses.values()].find(
+      (b) => (b.inventory[order.product]?.qty ?? 0) >= order.requiredQty
+    );
+    const prod = t('product.' + order.product);
+    el.style.display = '';
+    const action = eligibleBiz
+      ? `<button class="btn small primary" id="urgent-fulfill">${t('urgent.fulfill')}</button>`
+      : `<span class="ub-hint">${t('urgent.no_stock', { qty: order.requiredQty, product: prod })}</span>`;
+    el.innerHTML = `<span class="ub-badge">${t('urgent.badge')}</span>
+      <span class="ub-title">${t('urgent.kind.' + order.kind)}</span>
+      <span class="ub-need">${t('urgent.need', { qty: order.requiredQty, product: prod })}</span>
+      <span class="ub-reward">${t('urgent.reward', { reward: order.reward })}</span>
+      <span class="ub-time">${t('urgent.expires_in', { time: countdown(order.expiresAt) })}</span>
+      ${action}`;
+    const btn = el.querySelector('#urgent-fulfill');
+    if (btn && eligibleBiz) btn.addEventListener('click', () => {
+      sfx.click();
+      this.urgentAttempted.add(order.id);
+      client.send({ t: 'urgent_fulfill', orderId: order.id, bizId: eligibleBiz.id });
+    });
+  }
+
   private renderEventBanner(): void {
     const el = document.getElementById('event-banner');
     const badge = document.getElementById('nav-event-badge');
@@ -1844,12 +1908,24 @@ export class UI {
       <div class="opp-box"><div class="opp-head">💡 ${t('brief.opportunity')}</div>
       <div>${this.opportunityText(brief.opportunity)}</div></div>` : '';
 
+    // V2.7 Phase 4 — minimal integration: current urgent order + latest rival alert.
+    const uo = brief.urgentOrder;
+    const urgentBlock = uo ? `
+      <h4 class="brief-h">${t('urgent.hud_title')}</h4>
+      <div class="alert-row info">🚨 ${t('urgent.need', { qty: uo.requiredQty, product: t('product.' + uo.product) })} · ${t('urgent.reward', { reward: uo.reward })}</div>` : '';
+    const ra = brief.rivalAlert;
+    const rivalBlock = ra ? `
+      <h4 class="brief-h">${t('rival.title')}</h4>
+      <div class="alert-row warn">⚔ ${t(ra.type === 'price_undercut' ? 'rival.price_undercut' : 'rival.market_share_overtaken', ra.params)}</div>` : '';
+
     overlay.innerHTML = `
       <div class="card brief-card">
         <div class="brief-hi">${t('brief.good_morning', { name: brief.playerName })}</div>
         <h1>🏢 ${brief.companyName}</h1>
         <div class="brief-scroll">
           ${awayBlock}
+          ${urgentBlock}
+          ${rivalBlock}
           ${marketBlock}
           ${eventBlock}
           ${alertsBlock}
@@ -1905,11 +1981,15 @@ export class UI {
     };
     overlay.querySelector('#wn-ok')!.addEventListener('click', () => { sfx.click(); done(); });
     overlay.querySelector('#wn-all')!.addEventListener('click', () => {
-      sfx.click(); done(); client.send({ t: 'get_announcements' }); this.newsTab = 'updates'; this.openPanel('news');
+      sfx.click(); done(); client.send({ t: 'get_announcements' }); this.panelTab = 'updates'; this.newsTab = 'updates'; this.openPanel('news');
     });
   }
 
   private newsTab = 'announcements';
+  // V2.7 Phase 4: orders this client has attempted (for loss feedback) + the
+  // 1s ticker that keeps the urgent-order countdown live.
+  private urgentAttempted = new Set<number>();
+  private urgentTimer: ReturnType<typeof setInterval> | null = null;
   private chatUnread = 0;
   private adminTab = 'dashboard';
   private adminDetailId: number | null = null;
@@ -2062,13 +2142,54 @@ export class UI {
       { id: 'dashboard', label: t('admin.tab.dashboard') },
       { id: 'players', label: t('admin.tab.players') },
       { id: 'wholesale', label: t('admin.tab.wholesale') },
+      { id: 'orders', label: t('admin.urgent.title') },
       { id: 'audit', label: t('admin.tab.audit') },
     ]);
     this.adminTab = tab;
     if (tab === 'dashboard') this.renderAdminDashboard(body);
     else if (tab === 'players') this.renderAdminPlayers(body);
     else if (tab === 'wholesale') this.renderAdminWholesale(body);
+    else if (tab === 'orders') this.renderAdminUrgent(body);
     else this.renderAdminAudit(body);
+  }
+
+  /** Admin: create / cancel urgent city orders (server enforces requireAdmin). */
+  private renderAdminUrgent(body: HTMLElement): void {
+    const products = ['bread', 'coffee', 'milk'];
+    const live = [...client.urgentOrders.values()]
+      .filter((o) => o.status === 'active' || o.status === 'upcoming')
+      .sort((a, b) => a.expiresAt - b.expiresAt);
+    const liveRows = live.length ? live.map((o) => `
+      <div class="order">
+        <span class="grow"><b>#${o.id}</b> ${t('urgent.kind.' + o.kind)} — ${o.requiredQty} × ${pName(o.product)} · $${o.reward}<br/>
+          <small>${t('urgent.expires_in', { time: countdown(o.expiresAt) })}</small></span>
+        <button class="btn small danger" data-urgent-cancel="${o.id}">${t('admin.urgent.cancel')}</button>
+      </div>`).join('') : `<p class="hint">${t('urgent.none')}</p>`;
+    this.setBody(body, `
+      <div class="field"><label>${t('admin.urgent.product')}</label>
+        <select id="au-product">${products.map((p) => `<option value="${p}">${pName(p as ProductId)}</option>`).join('')}</select></div>
+      <div class="mkt-row">
+        <div class="field"><label>${t('admin.urgent.qty')}</label><input id="au-qty" type="number" min="1" value="100" /></div>
+        <div class="field"><label>${t('admin.urgent.reward')}</label><input id="au-reward" type="number" min="0" value="1200" /></div>
+        <div class="field"><label>${t('admin.urgent.duration')}</label><input id="au-dur" type="number" min="1" value="10" /></div>
+      </div>
+      <button class="btn small primary" id="au-create" style="margin-bottom:12px">${t('admin.urgent.create')}</button>
+      <h4 class="admin-h">${t('admin.urgent.title')}</h4>${liveRows}`, (b) => {
+      b.querySelector('#au-create')!.addEventListener('click', () => {
+        sfx.click();
+        const product = (b.querySelector('#au-product') as HTMLSelectElement).value as ProductId;
+        const qty = parseInt((b.querySelector('#au-qty') as HTMLInputElement).value, 10);
+        const reward = parseInt((b.querySelector('#au-reward') as HTMLInputElement).value, 10);
+        const mins = parseInt((b.querySelector('#au-dur') as HTMLInputElement).value, 10);
+        client.send({ t: 'admin_create_urgent', product, qty, reward, durationSecs: Math.max(1, mins) * 60 });
+      });
+      b.querySelectorAll('[data-urgent-cancel]').forEach((el) =>
+        el.addEventListener('click', () => {
+          sfx.click();
+          client.send({ t: 'admin_cancel_urgent', orderId: Number((el as HTMLElement).dataset.urgentCancel) });
+        })
+      );
+    });
   }
 
   private renderAdminDashboard(body: HTMLElement): void {
@@ -2327,10 +2448,20 @@ export class UI {
   private renderNewsPanel(title: HTMLElement, tabs: HTMLElement, body: HTMLElement): void {
     title.textContent = t('news.title');
     const tab = this.tabBar(tabs, [
+      { id: 'city', label: t('news.tab.city') },
       { id: 'announcements', label: t('news.tab.announcements') },
       { id: 'updates', label: t('news.tab.updates') },
     ]);
     this.newsTab = tab;
+    if (tab === 'city') {
+      // City News feed: real committed events, kept separate from patch notes.
+      const items = client.cityNews;
+      const rows = items.length
+        ? items.map((n) => this.cityNewsRowHtml(n)).join('')
+        : `<p class="hint">${t('news.city_empty')}</p>`;
+      this.setBody(body, rows);
+      return;
+    }
     if (tab === 'updates') {
       const rows = client.updatesAll.map((u) => `
         <div class="news-update">
@@ -2350,6 +2481,19 @@ export class UI {
     this.setBody(body, adminBtn + list, (b) => {
       b.querySelector('#ann-new')?.addEventListener('click', () => { sfx.click(); this.showComposeAnnouncement(); });
     });
+  }
+
+  /** One City News row. Rendered from privacy-safe params via i18n. */
+  private cityNewsRowHtml(n: CityNewsItem): string {
+    const when = new Date(n.at).toLocaleString(getLang() === 'tr' ? 'tr-TR' : 'en-US');
+    // Build render params, mapping any product/biz-type codes to localized text.
+    const p: Record<string, string | number> = { ...n.params };
+    if (p.product) p.product = t('product.' + p.product);
+    if (p.type) p.type = t('bizkind.' + p.type);
+    return `<div class="citynews-row cn-${n.type}">
+      <div class="cn-text">${escapeHtml(t('news.' + n.type, p))}</div>
+      <div class="cn-when">${when}</div>
+    </div>`;
   }
 
   private announcementCardHtml(a: AnnouncementPub): string {

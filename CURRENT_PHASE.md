@@ -2,6 +2,27 @@
 
 Shipping in tested, deployable phases per the prompt's P0->P2 priority.
 
+## Phase 4 (shipped) — Urgent City Orders, Rival Alerts & City News
+A living-city layer built entirely on committed data. **Urgent City Orders:**
+short-lived (5-15 min) city procurement opportunities with EXACTLY ONE winner,
+guaranteed by the proven exactly-once discipline (per-order lock + a DB
+`UPDATE … WHERE status='active' RETURNING` guard). Full fulfilment only — the
+winner loses the goods once and receives the reward once, recorded as one
+`CITY_ORDER_REWARD` ledger row plus a `city_order` activity row (a distinct
+kind that never inflates rankings). A conservative tick scheduler keeps ~one
+order live at a time (configurable), loosely coupled to V2.3 city demand;
+admins can create/cancel orders (`requireAdmin` + audited + realtime). A
+non-blocking HUD banner with a server-authoritative countdown. **Rival Alerts:**
+from real committed data only — a coarse market-share sweep (never per-player)
+detects overtakes, and a fresh cheaper sell listing raises a price-undercut
+alert, both with a per-key cooldown + minimum-material-change dedupe.
+**City News:** a bounded, persistent feed generated from real events
+(city-order win, major deal, market-leader change, business opened, wholesale
+low), privacy-safe (public names + non-secret params only), shown in a new
+CITY tab kept separate from patch notes. Minimal Morning Brief integration
+surfaces the live order + latest rival alert. All events push in realtime and
+recover on reconnect. See DECISIONS.md.
+
 ## Phase 3 (shipped) — Direct messaging & live negotiation
 Company-to-company private messaging (realtime, persistent, unread, sanitised,
 rate-limited, reportable) plus negotiated one-off trade offers with counter

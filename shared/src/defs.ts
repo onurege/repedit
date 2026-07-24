@@ -313,6 +313,50 @@ export const GROWTH_MIN_REVENUE = 5000;
 // How many entries a ranking board shows before falling back to "your rank".
 export const RANKING_TOP_N = 10;
 
+// ============================================================
+// V2.7 Phase 4 — Urgent City Orders, Rival Alerts, City News.
+// ============================================================
+
+// Urgent City Orders — short-lived city procurement opportunities. The city
+// buys FINISHED goods, so only final-consumer products are ever requested.
+export const URGENT_ORDER_PRODUCTS: ProductId[] = ['bread', 'coffee', 'milk'];
+// Conservative scheduler: at most this many ACTIVE at once (small populations).
+export const URGENT_MAX_ACTIVE = 1;
+export const URGENT_MIN_DURATION_SECS = 5 * 60;   // shortest live window (5 min)
+export const URGENT_MAX_DURATION_SECS = 15 * 60;  // longest live window (15 min)
+// Minimum gap between two auto-spawned orders (keeps the feed calm).
+export const URGENT_SPAWN_COOLDOWN_SECS = 8 * 60;
+// Per-eligible-tick spawn probability once the cooldown has elapsed.
+export const URGENT_SPAWN_CHANCE = 0.05;
+// Need at least this many players online for the city to post an auto order.
+export const URGENT_MIN_ONLINE = 1;
+export const URGENT_MIN_QTY = 40;
+export const URGENT_MAX_QTY = 220;
+// Reward is qty * per-unit bounty (randomised inside this band) at spawn time.
+export const URGENT_REWARD_PER_UNIT_MIN = 8;
+export const URGENT_REWARD_PER_UNIT_MAX = 18;
+// Admin-authored orders are bounded to the same safe envelope.
+export const URGENT_ADMIN_MAX_QTY = 5000;
+export const URGENT_ADMIN_MAX_REWARD = 1_000_000;
+export const URGENT_ADMIN_MIN_DURATION_SECS = 60;
+export const URGENT_ADMIN_MAX_DURATION_SECS = 60 * 60;
+// Locale-independent order-flavour codes the client maps to a title.
+export const URGENT_ORDER_KINDS = ['festival', 'restock', 'shortage', 'vip_event', 'city_hall'] as const;
+export type UrgentOrderKind = (typeof URGENT_ORDER_KINDS)[number];
+
+// Rival Alerts — derived only from committed data, with dedupe + cooldown so a
+// rival nudging a price by a cent never spams the feed.
+export const RIVAL_SWEEP_SECONDS = 60;            // coarse share sweep cadence
+export const RIVAL_ALERT_COOLDOWN_SECS = 15 * 60; // per dedupe-key silence
+export const RIVAL_MIN_UNITS = 20;                // ignore trivial-volume products
+export const RIVAL_MIN_UNDERCUT_FRACTION = 0.05;  // rival must be >=5% cheaper
+export const RIVAL_MAX_ALERTS = 20;               // bounded per-player buffer
+
+// City News — a bounded feed generated from real committed events.
+export const NEWS_MAJOR_DEAL_MIN = 4000;   // single-deal money threshold ($)
+export const NEWS_MAX_ITEMS = 40;          // bounded persistent history
+export const NEWS_WHOLESALE_LOW_FRACTION = 0.1; // "running low" when <=10% remains
+
 // Locale-independent ranking category codes (client maps to labels).
 export type RankingCategory =
   | 'recent_revenue'

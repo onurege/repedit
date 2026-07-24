@@ -97,6 +97,36 @@ import {
   GROWTH_MIN_REVENUE,
   RANKING_TOP_N,
   RANKING_CATEGORIES,
+  URGENT_ORDER_PRODUCTS,
+  URGENT_MAX_ACTIVE,
+  URGENT_MIN_DURATION_SECS,
+  URGENT_MAX_DURATION_SECS,
+  URGENT_SPAWN_COOLDOWN_SECS,
+  URGENT_SPAWN_CHANCE,
+  URGENT_MIN_ONLINE,
+  URGENT_MIN_QTY,
+  URGENT_MAX_QTY,
+  URGENT_REWARD_PER_UNIT_MIN,
+  URGENT_REWARD_PER_UNIT_MAX,
+  URGENT_ADMIN_MAX_QTY,
+  URGENT_ADMIN_MAX_REWARD,
+  URGENT_ADMIN_MIN_DURATION_SECS,
+  URGENT_ADMIN_MAX_DURATION_SECS,
+  URGENT_ORDER_KINDS,
+  RIVAL_SWEEP_SECONDS,
+  RIVAL_ALERT_COOLDOWN_SECS,
+  RIVAL_MIN_UNITS,
+  RIVAL_MIN_UNDERCUT_FRACTION,
+  RIVAL_MAX_ALERTS,
+  NEWS_MAJOR_DEAL_MIN,
+  NEWS_MAX_ITEMS,
+  NEWS_WHOLESALE_LOW_FRACTION,
+  type UrgentOrderKind,
+  type UrgentOrderPub,
+  type UrgentOrderStatus,
+  type RivalAlert,
+  type CityNewsItem,
+  type CityNewsType,
   type RankingCategory,
   type CompanyProfile,
   type MarketShareEntry,
@@ -294,6 +324,24 @@ export interface OrderRec {
   createdAtMs: number;
 }
 
+// V2.7 Phase 4 — a live urgent city order held in memory. Exactly one company
+// can win it; the winner is settled once under a DB status guard.
+export interface UrgentOrderRec {
+  id: number;
+  kind: UrgentOrderKind;
+  product: ProductId;
+  requiredQty: number;
+  reward: number;
+  status: UrgentOrderStatus;
+  startsAtMs: number;
+  expiresAtMs: number;
+  winnerPlayerId: number | null;
+  winnerCompanyId: number | null;
+  fulfilledAtMs: number | null;
+  source: 'auto' | 'admin';
+  createdBy: number | null;
+}
+
 export interface DeliveryRec {
   id: number;
   product: ProductId;
@@ -365,7 +413,9 @@ function ledgerParams(e: LedgerEntry): any[] {
 interface ActivityEntry {
   companyId: number;
   businessId: number | null;
-  kind: 'final_sale' | 'supplier_sale';
+  // V2.7 Phase 4: 'city_order' records urgent-order fulfilment for the audit
+  // trail; it is never queried by recentUnits, so it can't inflate rankings.
+  kind: 'final_sale' | 'supplier_sale' | 'city_order';
   product: ProductId;
   units: number;
   amount: number;
@@ -492,6 +542,21 @@ export class World extends EventEmitter {
   offers = new Map<number, OfferRec>();  // live (pending/countered) offers; public for tests
   private offerLocks = new Set<number>();
   private dmRate = new Map<number, number[]>();
+  // V2.7 Phase 4: urgent city orders (live upcoming/active kept in memory for
+  // the scheduler + expiry sweep; fulfilled/expired history stays in the DB).
+  urgentOrders = new Map<number, UrgentOrderRec>();  // public for tests
+  private urgentLocks = new Set<number>();           // per-order exactly-once fulfil lock
+  private lastUrgentSpawnMs = 0;
+  // Rival alerts: bounded per-player buffer + per-dedupe-key cooldown, plus the
+  // last committed rank order per product so the coarse sweep detects overtakes.
+  private rivalAlerts = new Map<number, RivalAlert[]>();  // keyed by playerId (the overtaken)
+  private rivalAlertAt = new Map<string, number>();       // dedupe key -> last-sent ms
+  private lastRankOrder = new Map<ProductId, number[]>(); // product -> companyIds high->low
+  private lastRivalSweepMs = 0;
+  // City news: current market leader per product + which products are flagged
+  // "wholesale low" (so we emit at most one news item per depletion cycle).
+  private marketLeader = new Map<ProductId, number>();     // product -> leading companyId
+  private wholesaleLowFlag = new Set<ProductId>();
   timeScale = 1;
   private tickTimer: ReturnType<typeof setInterval> | null = null;
   private ticksSinceFlush = 0;
@@ -773,6 +838,7 @@ export class World extends EventEmitter {
     await this.seedExpansionAnnouncement();
     await this.loadChat();
     await this.loadOffers();
+    await this.loadUrgentOrders(now);
 
     await this.flush();
     console.log(
@@ -927,6 +993,9 @@ export class World extends EventEmitter {
     await this.processEvents(now);
     await this.processWholesale(now);
     await this.sweepExpiredOffers(now);
+    await this.sweepUrgentOrders(now);   // expire past-deadline orders
+    await this.maybeSpawnUrgentOrder(now); // conservative auto-scheduler
+    await this.rivalSweep(now);          // coarse market-share overtake detection
     this.ticksSinceFlush++;
     if (this.ticksSinceFlush >= 5) {
       this.ticksSinceFlush = 0;
@@ -1195,6 +1264,7 @@ export class World extends EventEmitter {
     ws.remaining = ws.dailyStock;
     ws.resetAtMs = next;
     ws.dirty = true;
+    this.wholesaleLowFlag.delete(ws.product); // refilled: re-arm the low-stock news
     await query('UPDATE wholesale_supply SET remaining=$1, reset_at=$2, updated_at=now() WHERE product=$3',
       [ws.remaining, new Date(ws.resetAtMs), ws.product]);
     // Evaluate every company's integrity once per elapsed day boundary.
@@ -1699,6 +1769,7 @@ export class World extends EventEmitter {
     this.businesses.set(biz.id, biz);
     this.emit('biz_created', biz);
     this.emit('company', company);
+    this.announceBusinessOpened(biz, company); // V2.7 Phase 4 city news
     return biz;
   }
 
@@ -1751,6 +1822,7 @@ export class World extends EventEmitter {
       console.log(`[econ] BUSINESS_OPENING player=${playerId} biz=${bizId} type=${type} lot=${lotId} cost=$${cost}`);
       this.emit('biz_created', biz);
       this.emit('company', company);
+      this.announceBusinessOpened(biz, company); // V2.7 Phase 4 city news
       return biz;
     } catch (err) {
       p.cash += cost; // revert on failure
@@ -1862,7 +1934,7 @@ export class World extends EventEmitter {
       if (ws) this.recordWholesaleBuy(playerId, product, normalQty, emerQty, ws);
       this.emit('delivery', delivery);
       this.emit('purchase', { playerId, product, qty, cost });
-      if (ws) this.emitWholesale();
+      if (ws) { this.emitWholesale(); this.checkWholesaleLow(ws); }
     } catch (err) {
       if (ws && normalQty > 0) ws.remaining += normalQty; // revert stock on failure
       // Roll back the in-memory mutation on persistence failure.
@@ -2055,6 +2127,8 @@ export class World extends EventEmitter {
       // speculation is never punished on its own — this only feeds the score).
       if (side === 'sell') this.recordResaleSignal(playerId, product, price);
       this.emit('order', order);
+      // V2.7 Phase 4: a fresh, cheaper sell listing may undercut live rivals.
+      if (side === 'sell') this.checkPriceUndercut(order);
       return order;
     } catch (err) {
       // revert escrow
@@ -2539,6 +2613,13 @@ export class World extends EventEmitter {
       this.emit('delivery', delivery);
       this.emit('contract', c);
       if (c.status === 'completed') this.contracts.delete(c.id);
+      // V2.7 Phase 4: a large committed contract delivery is public city news.
+      if (amount >= NEWS_MAJOR_DEAL_MIN) {
+        void this.addCityNews('major_deal', {
+          actorName: sellerCo?.name ?? null, product: c.product,
+          params: { seller: sellerCo?.name ?? '', buyer: buyerCo?.name ?? '', qty: c.quantity, amount, product: c.product },
+        });
+      }
       return 'delivered';
     } catch (err) {
       // Revert in-memory mutation on persistence failure.
@@ -3311,10 +3392,16 @@ export class World extends EventEmitter {
     const alerts = this.computeAlerts(playerId);
     const opportunity = this.computeOpportunity(playerId, sells, alerts);
 
+    // V2.7 Phase 4 — minimal integration: surface the current live city order
+    // (soonest to expire) and the player's most recent rival alert.
+    const urgentOrder = this.listUrgentOrders().filter((o) => o.status === 'active')[0] ?? null;
+    const rivalAlert = this.getRivalAlerts(playerId).at(-1) ?? null;
+
     return {
       playerName: p.name, companyName: company.name, awaySeconds,
       revenue: Math.max(0, revenue), netCashFlow, unitsProduced, sales,
       contractsCompleted, contractsMissed, market, activeEvent, upcomingEvent, alerts, opportunity,
+      urgentOrder, rivalAlert,
     };
   }
 
@@ -4010,7 +4097,7 @@ export class World extends EventEmitter {
   }
 
   private sanitizeDm(raw: string): string {
-    return (raw ?? '').replace(/[<>]/g, '').replace(/[ -]/g, ' ')
+    return (raw ?? '').replace(/[<>]/g, '').replace(/[\u0000-\u001F\u007F]/g, ' ')
       .replace(/\s+/g, ' ').trim().slice(0, World.DM_MAX_LEN);
   }
 
@@ -4312,6 +4399,14 @@ export class World extends EventEmitter {
       this.emitOffer(o);
       this.emit('push_state', { playerId: buyer.id });
       this.emit('push_state', { playerId: seller.id });
+      // V2.7 Phase 4: a large committed deal is public city news.
+      if (amount >= NEWS_MAJOR_DEAL_MIN) {
+        void this.addCityNews('major_deal', {
+          actorName: this.companies.get(seller.id)?.name ?? null,
+          product: o.product,
+          params: { seller: this.companies.get(seller.id)?.name ?? '', buyer: this.companies.get(buyer.id)?.name ?? '', qty: o.curQty, amount, product: o.product },
+        });
+      }
       return o;
     } catch (err) {
       // Roll back the in-memory mutation on failure.
@@ -4476,6 +4571,407 @@ export class World extends EventEmitter {
       buyerName: r.buyer_name,
       sellerName: r.seller_name,
       at: new Date(r.created_at).getTime(),
+    }));
+  }
+
+  // ============================================================
+  // V2.7 Phase 4 — Urgent City Orders, Rival Alerts & City News.
+  // ============================================================
+
+  // ---- Urgent City Orders ----
+
+  private urgentRowToRec(r: any): UrgentOrderRec {
+    return {
+      id: Number(r.id), kind: r.kind, product: r.product,
+      requiredQty: r.required_quantity, reward: Number(r.reward), status: r.status,
+      startsAtMs: new Date(r.starts_at).getTime(), expiresAtMs: new Date(r.expires_at).getTime(),
+      winnerPlayerId: r.winner_player_id ?? null, winnerCompanyId: r.winner_company_id ?? null,
+      fulfilledAtMs: r.fulfilled_at ? new Date(r.fulfilled_at).getTime() : null,
+      source: r.source, createdBy: r.created_by ?? null,
+    };
+  }
+
+  private async loadUrgentOrders(now: number): Promise<void> {
+    const rows = await query("SELECT * FROM urgent_orders WHERE status IN ('upcoming','active')");
+    for (const r of rows.rows) {
+      const rec = this.urgentRowToRec(r);
+      if (rec.expiresAtMs <= now) { // restart-safe: retire anything already past its deadline
+        await query("UPDATE urgent_orders SET status='expired' WHERE id=$1 AND status IN ('upcoming','active')", [rec.id]).catch(() => {});
+        continue;
+      }
+      this.urgentOrders.set(rec.id, rec);
+    }
+    this.lastUrgentSpawnMs = now; // don't immediately auto-spawn on boot
+  }
+
+  toUrgentPub(o: UrgentOrderRec): UrgentOrderPub {
+    return {
+      id: o.id, kind: o.kind, product: o.product,
+      requiredQty: o.requiredQty, reward: o.reward, status: o.status,
+      startsAt: o.startsAtMs, expiresAt: o.expiresAtMs,
+      winnerCompanyId: o.winnerCompanyId,
+      winnerName: o.winnerCompanyId != null ? this.companyById(o.winnerCompanyId)?.name ?? null : null,
+      fulfilledAt: o.fulfilledAtMs, serverTime: Date.now(),
+    };
+  }
+
+  /** Snapshot of currently live (active/upcoming) orders for a fresh client. */
+  listUrgentOrders(): UrgentOrderPub[] {
+    return [...this.urgentOrders.values()]
+      .filter((o) => o.status === 'active' || o.status === 'upcoming')
+      .sort((a, b) => a.expiresAtMs - b.expiresAtMs)
+      .map((o) => this.toUrgentPub(o));
+  }
+
+  private emitUrgent(o: UrgentOrderRec): void {
+    this.emit('urgent_order', this.toUrgentPub(o));
+  }
+
+  /** Conservative auto-scheduler: at most URGENT_MAX_ACTIVE live at once. */
+  private async maybeSpawnUrgentOrder(now: number): Promise<void> {
+    const active = [...this.urgentOrders.values()].filter((o) => o.status === 'active').length;
+    if (active >= URGENT_MAX_ACTIVE) return;
+    if (now - this.lastUrgentSpawnMs < URGENT_SPAWN_COOLDOWN_SECS * 1000) return;
+    if (this.onlineCount() < URGENT_MIN_ONLINE) return;
+    if (Math.random() >= URGENT_SPAWN_CHANCE) return;
+    const product = this.pickUrgentProduct();
+    const qty = URGENT_MIN_QTY + Math.floor(Math.random() * (URGENT_MAX_QTY - URGENT_MIN_QTY + 1));
+    const perUnit = URGENT_REWARD_PER_UNIT_MIN + Math.floor(Math.random() * (URGENT_REWARD_PER_UNIT_MAX - URGENT_REWARD_PER_UNIT_MIN + 1));
+    const durSecs = URGENT_MIN_DURATION_SECS + Math.floor(Math.random() * (URGENT_MAX_DURATION_SECS - URGENT_MIN_DURATION_SECS + 1));
+    const kind = URGENT_ORDER_KINDS[Math.floor(Math.random() * URGENT_ORDER_KINDS.length)];
+    await this.spawnUrgentOrder({ product, qty, reward: qty * perUnit, durSecs, kind, source: 'auto', createdBy: null }, now);
+  }
+
+  // Loosely coupled to V2.3 city demand: bias toward the product the city needs
+  // most right now (an active event nudges effective demand), plus jitter.
+  private pickUrgentProduct(): ProductId {
+    let best = URGENT_ORDER_PRODUCTS[0]; let bestD = -Infinity;
+    for (const p of URGENT_ORDER_PRODUCTS) {
+      const d = this.cityDemand(p) + Math.random() * 0.15;
+      if (d > bestD) { bestD = d; best = p; }
+    }
+    return best;
+  }
+
+  private async spawnUrgentOrder(
+    input: { product: ProductId; qty: number; reward: number; durSecs: number; kind: UrgentOrderKind; source: 'auto' | 'admin'; createdBy: number | null },
+    now: number
+  ): Promise<UrgentOrderRec> {
+    const expiresAt = new Date(now + input.durSecs * 1000);
+    const res = await query(
+      `INSERT INTO urgent_orders (kind, product, required_quantity, reward, status, starts_at, expires_at, source, created_by)
+       VALUES ($1,$2,$3,$4,'active', now(), $5, $6, $7) RETURNING *`,
+      [input.kind, input.product, input.qty, input.reward, expiresAt, input.source, input.createdBy]
+    );
+    const rec = this.urgentRowToRec(res.rows[0]);
+    this.urgentOrders.set(rec.id, rec);
+    this.lastUrgentSpawnMs = now;
+    console.log(`[urgent] SPAWN #${rec.id} ${rec.requiredQty}x${rec.product} reward=$${rec.reward} kind=${rec.kind} src=${rec.source} in=${input.durSecs}s`);
+    this.emitUrgent(rec);
+    return rec;
+  }
+
+  /** Admin: create an urgent order (audited). Bounded to a safe envelope. */
+  async createUrgentOrder(
+    adminId: number,
+    input: { product: ProductId; qty: number; reward: number; durationSecs?: number; kind?: string }
+  ): Promise<UrgentOrderPub> {
+    this.requireAdmin(adminId);
+    const product = input.product;
+    if (!URGENT_ORDER_PRODUCTS.includes(product)) throw new GameError('err.urgent_bad_product');
+    const qty = Math.floor(input.qty);
+    if (!Number.isFinite(qty) || qty < 1 || qty > URGENT_ADMIN_MAX_QTY) throw new GameError('err.urgent_bad_qty', { max: URGENT_ADMIN_MAX_QTY });
+    const reward = Math.floor(input.reward);
+    if (!Number.isFinite(reward) || reward < 0 || reward > URGENT_ADMIN_MAX_REWARD) throw new GameError('err.urgent_bad_reward', { max: URGENT_ADMIN_MAX_REWARD });
+    let dur = Math.floor(input.durationSecs ?? URGENT_MAX_DURATION_SECS);
+    dur = Math.max(URGENT_ADMIN_MIN_DURATION_SECS, Math.min(URGENT_ADMIN_MAX_DURATION_SECS, dur));
+    const kind = (URGENT_ORDER_KINDS as readonly string[]).includes(input.kind ?? '') ? (input.kind as UrgentOrderKind) : 'city_hall';
+    const rec = await this.spawnUrgentOrder({ product, qty, reward, durSecs: dur, kind, source: 'admin', createdBy: adminId }, Date.now());
+    await this.logAdminAction(adminId, 'CREATE_URGENT_ORDER', 'urgent_order', String(rec.id), { product, qty, reward, durSecs: dur, kind });
+    return this.toUrgentPub(rec);
+  }
+
+  /** Admin: cancel a live urgent order (audited). No winner, no payout. */
+  async cancelUrgentOrder(adminId: number, orderId: number, reason?: string): Promise<UrgentOrderPub> {
+    this.requireAdmin(adminId);
+    const o = this.urgentOrders.get(orderId);
+    if (!o || (o.status !== 'active' && o.status !== 'upcoming')) throw new GameError('err.urgent_not_live');
+    const upd = await query(
+      "UPDATE urgent_orders SET status='cancelled' WHERE id=$1 AND status IN ('active','upcoming') RETURNING id",
+      [orderId]
+    );
+    if (!upd.rowCount) throw new GameError('err.urgent_not_live');
+    o.status = 'cancelled';
+    this.urgentOrders.delete(orderId);
+    await this.logAdminAction(adminId, 'CANCEL_URGENT_ORDER', 'urgent_order', String(orderId), reason ? { reason } : undefined);
+    this.emitUrgent(o);
+    return this.toUrgentPub(o);
+  }
+
+  /** Tick sweep: activate upcoming, expire past-deadline (restart-safe). */
+  private async sweepUrgentOrders(now: number): Promise<void> {
+    for (const o of [...this.urgentOrders.values()]) {
+      if (o.status === 'upcoming' && o.startsAtMs <= now && o.expiresAtMs > now) {
+        o.status = 'active';
+        await query("UPDATE urgent_orders SET status='active' WHERE id=$1 AND status='upcoming'", [o.id]).catch(() => {});
+        this.emitUrgent(o);
+        continue;
+      }
+      if ((o.status === 'active' || o.status === 'upcoming') && o.expiresAtMs <= now) {
+        o.status = 'expired';
+        this.urgentOrders.delete(o.id);
+        await query("UPDATE urgent_orders SET status='expired' WHERE id=$1 AND status IN ('active','upcoming')", [o.id]).catch(() => {});
+        console.log(`[urgent] EXPIRE #${o.id} ${o.product}`);
+        this.emitUrgent(o);
+      }
+    }
+  }
+
+  /**
+   * Fulfil an urgent order. EXACTLY ONE winner: the DB flips active->fulfilled
+   * under a status guard, so a concurrent second claim finds zero rows. The
+   * winner loses the goods once and receives the reward once. FULL fulfilment
+   * only (Phase 4 has no partial delivery). Mirrors the acceptOffer discipline.
+   */
+  async fulfillUrgentOrder(playerId: number, orderId: number, bizId?: number): Promise<UrgentOrderRec> {
+    if (this.urgentLocks.has(orderId)) throw new GameError('err.urgent_processing');
+    const p = this.player(playerId);
+    const company = this.companies.get(playerId);
+    if (!company) throw new GameError('err.no_company');
+    const o = this.urgentOrders.get(orderId);
+    if (!o || o.status !== 'active') throw new GameError('err.urgent_not_active');
+    if (o.expiresAtMs <= Date.now()) throw new GameError('err.urgent_expired');
+    if (o.winnerCompanyId != null) throw new GameError('err.urgent_already_won');
+    // Ownership + stock: the player must own a business holding enough UNRESERVED
+    // stock of the exact product (reserved goods are escrowed for the market).
+    const biz = this.requireOwnedBiz(playerId, bizId);
+    const stock = inv(biz, o.product);
+    if (stock.qty < o.requiredQty) throw new GameError('err.only_have', { qty: stock.qty, product: o.product });
+
+    this.urgentLocks.add(orderId);
+    const before = p.cash;
+    try {
+      // Mutate memory synchronously: goods leave, reward arrives.
+      stock.qty -= o.requiredQty;
+      p.cash += o.reward; p.dirty = true;
+      biz.revenue += o.reward; biz.tradeCount += 1; biz.dirty = true;
+      o.status = 'fulfilled'; o.winnerPlayerId = playerId; o.winnerCompanyId = company.id; o.fulfilledAtMs = Date.now();
+
+      await tx(async (c) => {
+        const upd = await c.query(
+          `UPDATE urgent_orders SET status='fulfilled', winner_player_id=$2, winner_company_id=$3, fulfilled_at=now()
+           WHERE id=$1 AND status='active' RETURNING id`,
+          [orderId, playerId, company.id]
+        );
+        if (!upd.rowCount) throw new GameError('err.urgent_already_won');
+        await c.query('UPDATE players SET cash=$1 WHERE id=$2', [p.cash, p.id]);
+        await c.query(
+          `INSERT INTO inventories (business_id, product, qty, reserved) VALUES ($1,$2,$3,$4)
+           ON CONFLICT (business_id, product) DO UPDATE SET qty=$3, reserved=$4`,
+          [biz.id, o.product, stock.qty, stock.reserved]
+        );
+        await c.query('UPDATE businesses SET revenue=$1 WHERE id=$2', [biz.revenue, biz.id]);
+        await c.query(LEDGER_SQL, ledgerParams({
+          playerId, businessId: biz.id, type: 'CITY_ORDER_REWARD', amount: o.reward,
+          refType: 'urgent_order', refId: orderId, before, after: p.cash,
+        }));
+        // Distinct activity kind: keeps a competitive audit trail without ever
+        // inflating final_sale/supplier_sale rankings.
+        await c.query(ACTIVITY_SQL, activityParams({
+          companyId: company.id, businessId: biz.id, kind: 'city_order', product: o.product, units: o.requiredQty, amount: o.reward,
+        }));
+      });
+      this.urgentOrders.delete(orderId);
+      console.log(`[urgent] FULFILL #${orderId} player=${playerId} company=${company.id} ${o.requiredQty}x${o.product} reward=$${o.reward}`);
+      this.emitUrgent(o);
+      this.emit('push_state', { playerId });
+      // Mandatory city news + win feedback for the winner (awaited so the item
+      // is durable before we hand control back — a city-order win is never lost).
+      await this.addCityNews('city_order_win', {
+        actorName: company.name, product: o.product,
+        params: { company: company.name, qty: o.requiredQty, product: o.product, reward: o.reward },
+      });
+      return o;
+    } catch (err) {
+      // Roll back the in-memory mutation on failure.
+      stock.qty += o.requiredQty; p.cash = before;
+      biz.revenue -= o.reward; biz.tradeCount -= 1;
+      o.status = 'active'; o.winnerPlayerId = null; o.winnerCompanyId = null; o.fulfilledAtMs = null;
+      throw err;
+    } finally {
+      this.urgentLocks.delete(orderId);
+    }
+  }
+
+  // ---- Rival Alerts (committed data only) ----
+
+  private ownerOfCompany(cid: number): number | null {
+    return this.companyById(cid)?.ownerId ?? null;
+  }
+
+  /**
+   * Coarse periodic sweep: from committed final-sale volumes, detect when a
+   * rival company overtakes another in the rolling window, and when the market
+   * leader changes. Runs at most every RIVAL_SWEEP_SECONDS — never per-player.
+   */
+  private async rivalSweep(now: number): Promise<void> {
+    if (now - this.lastRivalSweepMs < RIVAL_SWEEP_SECONDS * 1000) return;
+    this.lastRivalSweepMs = now;
+    const from = this.windowStartISO(0);
+    for (const product of FINAL_MARKET_PRODUCTS) {
+      const units = await this.recentUnits('final_sale', product, from);
+      const ranked = [...units.entries()].sort((a, b) => b[1] - a[1] || a[0] - b[0]).map(([cid]) => cid);
+      const prev = this.lastRankOrder.get(product);
+      if (prev) {
+        const prevRank = new Map(prev.map((cid, i) => [cid, i]));
+        const curRank = new Map(ranked.map((cid, i) => [cid, i]));
+        for (const cid of ranked) {
+          if ((units.get(cid) ?? 0) < RIVAL_MIN_UNITS) continue;
+          const pOld = prevRank.get(cid);
+          if (pOld == null) continue;
+          for (const rival of ranked) {
+            if (rival === cid) continue;
+            const rOld = prevRank.get(rival);
+            if (rOld == null) continue;
+            if ((units.get(rival) ?? 0) < RIVAL_MIN_UNITS) continue;
+            const wasBehind = rOld > pOld;
+            const nowAhead = curRank.get(rival)! < curRank.get(cid)!;
+            if (wasBehind && nowAhead) {
+              const owner = this.ownerOfCompany(cid);
+              if (owner != null) {
+                this.pushRivalAlert(owner, {
+                  id: `share:${product}:${cid}:${rival}`,
+                  type: 'market_share_overtaken', product,
+                  rivalName: this.companyById(rival)?.name ?? '???', at: now,
+                  params: { product, rival: this.companyById(rival)?.name ?? '', units: units.get(rival) ?? 0 },
+                });
+              }
+            }
+          }
+        }
+      }
+      this.lastRankOrder.set(product, ranked);
+      // Market-leader-change news (only when leadership actually changes).
+      const leader = ranked[0];
+      if (leader != null && (units.get(leader) ?? 0) >= RIVAL_MIN_UNITS) {
+        const prevLeader = this.marketLeader.get(product);
+        if (prevLeader != null && prevLeader !== leader) {
+          void this.addCityNews('market_leader_change', {
+            actorName: this.companyById(leader)?.name ?? null, product,
+            params: { company: this.companyById(leader)?.name ?? '', product },
+            dedupeKey: `leader:${product}:${leader}`,
+          });
+        }
+        this.marketLeader.set(product, leader);
+      }
+    }
+  }
+
+  /** Event-driven: a fresh cheaper sell listing undercuts live rivals. */
+  private checkPriceUndercut(order: OrderRec): void {
+    const myCompany = this.companies.get(order.playerId);
+    if (!myCompany) return;
+    const seen = new Set<number>();
+    for (const other of this.orders.values()) {
+      if (other.id === order.id) continue;
+      if (other.side !== 'sell' || other.status !== 'open') continue;
+      if (other.product !== order.product) continue;
+      const otherCo = this.companies.get(other.playerId);
+      if (!otherCo || otherCo.id === myCompany.id) continue;   // only OTHER companies
+      if (seen.has(otherCo.id)) continue;                       // one alert per rival
+      if (order.price <= other.price * (1 - RIVAL_MIN_UNDERCUT_FRACTION)) {
+        seen.add(otherCo.id);
+        this.pushRivalAlert(other.playerId, {
+          id: `undercut:${order.product}:${otherCo.id}:${myCompany.id}`,
+          type: 'price_undercut', product: order.product,
+          rivalName: myCompany.name, at: Date.now(),
+          params: { product: order.product, rival: myCompany.name, price: order.price, yourPrice: other.price },
+        });
+      }
+    }
+  }
+
+  /** Buffer + emit a rival alert, honouring the per-key cooldown + bound. */
+  private pushRivalAlert(playerId: number, alert: RivalAlert): void {
+    const last = this.rivalAlertAt.get(alert.id);
+    if (last != null && alert.at - last < RIVAL_ALERT_COOLDOWN_SECS * 1000) return; // deduped
+    this.rivalAlertAt.set(alert.id, alert.at);
+    const buf = this.rivalAlerts.get(playerId) ?? [];
+    buf.push(alert);
+    while (buf.length > RIVAL_MAX_ALERTS) buf.shift();
+    this.rivalAlerts.set(playerId, buf);
+    this.emit('rival_alert', { playerId, alert });
+  }
+
+  /** Recent rival alerts for a player (newest last). */
+  getRivalAlerts(playerId: number): RivalAlert[] {
+    return [...(this.rivalAlerts.get(playerId) ?? [])];
+  }
+
+  // ---- City News (bounded feed from committed events) ----
+
+  private announceBusinessOpened(biz: BizRec, company: CompanyRec): void {
+    void this.addCityNews('business_opened', {
+      actorName: company.name, product: null,
+      params: { company: company.name, type: biz.type },
+    });
+  }
+
+  private checkWholesaleLow(ws: WholesaleRec): void {
+    const low = ws.remaining <= ws.dailyStock * NEWS_WHOLESALE_LOW_FRACTION;
+    if (low && !this.wholesaleLowFlag.has(ws.product)) {
+      this.wholesaleLowFlag.add(ws.product);   // one news item per depletion cycle
+      void this.addCityNews('wholesale_low', {
+        actorName: null, product: ws.product,
+        params: { product: ws.product, remaining: Math.max(0, ws.remaining) },
+        dedupeKey: `wholesale_low:${ws.product}`,
+      });
+    }
+  }
+
+  /**
+   * Append a city-news item (privacy-safe) and prune to NEWS_MAX_ITEMS. An
+   * optional dedupeKey suppresses a repeat of the same event within 30 minutes.
+   */
+  private async addCityNews(
+    type: CityNewsType,
+    input: { actorName: string | null; product: ProductId | null; params: MsgParams; dedupeKey?: string }
+  ): Promise<void> {
+    try {
+      if (input.dedupeKey) {
+        const dup = await query(
+          `SELECT 1 FROM city_news WHERE dedupe_key=$1 AND created_at > now() - interval '30 minutes' LIMIT 1`,
+          [input.dedupeKey]
+        );
+        if (dup.rowCount) return;
+      }
+      const res = await query(
+        `INSERT INTO city_news (type, actor_name, product, params, dedupe_key)
+         VALUES ($1,$2,$3,$4,$5) RETURNING id, created_at`,
+        [type, input.actorName, input.product, JSON.stringify(input.params), input.dedupeKey ?? null]
+      );
+      // Bounded persistent history: keep only the newest NEWS_MAX_ITEMS rows.
+      await query(
+        `DELETE FROM city_news WHERE id NOT IN (SELECT id FROM city_news ORDER BY id DESC LIMIT $1)`,
+        [NEWS_MAX_ITEMS]
+      ).catch(() => {});
+      const item: CityNewsItem = {
+        id: Number(res.rows[0].id), type, at: new Date(res.rows[0].created_at).getTime(),
+        actorName: input.actorName, product: input.product, params: input.params,
+      };
+      this.emit('city_news_item', item);
+    } catch (err) {
+      console.error('[news] failed to record', type, err);
+    }
+  }
+
+  /** The bounded city-news feed (newest first). */
+  async cityNews(limit = NEWS_MAX_ITEMS): Promise<CityNewsItem[]> {
+    const r = await query(`SELECT * FROM city_news ORDER BY created_at DESC, id DESC LIMIT $1`, [Math.min(limit, NEWS_MAX_ITEMS)]);
+    return r.rows.map((row) => ({
+      id: Number(row.id), type: row.type, at: new Date(row.created_at).getTime(),
+      actorName: row.actor_name ?? null, product: row.product ?? null,
+      params: (row.params ?? {}) as MsgParams,
     }));
   }
 

@@ -121,6 +121,8 @@ npm run e2e:storage    # V2.6.2: storage capacity invariant & waiting deliveries
 npm run e2e:chat       # V2.7: City Chat realtime + moderation
 npm run e2e:admin      # V2.7: admin console live ops + hard delete
 npm run e2e:negotiation # V2.7: direct messaging, offers & counter-offers
+npm run e2e:urgent     # V2.7 Phase 4: urgent city order race (exactly one winner)
+npm run e2e:citynews   # V2.7 Phase 4: rival alerts & city news from committed data
 ```
 
 Each E2E creates fresh persistent businesses; the shared city has a limited

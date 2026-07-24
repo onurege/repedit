@@ -168,6 +168,13 @@ export class Net {
       this.sendToPlayer(o.buyerPlayer, { t: 'offer', offer: w.toOfferPub(o, o.buyerPlayer) });
       this.sendToPlayer(o.sellerPlayer, { t: 'offer', offer: w.toOfferPub(o, o.sellerPlayer) });
     });
+    // V2.7 Phase 4: urgent orders + city news are public (broadcast); a rival
+    // alert is private to the affected player.
+    w.on('urgent_order', (order: any) => this.broadcast({ t: 'urgent_order', order }));
+    w.on('city_news_item', (item: any) => this.broadcast({ t: 'city_news_item', item }));
+    w.on('rival_alert', ({ playerId, alert }: { playerId: number; alert: any }) => {
+      this.sendToPlayer(playerId, { t: 'rival_alert', alert });
+    });
     // V2.7 Phase 2: admin realtime effects.
     w.on('push_state', ({ playerId }: { playerId: number }) => this.pushOwnState(playerId));
     w.on('admin_force_logout', ({ playerId, reason }: { playerId: number; reason: string | null }) => {
@@ -265,6 +272,11 @@ export class Net {
         muted: this.world.isMuted(playerId),
         canModerate: this.world.isAdmin(playerId),
       });
+      // V2.7 Phase 4: seed live urgent orders, recent city news, and any rival
+      // alerts so a reconnecting client recovers state (§28).
+      this.send(ws, { t: 'urgent_orders', orders: this.world.listUrgentOrders() });
+      this.send(ws, { t: 'rival_alerts', alerts: this.world.getRivalAlerts(playerId) });
+      this.world.cityNews().then((items) => this.send(ws, { t: 'city_news', items })).catch(() => {});
       this.broadcastPlayers();
 
       ws.on('message', (raw) => this.onMessage(conn, raw.toString()));
@@ -562,6 +574,27 @@ export class Net {
           break;
         case 'offer_cancel':
           await world.cancelOffer(pid, msg.offerId);
+          break;
+        // ---- V2.7 Phase 4: urgent orders, city news ----
+        case 'get_urgent_orders':
+          this.send(conn.ws, { t: 'urgent_orders', orders: world.listUrgentOrders() });
+          break;
+        case 'urgent_fulfill': {
+          const order = await world.fulfillUrgentOrder(pid, msg.orderId, msg.bizId);
+          this.send(conn.ws, { t: 'toast', code: 'toast.urgent_won', params: { reward: order.reward, product: order.product }, kind: 'success' });
+          break;
+        }
+        case 'get_city_news':
+          this.send(conn.ws, { t: 'city_news', items: await world.cityNews() });
+          break;
+        case 'admin_create_urgent': {
+          const order = await world.createUrgentOrder(pid, { product: msg.product, qty: msg.qty, reward: msg.reward, durationSecs: msg.durationSecs, kind: msg.kind });
+          this.send(conn.ws, { t: 'toast', code: 'toast.urgent_created', params: { id: order.id }, kind: 'success' });
+          break;
+        }
+        case 'admin_cancel_urgent':
+          await world.cancelUrgentOrder(pid, msg.orderId, msg.reason);
+          this.send(conn.ws, { t: 'toast', code: 'toast.urgent_cancelled', kind: 'info' });
           break;
         case 'dev': {
           if (!config.devTools) throw new GameError('err.dev_disabled');
