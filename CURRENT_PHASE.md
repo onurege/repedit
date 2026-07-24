@@ -1,3 +1,16 @@
+# V2.7 — PLAYER INTERACTION & LIVE OPS (in progress, phased)
+
+Shipping in tested, deployable phases per the prompt's P0->P2 priority.
+
+## Phase 1 (shipped) — City Chat + moderation + admin audit foundation
+Real-time City Chat over the existing WebSocket stack: bounded persistent
+history, server-side validation (length, markup/control-char stripping,
+profanity mask, rate limiting), mute/report moderation, and admin delete —
+all gated by the existing `isAdmin` guard. Introduces `admin_audit_log`, the
+append-only, secret-free audit trail every later V2.7 admin action reuses.
+See DECISIONS.md. Remaining V2.7 areas (DMs, live offers, urgent city orders,
+full admin console + hard delete, rival alerts, city news, feedback) follow.
+
 # V2.6.2 — STORAGE CAPACITY INVARIANT (hotfix)
 
 Deliveries (Marketplace, Contracts, Wholesale) could unload into a full store,

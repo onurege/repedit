@@ -157,6 +157,8 @@ import {
   type IntegrityState,
   type WholesaleProduct,
   type WholesaleState,
+  type ChatMessagePub,
+  type ChatReportReason,
 } from '@district/shared';
 import { query, tx } from '../db.js';
 
@@ -448,6 +450,10 @@ export class World extends EventEmitter {
   private integrity = new Map<number, IntegrityRec>(); // keyed by companyId
   // Per-company per-product units bought this wholesale day (in-memory).
   private dailyBuys = new Map<number, Map<ProductId, number>>();
+  // V2.7 Phase 1: City Chat + moderation (in-memory recent buffer + mutes).
+  private chatBuffer: ChatMessagePub[] = [];   // bounded recent history
+  private chatMutes = new Map<number, { until: number | null; reason: string | null }>();
+  private chatRate = new Map<number, number[]>(); // playerId -> recent send timestamps
   timeScale = 1;
   private tickTimer: ReturnType<typeof setInterval> | null = null;
   private ticksSinceFlush = 0;
@@ -725,6 +731,7 @@ export class World extends EventEmitter {
     }
     await this.processWholesale(now);
     await this.seedExpansionAnnouncement();
+    await this.loadChat();
 
     await this.flush();
     console.log(
@@ -3348,6 +3355,202 @@ export class World extends EventEmitter {
 
   isAdmin(playerId: number): boolean {
     return this.players.get(playerId)?.isAdmin ?? false;
+  }
+
+  // ==================== V2.7 Phase 1: City Chat ====================
+
+  private static readonly CHAT_MAX_LEN = 280;
+  private static readonly CHAT_HISTORY = 60;      // recent messages kept/returned
+  private static readonly CHAT_WINDOW_MS = 10_000;
+  private static readonly CHAT_MAX_PER_WINDOW = 6; // <=6 messages / 10s
+  private static readonly CHAT_MIN_GAP_MS = 900;   // and no faster than ~1/s
+  // Small, conservative profanity mask. Deliberately minimal — not a filter arms race.
+  private static readonly PROFANITY = /\b(fuck|shit|bitch|asshole|dick|cunt|orospu|siktir|amk|amina)\b/gi;
+
+  /** Load recent chat history and active mutes into memory on startup. */
+  private async loadChat(): Promise<void> {
+    const rows = await query(
+      `SELECT id, author_name, company_name, kind, body, created_at
+         FROM city_chat_messages WHERE NOT deleted
+         ORDER BY id DESC LIMIT $1`,
+      [World.CHAT_HISTORY]
+    );
+    this.chatBuffer = rows.rows.reverse().map((r) => ({
+      id: Number(r.id),
+      authorName: r.author_name,
+      companyName: r.company_name ?? null,
+      kind: r.kind,
+      body: r.body,
+      at: new Date(r.created_at).getTime(),
+    }));
+    const mutes = await query('SELECT player_id, muted_until, reason FROM player_mutes');
+    for (const m of mutes.rows) {
+      this.chatMutes.set(m.player_id, {
+        until: m.muted_until ? new Date(m.muted_until).getTime() : null,
+        reason: m.reason ?? null,
+      });
+    }
+  }
+
+  /** Sanitise chat body: strip markup/control chars, collapse space, mask slurs. */
+  private sanitizeChat(raw: string): string {
+    let s = (raw ?? '').replace(/[<>]/g, '');
+    s = s.replace(/[\u0000-\u001F\u007F]/g, ' ');
+    s = s.replace(/\s+/g, ' ').trim().slice(0, World.CHAT_MAX_LEN);
+    s = s.replace(World.PROFANITY, (w) => '*'.repeat(w.length));
+    return s;
+  }
+
+  /** Is a player currently muted? Expired mutes are cleared lazily. */
+  isMuted(playerId: number): boolean {
+    const m = this.chatMutes.get(playerId);
+    if (!m) return false;
+    if (m.until != null && m.until <= Date.now()) {
+      this.chatMutes.delete(playerId);
+      query('DELETE FROM player_mutes WHERE player_id=$1', [playerId]).catch(() => {});
+      return false;
+    }
+    return true;
+  }
+
+  muteInfo(playerId: number): { until: number | null; reason: string | null } | null {
+    return this.isMuted(playerId) ? this.chatMutes.get(playerId)! : null;
+  }
+
+  recentChat(): ChatMessagePub[] {
+    return this.chatBuffer.slice(-World.CHAT_HISTORY);
+  }
+
+  /**
+   * Post a player chat message. Validated + rate-limited + mute-checked server
+   * side; returns the stored public message, or throws a GameError the caller
+   * turns into a client error/toast.
+   */
+  async sendChat(playerId: number, rawBody: string): Promise<ChatMessagePub> {
+    const p = this.player(playerId);
+    if (this.isMuted(playerId)) throw new GameError('err.chat_muted');
+    const body = this.sanitizeChat(rawBody);
+    if (body.length === 0) throw new GameError('err.chat_empty');
+
+    // Rate limit: bounded messages per window + a minimum gap.
+    const now = Date.now();
+    const stamps = (this.chatRate.get(playerId) ?? []).filter((t) => now - t < World.CHAT_WINDOW_MS);
+    if (stamps.length >= World.CHAT_MAX_PER_WINDOW) throw new GameError('err.chat_rate');
+    if (stamps.length && now - stamps[stamps.length - 1] < World.CHAT_MIN_GAP_MS) throw new GameError('err.chat_rate');
+    stamps.push(now);
+    this.chatRate.set(playerId, stamps);
+
+    const company = this.companies.get(playerId);
+    const companyName = company?.name ?? (p.name ? defaultCompanyName(p.name) : null);
+    const res = await query(
+      `INSERT INTO city_chat_messages (player_id, author_name, company_name, kind, body)
+       VALUES ($1,$2,$3,'user',$4) RETURNING id, created_at`,
+      [playerId, p.name, companyName, body]
+    );
+    const msg: ChatMessagePub = {
+      id: Number(res.rows[0].id),
+      authorName: p.name,
+      companyName,
+      kind: 'user',
+      body,
+      at: new Date(res.rows[0].created_at).getTime(),
+    };
+    this.pushChat(msg);
+    return msg;
+  }
+
+  /** Post a SYSTEM chat line (e.g. wholesale-low notices). Not player-authored. */
+  async systemChat(body: string): Promise<ChatMessagePub> {
+    const clean = this.sanitizeChat(body);
+    const res = await query(
+      `INSERT INTO city_chat_messages (player_id, author_name, company_name, kind, body)
+       VALUES (NULL,'SYSTEM',NULL,'system',$1) RETURNING id, created_at`,
+      [clean]
+    );
+    const msg: ChatMessagePub = {
+      id: Number(res.rows[0].id), authorName: 'SYSTEM', companyName: null,
+      kind: 'system', body: clean, at: new Date(res.rows[0].created_at).getTime(),
+    };
+    this.pushChat(msg);
+    return msg;
+  }
+
+  private pushChat(msg: ChatMessagePub): void {
+    this.chatBuffer.push(msg);
+    if (this.chatBuffer.length > World.CHAT_HISTORY * 2) {
+      this.chatBuffer = this.chatBuffer.slice(-World.CHAT_HISTORY);
+    }
+    this.emit('chat', msg);
+  }
+
+  /** Report a message. One report per (message, reporter); silently deduped. */
+  async reportChat(playerId: number, messageId: number, reason: ChatReportReason, note?: string): Promise<void> {
+    this.player(playerId);
+    const valid: ChatReportReason[] = ['spam', 'harassment', 'offensive', 'other'];
+    if (!valid.includes(reason)) throw new GameError('err.bad_report_reason');
+    const cleanNote = (note ?? '').replace(/[<>]/g, '').trim().slice(0, 200) || null;
+    await query(
+      `INSERT INTO chat_reports (message_id, reporter_id, reason, note)
+       VALUES ($1,$2,$3,$4) ON CONFLICT (message_id, reporter_id) DO NOTHING`,
+      [messageId, playerId, reason, cleanNote]
+    );
+  }
+
+  // -------- admin moderation (all server-authorized + audited) --------
+
+  async adminDeleteChat(adminId: number, messageId: number): Promise<void> {
+    this.requireAdmin(adminId);
+    await query('UPDATE city_chat_messages SET deleted=true WHERE id=$1', [messageId]);
+    this.chatBuffer = this.chatBuffer.filter((m) => m.id !== messageId);
+    await this.logAdminAction(adminId, 'DELETE_CHAT_MESSAGE', 'chat_message', String(messageId));
+    this.emit('chat_deleted', messageId);
+  }
+
+  async adminMute(adminId: number, targetId: number, minutes?: number, reason?: string): Promise<void> {
+    this.requireAdmin(adminId);
+    const until = minutes && minutes > 0 ? Date.now() + minutes * 60_000 : null;
+    const cleanReason = (reason ?? '').replace(/[<>]/g, '').trim().slice(0, 200) || null;
+    this.chatMutes.set(targetId, { until, reason: cleanReason });
+    await query(
+      `INSERT INTO player_mutes (player_id, muted_until, reason, muted_by)
+       VALUES ($1,$2,$3,$4)
+       ON CONFLICT (player_id) DO UPDATE SET muted_until=$2, reason=$3, muted_by=$4, created_at=now()`,
+      [targetId, until ? new Date(until) : null, cleanReason, adminId]
+    );
+    await this.logAdminAction(adminId, 'MUTE_PLAYER', 'player', String(targetId), { until, reason: cleanReason });
+    this.emit('player_muted', { playerId: targetId, until, reason: cleanReason });
+  }
+
+  async adminUnmute(adminId: number, targetId: number): Promise<void> {
+    this.requireAdmin(adminId);
+    this.chatMutes.delete(targetId);
+    await query('DELETE FROM player_mutes WHERE player_id=$1', [targetId]);
+    await this.logAdminAction(adminId, 'UNMUTE_PLAYER', 'player', String(targetId));
+    this.emit('player_muted', { playerId: targetId, until: 0, reason: null }); // until:0 => unmuted signal
+  }
+
+  /**
+   * Append-only admin audit entry. Reused by every consequential admin action.
+   * Never records secrets (passwords/tokens); `detail` holds before/after/reason.
+   */
+  async logAdminAction(
+    adminId: number,
+    action: string,
+    targetType?: string,
+    targetId?: string,
+    detail?: Record<string, unknown>
+  ): Promise<void> {
+    const adminName = this.players.get(adminId)?.name ?? '???';
+    await query(
+      `INSERT INTO admin_audit_log (admin_id, admin_name, action, target_type, target_id, detail)
+       VALUES ($1,$2,$3,$4,$5,$6)`,
+      [adminId, adminName, action, targetType ?? null, targetId ?? null, detail ? JSON.stringify(detail) : null]
+    );
+    console.log(`[admin] ${adminName}(#${adminId}) ${action}${targetType ? ` ${targetType}:${targetId}` : ''}`);
+  }
+
+  requireAdmin(playerId: number): void {
+    if (!this.isAdmin(playerId)) throw new GameError('err.not_admin');
   }
 
   async createAnnouncement(

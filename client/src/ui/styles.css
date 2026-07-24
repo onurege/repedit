@@ -511,3 +511,19 @@ button { font-family: inherit; }
 .capbar > div.over { background: #dc2626; }
 .cap.wait { color: #b45309; font-weight: 700; }
 .hint.neg { color: #b91c1c; }
+
+/* ---- V2.7 Phase 1: City Chat ---- */
+.chat-log { display: flex; flex-direction: column; gap: 8px; max-height: calc(100% - 56px); overflow-y: auto; padding: 4px 2px; }
+.chat-row { font-size: 13px; }
+.chat-row.self .chat-body { background: #eff6ff; }
+.chat-row.system { color: #7c3aed; font-style: italic; }
+.chat-sys { font-weight: 800; letter-spacing: 0.5px; font-size: 10.5px; background: #ede9fe; padding: 1px 6px; border-radius: 6px; }
+.chat-meta { display: flex; align-items: center; gap: 6px; color: #94a3b8; font-size: 11px; }
+.chat-who { font-weight: 700; color: #475569; }
+.chat-time { margin-left: auto; }
+.chat-act { border: 0; background: transparent; cursor: pointer; font-size: 12px; opacity: 0.55; padding: 0 2px; }
+.chat-act:hover { opacity: 1; }
+.chat-body { background: #f1f5f9; border-radius: 8px; padding: 6px 9px; margin-top: 2px; word-break: break-word; }
+.chat-composer { display: flex; gap: 6px; margin-top: 8px; }
+.chat-composer input { flex: 1; padding: 8px 10px; border: 1.5px solid #dbe3ee; border-radius: 9px; font: inherit; }
+.chat-muted { margin-top: 8px; padding: 8px 10px; background: #fef2f2; color: #b91c1c; border-radius: 9px; font-size: 12.5px; font-weight: 600; }

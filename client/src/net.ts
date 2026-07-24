@@ -24,6 +24,7 @@ import type {
   UpdatePub,
   AnnouncementPub,
   WholesaleState,
+  ChatMessagePub,
 } from '@district/shared';
 import { t } from './i18n.js';
 
@@ -59,6 +60,10 @@ export class GameClient {
   wholesale: WholesaleState | null = null;
   brief: MorningBrief | null = null;
   cityStatus: CityStatus | null = null;
+  chat: ChatMessagePub[] = [];
+  chatMuted = false;
+  chatMutedReason: string | null = null;
+  canModerate = false;
   tutorial: TutorialState | null = null;
   updatesUnseen: UpdatePub[] = [];
   updatesAll: UpdatePub[] = [];
@@ -320,6 +325,28 @@ export class GameClient {
         this.cityStatus = msg.status;
         this.emit('city_status', msg.status);
         this.emit('update');
+        break;
+      case 'chat_history':
+        this.chat = msg.messages;
+        this.chatMuted = msg.muted;
+        this.canModerate = msg.canModerate;
+        this.emit('chat');
+        break;
+      case 'chat': {
+        this.chat.push(msg.message);
+        if (this.chat.length > 120) this.chat = this.chat.slice(-120);
+        this.emit('chat', msg.message);
+        break;
+      }
+      case 'chat_deleted':
+        this.chat = this.chat.filter((m) => m.id !== msg.messageId);
+        this.emit('chat');
+        break;
+      case 'chat_muted':
+        this.chatMuted = msg.muted;
+        this.chatMutedReason = msg.reason;
+        this.emit('chat');
+        this.emit('chat_muted', msg);
         break;
       case 'wholesale':
         this.wholesale = msg.wholesale;

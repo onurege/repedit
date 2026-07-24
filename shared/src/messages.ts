@@ -18,6 +18,22 @@ import type {
 // Actions that target one of the player's businesses carry an optional
 // `bizId`. If omitted and the player owns exactly one business, the server
 // uses that (keeps single-business play simple).
+// ---------- V2.7 Phase 1: City Chat ----------
+
+export type ChatKind = 'user' | 'system';
+export type ChatReportReason = 'spam' | 'harassment' | 'offensive' | 'other';
+
+/** A public city-chat message. Never carries private economic data. */
+export interface ChatMessagePub {
+  id: number;
+  authorName: string;      // denormalised; survives author deletion
+  companyName: string | null;
+  kind: ChatKind;
+  body: string;            // already sanitised server-side
+  at: number;              // epoch ms
+  self?: boolean;          // set per-recipient for the sender
+}
+
 export type ClientMsg =
   | { t: 'choose_business'; type: BusinessType }
   | { t: 'open_business'; lotId: string; type: BusinessType }
@@ -46,6 +62,13 @@ export type ClientMsg =
   | { t: 'get_announcements' }
   | { t: 'create_announcement'; title: string; message: string; kind: AnnouncementType; priority: AnnouncementPriority; durationSecs?: number }
   | { t: 'city_status' }
+  // ---- V2.7 Phase 1: City Chat + moderation ----
+  | { t: 'get_chat' }
+  | { t: 'chat_send'; body: string }
+  | { t: 'chat_report'; messageId: number; reason: ChatReportReason; note?: string }
+  | { t: 'admin_delete_chat'; messageId: number }
+  | { t: 'admin_mute'; playerId: number; minutes?: number; reason?: string }
+  | { t: 'admin_unmute'; playerId: number }
   | { t: 'ping' };
 
 // ---------- server -> client ----------
@@ -481,4 +504,9 @@ export type ServerMsg =
   | { t: 'announcements'; active: AnnouncementPub[]; history: AnnouncementPub[] }
   | { t: 'announcement'; announcement: AnnouncementPub }  // live broadcast
   | { t: 'city_status'; status: CityStatus }
+  // ---- V2.7 Phase 1: City Chat ----
+  | { t: 'chat_history'; messages: ChatMessagePub[]; muted: boolean; canModerate: boolean }
+  | { t: 'chat'; message: ChatMessagePub }
+  | { t: 'chat_deleted'; messageId: number }
+  | { t: 'chat_muted'; muted: boolean; until: number | null; reason: string | null }
   | { t: 'pong' };

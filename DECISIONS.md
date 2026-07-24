@@ -373,3 +373,39 @@ Emergency Import path must always stay open and penalty-free.
 `npm run report:overflow -w server` lists every over-capacity slot
 (business, owner, type, product, capacity, used, overflow) read-only — it never
 touches player goods. Use it to inspect production before/after deploy.
+
+## V2.7 — Player interaction & live ops (phased)
+
+V2.7 is large (~10 subsystems). It is delivered in tested, independently
+deployable phases following the prompt's own P0→P2 priority, so economic
+correctness and admin authorization are never traded for feature count.
+
+### Phase 1 — City Chat, moderation & the admin audit-log foundation
+
+- **Extends the existing WebSocket architecture, no parallel stack.** Chat rides
+  the same typed ClientMsg/ServerMsg + broadcast/sendToPlayer machinery as every
+  other realtime feature. Recent history is an in-memory bounded buffer backed
+  by `city_chat_messages`; only the last ~60 messages are kept/sent.
+- **Server-authoritative safety.** Every message is length-capped (280), has
+  markup (`<>`) and control chars stripped, a small profanity mask applied, is
+  rate-limited (≤6 / 10s and ≥900ms apart, per player, in memory), and checked
+  against active mutes — all before it is stored or broadcast. Author identity
+  is denormalised so a message still renders after the author is deleted.
+- **Moderation reuses the existing `isAdmin` guard.** `adminDeleteChat`,
+  `adminMute`, `adminUnmute` all call `requireAdmin` server-side — hiding the UI
+  is never the authorization. A non-admin crafting the WebSocket message is
+  rejected with `err.not_admin` (regression-tested). Mutes persist in
+  `player_mutes` and survive restart; expired mutes clear lazily. Players can
+  report a message (`chat_reports`, unique per message+reporter = spam guard);
+  reporter identity is never exposed.
+- **`admin_audit_log` is the reusable foundation for ALL later admin features.**
+  Append-only, never editable by admins, never stores secrets; `logAdminAction`
+  records admin, action, target and a JSON detail (before/after/reason). Phase 1
+  already logs DELETE_CHAT_MESSAGE / MUTE_PLAYER / UNMUTE_PLAYER.
+- **Privacy preserved.** Chat payloads carry only public identity + body — never
+  cash, inventory or other private economic data.
+
+Later phases (Direct Messaging, Live Offers/counter-offers, Urgent City Orders,
+the full Admin Console incl. wholesale/cash/inventory controls + hard delete,
+Rival Alerts, City News, Feedback) build on this same audit + authorization
+foundation.
