@@ -236,6 +236,7 @@ export interface WholesaleProduct {
   category: StockCategory;
   resetAt: number;         // epoch ms of next daily reset
   emergency: boolean;      // out of stock -> emergency fallback applies
+  importDependent: boolean; // no player producer -> Emergency Import is a lifeline, not a penalty
 }
 
 export interface WholesaleState {

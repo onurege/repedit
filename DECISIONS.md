@@ -290,3 +290,44 @@
 
 Lots, pathfinding, occupancy, camera bounds, city status and the district
 selector all derive from the definition and need no further changes.
+
+## V2.5.1 — Import commodity availability (hotfix)
+
+- **The deadlock was social, not mechanical.** V2.5's emergency reserve already
+  kept every wholesale good buyable past depletion (2.5×, capped per purchase),
+  so a Coffee Shop was never *mechanically* blocked. The real harm was in the
+  hidden market-integrity system: every emergency purchase accrued a
+  "depletion" suspicion signal, so an honest Coffee Shop — forced to import
+  Coffee Beans because no player produces them — accumulated flags and could
+  eventually be penalised for a shortage it did not cause.
+- **Classification is derived, not hard-coded.** A product is import-dependent
+  when no business type supplies it (`playerProducerOf` reads `SELLER_SUPPLIES`).
+  Coffee Beans are the only such good today. Nothing in the app special-cases
+  the string `'beans'`; add a producer to the config and it stops being an
+  import automatically.
+- **The exemption is surgical.** Emergency purchases of import-dependent goods
+  no longer accrue the depletion signal — there is no player alternative, so it
+  cannot be manipulation. The same behaviour on a player-producible good (wheat,
+  milk) still accrues it, because there you *could* have traded with players
+  instead of cornering the NPC. Reselling beans above 3× base still trips the
+  separate extreme-resale signal, so deliberate abuse is still caught.
+- **The UI names the lifeline.** An import-dependent good that is out of normal
+  stock shows "Emergency Import available" rather than a bare "OUT OF STOCK", so
+  the player understands they can still buy it. No implementation detail leaks.
+
+### Supply-chain validation
+
+Every business recipe input has at least one reachable supply path, so no
+business can hard-lock. Verified by `unreachableInputs()` (asserted empty in
+`server/test/import-supply.test.ts`).
+
+| Input  | Player source        | NPC fallback                          |
+|--------|----------------------|---------------------------------------|
+| Milk   | Farm                 | Central Wholesale (finite daily)      |
+| Wheat  | Farm                 | Central Wholesale (finite daily)      |
+| Bread  | Bakery               | Central Wholesale (flat, unlimited)   |
+| Beans  | **none — imported**  | Central Wholesale + **Emergency Import** |
+
+Consumers: Coffee Shop needs Milk + Beans; Bakery needs Wheat; Mini Market
+needs Bread + Milk. Beans is the only import commodity and is the reason the
+Emergency Import path must always stay open and penalty-free.

@@ -144,6 +144,8 @@ import {
   INTEGRITY_START,
   SIGNAL_HIGH_SHARE,
   SIGNAL_DEPLETION,
+  isImportDependent,
+  BUSINESS_INPUTS,
   SIGNAL_EXTREME_RESALE,
   HIGH_SHARE_FRACTION,
   EXTREME_RESALE_MULT,
@@ -374,9 +376,8 @@ const STARTING_PRODUCTS: Record<BusinessType, ProductId[]> = {
 const FINAL_PRODUCTS_OF: Record<BusinessType, ProductId[]> = {
   coffee_shop: ['coffee'], bakery: ['bread'], mini_market: ['bread', 'milk'], farm: [],
 };
-const INPUTS_OF: Record<BusinessType, ProductId[]> = {
-  coffee_shop: ['milk', 'beans'], bakery: ['wheat'], mini_market: ['bread', 'milk'], farm: [],
-};
+// Recipe inputs come from the shared single source of truth (BUSINESS_INPUTS).
+const INPUTS_OF = BUSINESS_INPUTS;
 
 function inv(biz: BizRec, product: ProductId): InvRec {
   let rec = biz.inv.get(product);
@@ -1153,6 +1154,7 @@ export class World extends EventEmitter {
         category: stockCategory(ws.remaining, ws.dailyStock),
         resetAt: ws.resetAtMs,
         emergency: ws.remaining <= 0,
+        importDependent: isImportDependent(product),
       });
     }
     return { products, serverTime: Date.now() };
@@ -1188,8 +1190,11 @@ export class World extends EventEmitter {
       rec.crossedHighShare.add(product);
       this.addSuspicion(rec, SIGNAL_HIGH_SHARE);
     }
-    // Signal 2: this buy dipped into the emergency reserve (depletion).
-    if (emerQty > 0) this.addSuspicion(rec, SIGNAL_DEPLETION);
+    // Signal 2: this buy dipped into the emergency reserve (depletion). Skipped
+    // for import-dependent goods (e.g. Coffee Beans): with no player producer,
+    // using Emergency Import when normal stock is out is forced, not
+    // manipulation, so it must never accrue suspicion.
+    if (emerQty > 0 && !isImportDependent(product)) this.addSuspicion(rec, SIGNAL_DEPLETION);
   }
 
   private addSuspicion(rec: IntegrityRec, amount: number): void {
