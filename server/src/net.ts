@@ -502,6 +502,19 @@ export class Net {
           await world.adminDeactivateAnnouncement(pid, msg.id);
           this.send(conn.ws, { t: 'toast', code: 'toast.admin_done', kind: 'success' });
           break;
+        case 'admin_rename_company': {
+          await world.adminRenameCompany(pid, msg.playerId, msg.name);
+          this.send(conn.ws, { t: 'toast', code: 'toast.admin_done', kind: 'success' });
+          this.send(conn.ws, { t: 'admin_player_detail', detail: await world.adminPlayerDetail(pid, msg.playerId) });
+          break;
+        }
+        case 'admin_rename_business': {
+          await world.adminRenameBusiness(pid, msg.bizId, msg.name);
+          const biz = world.businesses.get(msg.bizId);
+          this.send(conn.ws, { t: 'toast', code: 'toast.admin_done', kind: 'success' });
+          if (biz) this.send(conn.ws, { t: 'admin_player_detail', detail: await world.adminPlayerDetail(pid, biz.ownerId) });
+          break;
+        }
         case 'admin_hard_delete':
           await world.adminHardDeletePlayer(pid, msg.playerId, msg.confirmName);
           this.send(conn.ws, { t: 'toast', code: 'toast.admin_deleted', kind: 'success' });

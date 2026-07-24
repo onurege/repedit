@@ -1946,7 +1946,8 @@ export class UI {
     this.setBody(body, `
       <button class="btn small ghost" id="admin-back">← ${t('admin.back')}</button>
       <div class="kv"><span class="k">${t('admin.username')}</span><span class="v">${escapeHtml(d.username)} ${d.online ? '🟢' : '⚪'} ${d.suspended ? '⛔' : ''}</span></div>
-      <div class="kv"><span class="k">${t('admin.company')}</span><span class="v">${d.company ? escapeHtml(d.company.name) + ' · Lv ' + d.company.level : '—'}</span></div>
+      <div class="kv"><span class="k">${t('admin.company')}</span><span class="v">${d.company ? escapeHtml(d.company.name) + ' · Lv ' + d.company.level : '—'}${d.company ? ` <button class="btn small ghost" id="admin-rename-co">✎</button>` : ''}</span></div>
+      ${d.businesses.length ? `<h4 class="admin-h">${t('admin.businesses')}</h4>` + d.businesses.map((b) => `<div class="kv"><span class="k">${BIZ_ICON[b.type] ?? '🏪'} ${bizName(b.type)} <span class="cap">${t(`district.${b.district}.name`)} · Lv ${b.level}</span></span><span class="v"><button class="btn small ghost" data-rename-biz="${b.id}">✎ ${t('admin.rename')}</button></span></div>`).join('') : ''}
       <div class="kv"><span class="k">${t('admin.cash')}</span><span class="v">${fmt(d.cash)}
         <button class="btn small ghost" data-cash="add">＋</button>
         <button class="btn small ghost" data-cash="remove">−</button>
@@ -1982,6 +1983,15 @@ export class UI {
         setTimeout(() => client.send({ t: 'admin_player_detail', playerId: d.id }), 300);
       });
       b.querySelector('#admin-delete')!.addEventListener('click', () => this.adminHardDelete(d));
+      b.querySelector('#admin-rename-co')?.addEventListener('click', () => {
+        const name = prompt(t('admin.rename_company_prompt'), d.company?.name ?? '');
+        if (name && name.trim()) client.send({ t: 'admin_rename_company', playerId: d.id, name: name.trim() });
+      });
+      b.querySelectorAll('[data-rename-biz]').forEach((el) => el.addEventListener('click', () => {
+        const bizId = parseInt((el as HTMLElement).dataset.renameBiz!, 10);
+        const name = prompt(t('admin.rename_business_prompt')) ?? '';
+        client.send({ t: 'admin_rename_business', bizId, name: name.trim() });
+      }));
     });
   }
 

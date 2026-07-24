@@ -223,3 +223,37 @@ describe('hard delete player', () => {
     expect(world.players.has(a)).toBe(true);
   });
 });
+
+describe('admin rename company / business', () => {
+  it('renames any player\'s company and business, audited, with validation', async () => {
+    const a = await admin(world);
+    const pid = await newPlayer(world, 'branded');
+    const biz = await world.chooseBusiness(pid, 'coffee_shop');
+
+    await world.adminRenameCompany(a, pid, 'Onur Foods');
+    expect(world.companyByOwner(pid)!.name).toBe('Onur Foods');
+    await world.adminRenameBusiness(a, biz.id, 'Downtown Brews');
+    expect(world.businesses.get(biz.id)!.name).toBe('Downtown Brews');
+    // Empty business name clears back to the default label.
+    await world.adminRenameBusiness(a, biz.id, '   ');
+    expect(world.businesses.get(biz.id)!.name).toBeNull();
+    // Markup stripped; over-long rejected.
+    await world.adminRenameBusiness(a, biz.id, '<b>Cafe</b>');
+    expect(world.businesses.get(biz.id)!.name).not.toContain('<');
+    await expect(world.adminRenameCompany(a, pid, 'x')).rejects.toBeInstanceOf(GameError); // too short
+    // Persisted + audited.
+    const co = await query('SELECT name FROM companies WHERE player_id=$1', [pid]);
+    expect(co.rows[0].name).toBe('Onur Foods');
+    const audit = await world.adminRecentAudit(a, 20);
+    expect(audit.some((e) => e.action === 'RENAME_COMPANY')).toBe(true);
+    expect(audit.some((e) => e.action === 'RENAME_BUSINESS')).toBe(true);
+  });
+
+  it('rejects rename from a non-admin', async () => {
+    const nobody = await newPlayer(world, 'plebe');
+    const pid = await newPlayer(world, 'target2');
+    const biz = await world.chooseBusiness(pid, 'farm');
+    await expect(world.adminRenameCompany(nobody, pid, 'Hax Corp')).rejects.toBeInstanceOf(GameError);
+    await expect(world.adminRenameBusiness(nobody, biz.id, 'Hax Farm')).rejects.toBeInstanceOf(GameError);
+  });
+});

@@ -167,6 +167,8 @@ export type ClientMsg =
   | { t: 'admin_wholesale_refill_all'; reason?: string }
   | { t: 'admin_announce_edit'; id: number; title?: string; message?: string; priority?: AnnouncementPriority; durationSecs?: number }
   | { t: 'admin_announce_deactivate'; id: number }
+  | { t: 'admin_rename_company'; playerId: number; name: string }
+  | { t: 'admin_rename_business'; bizId: number; name: string }
   | { t: 'admin_hard_delete'; playerId: number; confirmName: string; reason?: string }
   | { t: 'admin_audit'; limit?: number }
   | { t: 'ping' };

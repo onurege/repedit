@@ -3740,6 +3740,40 @@ export class World extends EventEmitter {
     await this.retryWaitingDeliveries(biz.id);
   }
 
+  async adminRenameCompany(adminId: number, targetPlayerId: number, name: string): Promise<void> {
+    this.requireAdmin(adminId);
+    const company = this.companyByOwner(targetPlayerId);
+    if (!company) throw new GameError('err.unknown_player');
+    const clean = (name ?? '').replace(/\s+/g, ' ').trim().replace(/[<>]/g, '');
+    if (clean.length < COMPANY_NAME_MIN || clean.length > COMPANY_NAME_MAX) {
+      throw new GameError('err.company_name_len', { min: COMPANY_NAME_MIN, max: COMPANY_NAME_MAX });
+    }
+    const before = company.name;
+    company.name = clean;
+    company.dirty = true;
+    await query('UPDATE companies SET name=$1 WHERE id=$2', [clean, company.id]);
+    await this.logAdminAction(adminId, 'RENAME_COMPANY', 'company', String(company.id), { before, after: clean });
+    this.emit('company', company);
+    for (const b of this.bizesByOwner(targetPlayerId)) this.emit('biz_pub', b); // public cards
+  }
+
+  async adminRenameBusiness(adminId: number, bizId: number, name: string): Promise<void> {
+    this.requireAdmin(adminId);
+    const biz = this.businesses.get(bizId);
+    if (!biz) throw new GameError('err.bad_lot');
+    const clean = (name ?? '').replace(/\s+/g, ' ').trim().replace(/[<>]/g, '');
+    if (clean.length !== 0 && (clean.length < BUSINESS_NAME_MIN || clean.length > BUSINESS_NAME_MAX)) {
+      throw new GameError('err.business_name_len', { min: BUSINESS_NAME_MIN, max: BUSINESS_NAME_MAX });
+    }
+    const before = biz.name;
+    biz.name = clean.length === 0 ? null : clean; // empty clears back to the default label
+    biz.dirty = true;
+    await query('UPDATE businesses SET name=$1 WHERE id=$2', [biz.name, biz.id]);
+    await this.logAdminAction(adminId, 'RENAME_BUSINESS', 'business', String(bizId), { before, after: biz.name });
+    this.emit('biz_pub', biz);
+    this.emit('push_state', { playerId: biz.ownerId });
+  }
+
   // -------- Central Wholesale admin (live, no restart) --------
 
   async adminWholesale(adminId: number, product: ProductId, op: AdminWholesaleOp, amount?: number, reason?: string): Promise<void> {
