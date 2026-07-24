@@ -254,6 +254,12 @@ export class Net {
           this.send(conn.ws, { t: 'toast', code: 'toast.company_renamed', kind: 'success' });
           break;
         }
+        case 'rename_business': {
+          await world.renameBusiness(pid, msg.name, msg.bizId);
+          this.pushOwnState(pid);
+          this.send(conn.ws, { t: 'toast', code: 'toast.business_renamed', kind: 'success' });
+          break;
+        }
         case 'buy_npc':
           await world.buyNpc(pid, msg.product, msg.qty, msg.bizId);
           this.pushOwnState(pid);

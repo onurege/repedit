@@ -237,6 +237,8 @@ export function businessOpenCost(currentCount: number): number {
 
 export const COMPANY_NAME_MIN = 2;
 export const COMPANY_NAME_MAX = 24;
+export const BUSINESS_NAME_MIN = 2;
+export const BUSINESS_NAME_MAX = 28;
 
 export function defaultCompanyName(username: string): string {
   return `${username} Co.`.slice(0, COMPANY_NAME_MAX);

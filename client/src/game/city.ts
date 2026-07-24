@@ -358,7 +358,7 @@ export class City {
       // so switching language must invalidate them.
       const lang = getLang();
       if (lot.kind === 'wholesale') key = `wholesale:${lang}`;
-      else if (biz) key = `biz:${biz.id}:${biz.level}:${biz.ownerName}:${lang}`;
+      else if (biz) key = `biz:${biz.id}:${biz.level}:${biz.name ?? biz.ownerName}:${lang}`;
       else key = `vacant:${lang}`;
       if (this.lotState.get(lot.id) === key) continue;
       this.lotState.set(lot.id, key);
@@ -385,7 +385,7 @@ export class City {
           bakery: makeBakery,
           mini_market: makeMiniMarket,
         };
-        group = (builders[biz.type] ?? makeFarm)(biz.level, biz.ownerName);
+        group = (builders[biz.type] ?? makeFarm)(biz.level, biz.name || biz.ownerName);
         sel = { lotId: lot.id, kind: 'business', bizId: biz.id };
       } else {
         group = makeVacantSign(lot.kind);

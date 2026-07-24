@@ -489,3 +489,12 @@ button { font-family: inherit; }
 
 .district-bar:empty { display: none; }
 .district-title:hover { color: #2563eb; }
+
+/* ---- renamable panel title (business name) ---- */
+.title-rename {
+  border: 0; background: transparent; cursor: pointer; font: inherit;
+  color: inherit; padding: 0; display: inline-flex; align-items: center; gap: 6px;
+}
+.title-rename:hover { color: #2563eb; }
+.title-rename .pencil { font-size: 0.72em; opacity: 0; transition: opacity 0.15s; }
+.title-rename:hover .pencil { opacity: 0.7; }

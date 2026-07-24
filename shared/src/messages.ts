@@ -22,6 +22,7 @@ export type ClientMsg =
   | { t: 'choose_business'; type: BusinessType }
   | { t: 'open_business'; lotId: string; type: BusinessType }
   | { t: 'rename_company'; name: string }
+  | { t: 'rename_business'; name: string; bizId?: number }
   | { t: 'buy_npc'; product: ProductId; qty: number; bizId?: number }
   | { t: 'order_create'; side: 'buy' | 'sell'; product: ProductId; qty: number; price: number; bizId?: number }
   | { t: 'order_cancel'; orderId: number }
@@ -100,6 +101,7 @@ export interface BizPub {
   companyId: number;
   companyName: string;
   type: BusinessType;
+  name: string | null;  // player-chosen name; null => default "<owner>'s <Type>"
   lotId: string;
   district: DistrictId; // derived from the lot; districts share one economy
   level: number;

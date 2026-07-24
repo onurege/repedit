@@ -9,7 +9,7 @@ import {
   MAX_LEVEL, xpForLevel, MAX_PLAYER_LEVEL, contractableProducts, BAD_STATUSES,
   CONTRACT_FREQUENCY_SECS, LOTS, BUSINESS_CAPACITY, businessOpenCost,
   DISTRICTS, type DistrictId, type DistrictOccupancy,
-  companyCapacity, COMPANY_NAME_MIN, COMPANY_NAME_MAX,
+  companyCapacity, COMPANY_NAME_MIN, COMPANY_NAME_MAX, BUSINESS_NAME_MIN, BUSINESS_NAME_MAX,
   type BizPub, type OrderPub, type AwayReport, type ProductId, type ContractPub,
   type BusinessType, type CompanyProfile, type RankingBoard, type CityRankings,
   type CityMarket, type CityEventPub, type ProductDemand, type CityEventEffects,
@@ -53,6 +53,15 @@ function bizName(type: string): string {
 /** Localized "🐄 alice's Farm" heading used by the business and info panels. */
 function bizTitle(type: string, owner: string): string {
   return t('biz.title', { icon: BIZ_ICON[type] ?? '🏪', owner, name: bizName(type) });
+}
+
+/**
+ * Heading for a specific business: its custom name if set, otherwise the
+ * default "<owner>'s <Type>" label. Always keeps the type icon.
+ */
+function bizHeading(biz: { type: string; name: string | null; ownerName: string }): string {
+  const icon = BIZ_ICON[biz.type] ?? '🏪';
+  return biz.name ? `${icon} ${escapeHtml(biz.name)}` : bizTitle(biz.type, biz.ownerName);
 }
 
 /** Business status code -> display text, with the vacant/unknown fallback. */
@@ -632,7 +641,8 @@ export class UI {
         const inner = list
           .map((b) => {
             const sel = b.id === client.selectedBizId;
-            return `<button class="biz-chip ${sel ? 'active' : ''}" data-biz-chip="${b.id}" title="${bizName(b.type)} · ${t(`district.${districtId}.name`)}">${BIZ_ICON[b.type] ?? '🏪'}</button>`;
+            const chipName = b.name ? escapeHtml(b.name) : bizName(b.type);
+            return `<button class="biz-chip ${sel ? 'active' : ''}" data-biz-chip="${b.id}" title="${chipName} · ${t(`district.${districtId}.name`)}">${BIZ_ICON[b.type] ?? '🏪'}</button>`;
           })
           .join('');
         const label = groups.size > 1
@@ -790,6 +800,53 @@ export class UI {
     input.select();
   }
 
+  /** Render the panel title as a clickable "rename" affordance. */
+  private setRenamableTitle(title: HTMLElement, label: string, onClick: () => void): void {
+    title.innerHTML = `<button class="title-rename" title="${t('biz.rename_hint')}">${label} <span class="pencil">✎</span></button>`;
+    title.querySelector('.title-rename')!.addEventListener('click', () => { sfx.click(); onClick(); });
+  }
+
+  /** Overlay to rename (or clear the name of) one owned business. */
+  showRenameBusiness(bizId: number): void {
+    document.getElementById('rename-overlay')?.remove();
+    const biz = client.myBusinesses.get(bizId);
+    if (!biz) return;
+    const overlay = document.createElement('div');
+    overlay.className = 'overlay modal';
+    overlay.id = 'rename-overlay';
+    overlay.innerHTML = `
+      <div class="card" style="width:min(420px,94vw)">
+        <h1>${t('biz.rename_title')}</h1>
+        <div class="field"><label>${t('biz.name_label')}</label>
+          <input id="bz-rename-input" maxlength="${BUSINESS_NAME_MAX}" placeholder="${bizTitle(biz.type, biz.ownerName)}" value="${biz.name ? escapeHtml(biz.name) : ''}" /></div>
+        <div class="auth-error" id="bz-rename-err"></div>
+        <div class="mkt-row">
+          <button class="btn primary" id="bz-rename-go">${t('company.save')}</button>
+          <button class="btn ghost" id="bz-rename-cancel">${t('company.cancel')}</button>
+        </div>
+        <div class="hint">${t('biz.rename_clear_hint')}</div>
+      </div>`;
+    document.body.appendChild(overlay);
+    const input = overlay.querySelector('#bz-rename-input') as HTMLInputElement;
+    const err = overlay.querySelector('#bz-rename-err') as HTMLElement;
+    const submit = () => {
+      const name = input.value.trim();
+      // Empty clears the name; otherwise enforce the length bounds.
+      if (name.length > 0 && (name.length < BUSINESS_NAME_MIN || name.length > BUSINESS_NAME_MAX)) {
+        err.textContent = t('err.business_name_len', { min: BUSINESS_NAME_MIN, max: BUSINESS_NAME_MAX });
+        sfx.error();
+        return;
+      }
+      client.send({ t: 'rename_business', name, bizId });
+      overlay.remove();
+    };
+    overlay.querySelector('#bz-rename-go')!.addEventListener('click', submit);
+    overlay.querySelector('#bz-rename-cancel')!.addEventListener('click', () => overlay.remove());
+    input.addEventListener('keydown', (e) => { if ((e as KeyboardEvent).key === 'Enter') submit(); });
+    input.focus();
+    input.select();
+  }
+
   // ================= PANEL RENDERING =================
 
   private lastBodyHTML = '';
@@ -884,7 +941,9 @@ export class UI {
       return;
     }
     const isFarm = biz.type === 'farm';
-    title.textContent = bizTitle(biz.type, biz.ownerName);
+    // Owned business: the heading is a rename affordance (mirrors the company
+    // name button). setTitle keeps it an interactive element, not plain text.
+    this.setRenamableTitle(title, bizHeading(biz), () => this.showRenameBusiness(biz.id));
     const tab = this.tabBar(tabs, [
       { id: 'overview', label: t('tab.overview') },
       { id: 'inventory', label: t('tab.inventory') },
@@ -1192,7 +1251,7 @@ export class UI {
       this.setBody(body, `<p class="hint">${t('info.vacant')}</p>`);
       return;
     }
-    title.textContent = bizTitle(biz.type, biz.ownerName);
+    title.textContent = bizHeading(biz);
     const online = client.players.find((p) => p.id === biz.ownerId)?.online;
     const supplies = biz.supplies ?? [];
     const suppliesTxt = supplies.length

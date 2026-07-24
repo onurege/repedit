@@ -62,6 +62,8 @@ import {
   MARKET_MIN_PRICE,
   MARKET_MAX_PRICE,
   MARKET_MAX_QTY,
+  BUSINESS_NAME_MIN,
+  BUSINESS_NAME_MAX,
   LOTS,
   lotById,
   lotsOfKind,
@@ -220,6 +222,7 @@ export interface BizRec {
   ownerId: number;
   companyId: number;
   type: BusinessType;
+  name: string | null;
   lotId: string;
   createdAtMs: number;
   level: number;
@@ -577,6 +580,7 @@ export class World extends EventEmitter {
         ownerId: r.player_id,
         companyId: r.company_id ?? this.companies.get(r.player_id)?.id ?? 0,
         type: r.type,
+        name: r.name ?? null,
         lotId: r.lot_id,
         createdAtMs: new Date(r.created_at).getTime(),
         level: r.level,
@@ -1573,6 +1577,7 @@ export class World extends EventEmitter {
       ownerId: playerId,
       companyId,
       type,
+      name: null,
       lotId,
       createdAtMs: Date.now(),
       level: 1,
@@ -1692,6 +1697,26 @@ export class World extends EventEmitter {
     // Company name shows on every owned business's public card.
     for (const b of this.bizesByOwner(playerId)) this.emit('biz_pub', b);
     return company;
+  }
+
+  /**
+   * Give one of the player's businesses a custom display name. An empty name
+   * clears it, restoring the default "<owner>'s <Type>" label.
+   */
+  async renameBusiness(playerId: number, name: string, bizId?: number): Promise<BizRec> {
+    const biz = this.requireOwnedBiz(playerId, bizId);
+    const clean = (name ?? '').replace(/\s+/g, ' ').trim().replace(/[<>]/g, '');
+    if (clean.length === 0) {
+      biz.name = null;
+    } else if (clean.length < BUSINESS_NAME_MIN || clean.length > BUSINESS_NAME_MAX) {
+      throw new GameError('err.business_name_len', { min: BUSINESS_NAME_MIN, max: BUSINESS_NAME_MAX });
+    } else {
+      biz.name = clean;
+    }
+    biz.dirty = true;
+    await query('UPDATE businesses SET name=$1 WHERE id=$2', [biz.name, biz.id]);
+    this.emit('biz_pub', biz);   // public card shows the new name
+    return biz;
   }
 
   async buyNpc(playerId: number, product: ProductId, qty: number, bizId?: number): Promise<void> {
@@ -2632,6 +2657,7 @@ export class World extends EventEmitter {
       companyId: company?.id ?? b.companyId,
       companyName: company?.name ?? (owner ? defaultCompanyName(owner.name) : '???'),
       type: b.type,
+      name: b.name,
       lotId: b.lotId,
       district: lotById(b.lotId)?.district ?? DEFAULT_DISTRICT,
       level: b.level,
