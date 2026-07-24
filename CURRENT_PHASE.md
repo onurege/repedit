@@ -2,6 +2,16 @@
 
 Shipping in tested, deployable phases per the prompt's P0->P2 priority.
 
+## Phase 2 (shipped) — Admin & Live Ops console
+Routine live administration no longer needs direct PostgreSQL access. On the
+Phase 1 `requireAdmin` + `admin_audit_log` foundation: dashboard, player
+search/detail, suspend/unsuspend, force-logout, cash add/remove/set (ledgered),
+inventory add/remove/set (reuses the V2.6.2 capacity guard), full Central
+Wholesale control (stock/refill/daily/price/reset, live-pushed), announcement
+edit/deactivate, an audit viewer, and a transactional FK-complete hard delete
+that leaves no ghost business/lot and blocks reconnect. All server-authorized
+and audited. See DECISIONS.md.
+
 ## Phase 1 (shipped) — City Chat + moderation + admin audit foundation
 Real-time City Chat over the existing WebSocket stack: bounded persistent
 history, server-side validation (length, markup/control-char stripping,

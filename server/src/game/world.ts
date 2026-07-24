@@ -159,6 +159,14 @@ import {
   type WholesaleState,
   type ChatMessagePub,
   type ChatReportReason,
+  type AdminDashboard,
+  type AdminPlayerRow,
+  type AdminPlayerDetail,
+  type AdminAuditEntry,
+  type AdminReportEntry,
+  type AdminCashOp,
+  type AdminInvOp,
+  type AdminWholesaleOp,
 } from '@district/shared';
 import { query, tx } from '../db.js';
 
@@ -195,6 +203,8 @@ export interface PlayerRec {
   lastSeenMs: number;
   connections: number;
   isAdmin: boolean;
+  suspended: boolean;
+  suspendedReason: string | null;
   awaySnapshot: {
     ts: number;
     revenue: number;
@@ -578,6 +588,8 @@ export class World extends EventEmitter {
         lastSeenMs: new Date(r.last_seen).getTime(),
         connections: 0,
         isAdmin: r.is_admin ?? false,
+        suspended: r.suspended ?? false,
+        suspendedReason: r.suspended_reason ?? null,
         awaySnapshot: r.away_snapshot ?? null,
         dirty: false,
       });
@@ -1500,6 +1512,8 @@ export class World extends EventEmitter {
         lastSeenMs: new Date(r.last_seen).getTime(),
         connections: 0,
         isAdmin: r.is_admin ?? false,
+        suspended: r.suspended ?? false,
+        suspendedReason: r.suspended_reason ?? null,
         awaySnapshot: r.away_snapshot ?? null,
         dirty: false,
       };
@@ -3551,6 +3565,347 @@ export class World extends EventEmitter {
 
   requireAdmin(playerId: number): void {
     if (!this.isAdmin(playerId)) throw new GameError('err.not_admin');
+  }
+
+  isSuspended(playerId: number): boolean {
+    return this.players.get(playerId)?.suspended ?? false;
+  }
+
+  // ==================== V2.7 Phase 2: Admin & Live Ops ====================
+  // Every method here is admin-authorized server-side and, when it mutates
+  // state, writes an audit entry and pushes realtime updates. Inventory adds
+  // reuse the V2.6.2 capacity guard so admin actions can never overflow storage.
+
+  async adminDashboard(adminId: number): Promise<AdminDashboard> {
+    this.requireAdmin(adminId);
+    const districts = this.districtOccupancy();
+    return {
+      online: this.onlineCount(),
+      players: this.players.size,
+      companies: this.companies.size,
+      businesses: this.businesses.size,
+      districts: districts.length,
+      deliveries: [...this.deliveries.values()].filter((d) => d.status === 'in_transit').length,
+      waitingDeliveries: [...this.deliveries.values()].filter((d) => d.status === 'waiting').length,
+      contracts: [...this.contracts.values()].filter((c) => c.status === 'active').length,
+      orders: this.orders.size,
+      urgentOrders: 0,
+      cityEvents: this.cityEvents.filter((e) => e.status === 'active').length,
+      wholesale: [...this.wholesale.values()].map((w) => ({
+        product: w.product, remaining: Math.max(0, w.remaining), dailyStock: w.dailyStock, basePrice: w.basePrice,
+      })),
+      recentAudit: await this.adminRecentAudit(adminId, 8),
+      recentReports: await this.adminRecentReports(adminId, 8),
+    };
+  }
+
+  async adminSearchPlayers(adminId: number, q: string): Promise<AdminPlayerRow[]> {
+    this.requireAdmin(adminId);
+    // Escape ILIKE wildcards (keep legitimate underscores in usernames).
+    const term = `%${(q ?? '').trim().slice(0, 40).replace(/[\\%_]/g, (m) => '\\' + m)}%`;
+    const rows = await query(
+      `SELECT p.id, p.username, p.suspended, p.cash, c.name AS company_name,
+              (SELECT count(*)::int FROM businesses b WHERE b.player_id = p.id) AS biz
+         FROM players p LEFT JOIN companies c ON c.player_id = p.id
+        WHERE p.username ILIKE $1 OR c.name ILIKE $1 OR CAST(p.id AS TEXT) = $2
+        ORDER BY p.id LIMIT 30`,
+      [term, (q ?? '').trim()]
+    );
+    return rows.rows.map((r) => ({
+      id: r.id, username: r.username, companyName: r.company_name ?? null,
+      online: (this.players.get(r.id)?.connections ?? 0) > 0,
+      suspended: r.suspended, cash: r.cash, businesses: r.biz,
+    }));
+  }
+
+  async adminPlayerDetail(adminId: number, playerId: number): Promise<AdminPlayerDetail> {
+    this.requireAdmin(adminId);
+    const row = await query('SELECT * FROM players WHERE id=$1', [playerId]);
+    if (!row.rowCount) throw new GameError('err.unknown_player');
+    const r = row.rows[0];
+    const company = this.companies.get(playerId);
+    const bizes = this.bizesByOwner(playerId);
+    const inventory: AdminPlayerDetail['inventory'] = [];
+    for (const b of bizes) {
+      for (const [product, rec] of b.inv) {
+        inventory.push({
+          bizId: b.id, bizType: b.type, district: lotById(b.lotId)?.district ?? DEFAULT_DISTRICT,
+          product, qty: rec.qty, reserved: rec.reserved, capacity: capacityFor(b, product),
+        });
+      }
+    }
+    const ledger = await query(
+      `SELECT transaction_type AS type, amount, created_at FROM economic_ledger
+        WHERE player_id=$1 ORDER BY id DESC LIMIT 10`, [playerId]
+    );
+    const mem = this.players.get(playerId);
+    return {
+      id: r.id, username: r.username,
+      online: (mem?.connections ?? 0) > 0,
+      suspended: r.suspended, suspendedReason: r.suspended_reason ?? null,
+      muted: this.isMuted(playerId),
+      joinedAt: new Date(r.created_at).getTime(),
+      cash: r.cash, xp: r.xp, level: r.level,
+      reputation: bizes[0]?.reputation ?? REP_START,
+      company: company ? { id: company.id, name: company.name, level: company.level, xp: company.xp } : null,
+      businesses: bizes.map((b) => ({
+        id: b.id, type: b.type, district: lotById(b.lotId)?.district ?? DEFAULT_DISTRICT, level: b.level, lotId: b.lotId,
+      })),
+      inventory,
+      activeOrders: [...this.orders.values()].filter((o) => o.playerId === playerId && o.status === 'open').length,
+      activeContracts: [...this.contracts.values()].filter((c) => (c.buyerId === playerId || c.sellerId === playerId) && c.status === 'active').length,
+      recentLedger: ledger.rows.map((l) => ({ type: l.type, amount: l.amount, at: new Date(l.created_at).getTime() })),
+    };
+  }
+
+  async adminSuspend(adminId: number, targetId: number, suspend: boolean, reason?: string): Promise<void> {
+    this.requireAdmin(adminId);
+    const p = this.players.get(targetId);
+    if (!p) throw new GameError('err.unknown_player');
+    const clean = (reason ?? '').replace(/[<>]/g, '').trim().slice(0, 200) || null;
+    p.suspended = suspend;
+    p.suspendedReason = suspend ? clean : null;
+    await query('UPDATE players SET suspended=$1, suspended_reason=$2 WHERE id=$3', [suspend, p.suspendedReason, targetId]);
+    await this.logAdminAction(adminId, suspend ? 'SUSPEND_PLAYER' : 'UNSUSPEND_PLAYER', 'player', String(targetId), { reason: clean });
+    // A suspended player must not continue playing: force them off immediately.
+    if (suspend) this.emit('admin_force_logout', { playerId: targetId, reason: clean });
+  }
+
+  async adminForceLogout(adminId: number, targetId: number, reason?: string): Promise<void> {
+    this.requireAdmin(adminId);
+    const clean = (reason ?? '').replace(/[<>]/g, '').trim().slice(0, 200) || null;
+    await query('DELETE FROM sessions WHERE player_id=$1', [targetId]); // invalidate all sessions
+    await this.logAdminAction(adminId, 'FORCE_LOGOUT', 'player', String(targetId), { reason: clean });
+    this.emit('admin_force_logout', { playerId: targetId, reason: clean });
+  }
+
+  async adminSetCash(adminId: number, targetId: number, op: AdminCashOp, amount: number, reason?: string): Promise<void> {
+    this.requireAdmin(adminId);
+    const p = this.players.get(targetId);
+    if (!p) throw new GameError('err.unknown_player');
+    amount = Math.floor(amount);
+    if (!Number.isFinite(amount)) throw new GameError('err.invalid_amount');
+    const before = p.cash;
+    let after: number;
+    if (op === 'add') after = before + Math.max(0, amount);
+    else if (op === 'remove') after = before - Math.max(0, amount);
+    else after = amount; // set
+    after = Math.max(0, Math.floor(after)); // money is a non-negative integer
+    const delta = after - before;
+    const clean = (reason ?? '').replace(/[<>]/g, '').trim().slice(0, 200) || null;
+    p.cash = after;
+    p.dirty = true;
+    await tx(async (c) => {
+      await c.query('UPDATE players SET cash=$1 WHERE id=$2', [after, targetId]);
+      await c.query(LEDGER_SQL, ledgerParams({
+        playerId: targetId, businessId: null, type: 'ADMIN_CASH', amount: delta,
+        refType: 'admin', refId: adminId, before, after,
+      }));
+    });
+    await this.logAdminAction(adminId, 'SET_CASH', 'player', String(targetId), { op, amount, before, after, reason: clean });
+    this.emit('push_state', { playerId: targetId });
+  }
+
+  async adminSetInventory(adminId: number, bizId: number, product: ProductId, op: AdminInvOp, amount: number, reason?: string): Promise<void> {
+    this.requireAdmin(adminId);
+    const biz = this.businesses.get(bizId);
+    if (!biz) throw new GameError('err.bad_lot');
+    const cap = capacityFor(biz, product);
+    if (cap <= 0) throw new GameError('err.cannot_store_product', { bizType: biz.type, product });
+    amount = Math.floor(amount);
+    if (!Number.isFinite(amount) || amount < 0) throw new GameError('err.invalid_amount');
+    const rec = inv(biz, product);
+    const before = rec.qty;
+    let target: number;
+    if (op === 'add') target = before + amount;
+    else if (op === 'remove') target = before - amount;
+    else target = amount; // set
+    // Reuse the V2.6.2 storage invariant: physical stock (qty + reserved) must
+    // never exceed capacity — admin actions cannot recreate the overflow bug.
+    const maxQty = Math.max(0, cap - rec.reserved);
+    const after = Math.max(0, Math.min(target, maxQty));
+    const clamped = after !== target;
+    rec.qty = after;
+    biz.dirty = true;
+    await query(
+      `INSERT INTO inventories (business_id, product, qty, reserved) VALUES ($1,$2,$3,$4)
+       ON CONFLICT (business_id, product) DO UPDATE SET qty=$3, reserved=$4`,
+      [biz.id, product, rec.qty, rec.reserved]
+    );
+    const clean = (reason ?? '').replace(/[<>]/g, '').trim().slice(0, 200) || null;
+    await this.logAdminAction(adminId, 'SET_INVENTORY', 'business', String(bizId),
+      { product, op, amount, before, after, clamped, reason: clean });
+    this.emit('push_state', { playerId: biz.ownerId });
+    // Freeing/adding space may unblock or affect waiting deliveries.
+    await this.retryWaitingDeliveries(biz.id);
+  }
+
+  // -------- Central Wholesale admin (live, no restart) --------
+
+  async adminWholesale(adminId: number, product: ProductId, op: AdminWholesaleOp, amount?: number, reason?: string): Promise<void> {
+    this.requireAdmin(adminId);
+    const ws = this.wholesale.get(product);
+    if (!ws) throw new GameError('err.wholesale_no_product');
+    const before = { remaining: ws.remaining, dailyStock: ws.dailyStock, basePrice: ws.basePrice };
+    const v = Math.floor(amount ?? 0);
+    switch (op) {
+      case 'add': ws.remaining = Math.max(0, ws.remaining + Math.max(0, v)); break;
+      case 'remove': ws.remaining = Math.max(0, ws.remaining - Math.max(0, v)); break;
+      case 'set': ws.remaining = Math.max(0, v); break;
+      case 'refill': ws.remaining = ws.dailyStock; break;
+      case 'set_daily':
+        if (v < 1) throw new GameError('err.invalid_amount');
+        ws.dailyStock = v; ws.remaining = Math.min(ws.remaining, v); break;
+      case 'set_price':
+        if (v < 1) throw new GameError('err.invalid_amount');
+        ws.basePrice = v; break;
+      case 'reset':
+        // Force the daily rollover for this product: refill to full, reschedule.
+        ws.remaining = ws.dailyStock; ws.resetAtMs = Date.now() + WHOLESALE_DAY_SECONDS * 1000; break;
+      default: throw new GameError('err.invalid_amount');
+    }
+    ws.dirty = true;
+    await query(
+      'UPDATE wholesale_supply SET remaining=$1, daily_stock=$2, base_price=$3, reset_at=to_timestamp($4/1000.0), updated_at=now() WHERE product=$5',
+      [ws.remaining, ws.dailyStock, ws.basePrice, ws.resetAtMs, product]
+    );
+    const clean = (reason ?? '').replace(/[<>]/g, '').trim().slice(0, 200) || null;
+    await this.logAdminAction(adminId, op === 'set_price' ? 'CHANGE_WHOLESALE_PRICE' : 'REFILL_WHOLESALE', 'wholesale', product,
+      { op, amount: v, before, after: { remaining: ws.remaining, dailyStock: ws.dailyStock, basePrice: ws.basePrice }, reason: clean });
+    this.emitWholesale(); // live push to all clients — no restart
+  }
+
+  async adminWholesaleRefillAll(adminId: number, reason?: string): Promise<void> {
+    this.requireAdmin(adminId);
+    for (const ws of this.wholesale.values()) {
+      ws.remaining = ws.dailyStock; ws.dirty = true;
+      await query('UPDATE wholesale_supply SET remaining=$1, updated_at=now() WHERE product=$2', [ws.remaining, ws.product]);
+    }
+    const clean = (reason ?? '').replace(/[<>]/g, '').trim().slice(0, 200) || null;
+    await this.logAdminAction(adminId, 'REFILL_WHOLESALE', 'wholesale', 'ALL', { op: 'refill_all', reason: clean });
+    this.emitWholesale();
+  }
+
+  // -------- Announcements: edit / deactivate (create already exists) --------
+
+  async adminEditAnnouncement(adminId: number, id: number, patch: { title?: string; message?: string; priority?: AnnouncementPriority; durationSecs?: number }): Promise<AnnouncementPub> {
+    this.requireAdmin(adminId);
+    const cur = await query('SELECT * FROM announcements WHERE id=$1', [id]);
+    if (!cur.rowCount) throw new GameError('err.announce_not_found');
+    const title = patch.title != null ? patch.title.replace(/\s+/g, ' ').trim().replace(/[<>]/g, '') : cur.rows[0].title;
+    const message = patch.message != null ? patch.message.trim().replace(/[<>]/g, '') : cur.rows[0].message;
+    const priority = patch.priority ?? cur.rows[0].priority;
+    const expiresAt = patch.durationSecs != null
+      ? (patch.durationSecs > 0 ? new Date(Date.now() + patch.durationSecs * 1000) : null)
+      : cur.rows[0].expires_at;
+    const res = await query(
+      'UPDATE announcements SET title=$1, message=$2, priority=$3, expires_at=$4 WHERE id=$5 RETURNING *',
+      [title, message, priority, expiresAt, id]
+    );
+    await this.logAdminAction(adminId, 'EDIT_ANNOUNCEMENT', 'announcement', String(id), { title, priority });
+    return this.toAnnouncementPub(res.rows[0]);
+  }
+
+  async adminDeactivateAnnouncement(adminId: number, id: number): Promise<void> {
+    this.requireAdmin(adminId);
+    await query('UPDATE announcements SET is_active=false WHERE id=$1', [id]);
+    await this.logAdminAction(adminId, 'DEACTIVATE_ANNOUNCEMENT', 'announcement', String(id));
+  }
+
+  // -------- Audit viewer + reports --------
+
+  async adminRecentAudit(adminId: number, limit = 40): Promise<AdminAuditEntry[]> {
+    this.requireAdmin(adminId);
+    const rows = await query(
+      'SELECT id, admin_name, action, target_type, target_id, detail, created_at FROM admin_audit_log ORDER BY id DESC LIMIT $1',
+      [Math.min(100, Math.max(1, limit))]
+    );
+    return rows.rows.map((r) => ({
+      id: Number(r.id), adminName: r.admin_name, action: r.action,
+      targetType: r.target_type ?? null, targetId: r.target_id ?? null,
+      detail: r.detail ?? null, at: new Date(r.created_at).getTime(),
+    }));
+  }
+
+  async adminRecentReports(adminId: number, limit = 20): Promise<AdminReportEntry[]> {
+    this.requireAdmin(adminId);
+    const rows = await query(
+      `SELECT r.id, r.message_id, r.reason, r.note, r.created_at, m.body, m.author_name
+         FROM chat_reports r LEFT JOIN city_chat_messages m ON m.id = r.message_id
+        ORDER BY r.id DESC LIMIT $1`,
+      [Math.min(50, Math.max(1, limit))]
+    );
+    return rows.rows.map((r) => ({
+      id: Number(r.id), messageId: Number(r.message_id), reason: r.reason,
+      note: r.note ?? null, body: r.body ?? null, authorName: r.author_name ?? null,
+      at: new Date(r.created_at).getTime(),
+    }));
+  }
+
+  // -------- Hard delete: transactional, FK-aware, in-memory + broadcast --------
+
+  /**
+   * Permanently delete a player and all dependent state. Handles the two FK
+   * blockers explicitly (trades reference players AND market_orders with no
+   * cascade) by removing the player's trades inside the transaction first; the
+   * remaining tables cascade from `players`/`companies`/`businesses`. In-memory
+   * world state is purged and clients are told to drop the businesses, so no
+   * ghost company / building / occupied lot survives. Sessions cascade-delete,
+   * so the token is invalid — the player cannot reconnect.
+   */
+  async adminHardDeletePlayer(adminId: number, targetId: number, confirmName: string): Promise<{ bizIds: number[]; lotIds: string[] }> {
+    this.requireAdmin(adminId);
+    const p = this.players.get(targetId) ?? (await this.loadPlayerRow(targetId));
+    if (!p) throw new GameError('err.unknown_player');
+    if (confirmName !== p.name) throw new GameError('err.delete_confirm_mismatch');
+    if (targetId === adminId) throw new GameError('err.delete_self');
+
+    const bizes = this.bizesByOwner(targetId);
+    const bizIds = bizes.map((b) => b.id);
+    const lotIds = bizes.map((b) => b.lotId);
+    const before = { username: p.name, businesses: bizIds.length, cash: p.cash };
+
+    await tx(async (c) => {
+      // Resolve the trade FK tangle first: a trade references the player (buyer
+      // or seller) AND the fulfilled market_order; removing the player's trades
+      // clears both blockers before the player-delete cascade runs.
+      await c.query('DELETE FROM trades WHERE buyer_id=$1 OR seller_id=$1', [targetId]);
+      // Everything else cascades from players (sessions, businesses -> inventories,
+      // deliveries, market_orders, contracts; company -> integrity, market_share,
+      // company_activity; economic_ledger, tutorial_progress, player_seen_updates,
+      // player_mutes). chat/audit/announcement authorship is SET NULL (history kept).
+      await c.query('DELETE FROM players WHERE id=$1', [targetId]);
+    });
+
+    // Purge in-memory world state so nothing lingers or re-persists.
+    for (const b of bizes) this.businesses.delete(b.id);
+    const company = this.companies.get(targetId);
+    if (company) { this.integrity.delete(company.id); this.companies.delete(targetId); }
+    for (const [id, o] of [...this.orders]) if (o.playerId === targetId) this.orders.delete(id);
+    for (const [id, ct] of [...this.contracts]) if (ct.buyerId === targetId || ct.sellerId === targetId) this.contracts.delete(id);
+    for (const [id, d] of [...this.deliveries]) if (bizIds.includes(d.toBusinessId)) this.deliveries.delete(id);
+    this.chatMutes.delete(targetId);
+    this.chatRate.delete(targetId);
+    this.dailyBuys.delete(targetId);
+    this.players.delete(targetId);
+
+    await this.logAdminAction(adminId, 'HARD_DELETE_PLAYER', 'player', String(targetId), before);
+    // Tell every client to drop the deleted businesses (no ghost buildings/lots),
+    // and disconnect the deleted player (no reconnect: their sessions are gone).
+    this.emit('player_deleted', { playerId: targetId, bizIds, lotIds });
+    return { bizIds, lotIds };
+  }
+
+  private async loadPlayerRow(id: number): Promise<PlayerRec | null> {
+    const r = await query('SELECT * FROM players WHERE id=$1', [id]);
+    if (!r.rowCount) return null;
+    const row = r.rows[0];
+    return {
+      id: row.id, name: row.username, cash: row.cash, xp: row.xp, level: row.level,
+      lastSeenMs: new Date(row.last_seen).getTime(), connections: 0, isAdmin: row.is_admin ?? false,
+      suspended: row.suspended ?? false, suspendedReason: row.suspended_reason ?? null,
+      awaySnapshot: row.away_snapshot ?? null, dirty: false,
+    } as PlayerRec;
   }
 
   async createAnnouncement(

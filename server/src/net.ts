@@ -101,9 +101,10 @@ export class Net {
       this.pushOwnState(biz.ownerId);
     });
     w.on('biz_removed', ({ bizId }: { bizId: number; lotId: string }) => {
-      // Simplest correct refresh: clients get full biz list on next join;
-      // for live clients broadcast a status-less stub they interpret as removal.
+      // Drop the business for every client (frees the lot; no ghost building),
+      // then refresh the remaining list.
       this.broadcast({ t: 'toast', code: 'toast.lot_opened', kind: 'info' });
+      this.broadcast({ t: 'biz_removed', bizId });
       this.broadcastBizList();
     });
     w.on('order', (o: any) => {
@@ -158,6 +159,28 @@ export class Net {
       }
     });
     w.on('chat_deleted', (messageId: number) => this.broadcast({ t: 'chat_deleted', messageId }));
+    // V2.7 Phase 2: admin realtime effects.
+    w.on('push_state', ({ playerId }: { playerId: number }) => this.pushOwnState(playerId));
+    w.on('admin_force_logout', ({ playerId, reason }: { playerId: number; reason: string | null }) => {
+      for (const c of [...this.conns]) {
+        if (c.playerId === playerId) {
+          this.send(c.ws, { t: 'force_logout', reason });
+          try { c.ws.close(4003, 'force_logout'); } catch { /* ignore */ }
+        }
+      }
+    });
+    w.on('player_deleted', ({ playerId, bizIds }: { playerId: number; bizIds: number[] }) => {
+      // Drop the deleted player's buildings for everyone (no ghost lots), refresh
+      // presence, and disconnect the deleted player (their sessions are gone).
+      for (const bizId of bizIds) this.broadcast({ t: 'biz_removed', bizId });
+      this.broadcastPlayers();
+      for (const c of [...this.conns]) {
+        if (c.playerId === playerId) {
+          this.send(c.ws, { t: 'force_logout', reason: null });
+          try { c.ws.close(4004, 'deleted'); } catch { /* ignore */ }
+        }
+      }
+    });
     w.on('player_muted', ({ playerId, until, reason }: { playerId: number; until: number | null; reason: string | null }) => {
       // until:0 is the "unmuted" signal; otherwise the player is now muted.
       const muted = until !== 0;
@@ -181,6 +204,12 @@ export class Net {
         return;
       }
       await this.world.ensurePlayer(playerId);
+      // V2.7 Phase 2: a suspended player cannot enter authenticated gameplay.
+      if (this.world.isSuspended(playerId)) {
+        this.send(ws, { t: 'error', code: 'err.suspended' });
+        ws.close(4003, 'suspended');
+        return;
+      }
       const conn: Conn = { ws, playerId };
       this.conns.add(conn);
       const awayReport = this.world.connect(playerId);
@@ -425,6 +454,61 @@ export class Net {
           this.send(conn.ws, { t: 'toast', code: 'toast.player_unmuted', kind: 'success' });
           break;
         }
+        // ---- V2.7 Phase 2: Admin & Live Ops (all authorized inside world.*) ----
+        case 'admin_dashboard':
+          this.send(conn.ws, { t: 'admin_dashboard', dashboard: await world.adminDashboard(pid) });
+          break;
+        case 'admin_search_players':
+          this.send(conn.ws, { t: 'admin_players', results: await world.adminSearchPlayers(pid, msg.q) });
+          break;
+        case 'admin_player_detail':
+          this.send(conn.ws, { t: 'admin_player_detail', detail: await world.adminPlayerDetail(pid, msg.playerId) });
+          break;
+        case 'admin_suspend':
+          await world.adminSuspend(pid, msg.playerId, msg.suspend, msg.reason);
+          this.send(conn.ws, { t: 'toast', code: msg.suspend ? 'toast.admin_suspended' : 'toast.admin_unsuspended', kind: 'success' });
+          break;
+        case 'admin_force_logout':
+          await world.adminForceLogout(pid, msg.playerId, msg.reason);
+          this.send(conn.ws, { t: 'toast', code: 'toast.admin_forced_logout', kind: 'success' });
+          break;
+        case 'admin_cash':
+          await world.adminSetCash(pid, msg.playerId, msg.op, msg.amount, msg.reason);
+          this.send(conn.ws, { t: 'toast', code: 'toast.admin_done', kind: 'success' });
+          this.send(conn.ws, { t: 'admin_player_detail', detail: await world.adminPlayerDetail(pid, msg.playerId) });
+          break;
+        case 'admin_inventory': {
+          await world.adminSetInventory(pid, msg.bizId, msg.product, msg.op, msg.amount, msg.reason);
+          const biz = world.businesses.get(msg.bizId);
+          this.send(conn.ws, { t: 'toast', code: 'toast.admin_done', kind: 'success' });
+          if (biz) this.send(conn.ws, { t: 'admin_player_detail', detail: await world.adminPlayerDetail(pid, biz.ownerId) });
+          break;
+        }
+        case 'admin_wholesale':
+          await world.adminWholesale(pid, msg.product, msg.op, msg.amount, msg.reason);
+          this.send(conn.ws, { t: 'toast', code: 'toast.admin_done', kind: 'success' });
+          break;
+        case 'admin_wholesale_refill_all':
+          await world.adminWholesaleRefillAll(pid, msg.reason);
+          this.send(conn.ws, { t: 'toast', code: 'toast.admin_done', kind: 'success' });
+          break;
+        case 'admin_announce_edit': {
+          const a = await world.adminEditAnnouncement(pid, msg.id, { title: msg.title, message: msg.message, priority: msg.priority, durationSecs: msg.durationSecs });
+          this.broadcast({ t: 'announcement', announcement: a });
+          this.send(conn.ws, { t: 'toast', code: 'toast.admin_done', kind: 'success' });
+          break;
+        }
+        case 'admin_announce_deactivate':
+          await world.adminDeactivateAnnouncement(pid, msg.id);
+          this.send(conn.ws, { t: 'toast', code: 'toast.admin_done', kind: 'success' });
+          break;
+        case 'admin_hard_delete':
+          await world.adminHardDeletePlayer(pid, msg.playerId, msg.confirmName);
+          this.send(conn.ws, { t: 'toast', code: 'toast.admin_deleted', kind: 'success' });
+          break;
+        case 'admin_audit':
+          this.send(conn.ws, { t: 'admin_audit', entries: await world.adminRecentAudit(pid, msg.limit) });
+          break;
         case 'dev': {
           if (!config.devTools) throw new GameError('err.dev_disabled');
           const result = await world.devCommand(pid, msg.cmd, msg.value, msg.bizId);
