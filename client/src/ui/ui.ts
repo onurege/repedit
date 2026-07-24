@@ -17,6 +17,7 @@ import {
   type MorningBrief, type UpdatePub, type AnnouncementPub, type BusinessAlert,
   type Opportunity, type BriefMarket,
   type RivalAlert, type CityNewsItem, type UrgentOrderPub,
+  MARKET_MIN_PRICE, MARKET_MAX_PRICE, MARKET_MAX_QTY,
 } from '@district/shared';
 import { client } from '../net.js';
 import { sfx, unlockAudio } from '../audio.js';
@@ -149,7 +150,24 @@ export class UI {
       if (this.panelKind === 'messages') this.renderMessagesPanel(
         document.getElementById('panel-title')!, document.getElementById('panel-tabs')!, document.getElementById('panel-body')!);
       this.updateMessagesBadge();
-      if (o && o.awaitingPlayer === client.you?.id && o.canAct) this.toast(t('offer.new_notice'), 'info');
+      if (!o) return;
+      // A new/countered offer that's now MY move.
+      if (o.awaitingPlayer === client.you?.id && o.canAct) this.toast(t('offer.new_notice'), 'info');
+      // Terminal-state feedback via the game toast system (never alert()).
+      // Accept is toasted server-side to the actor; here we cover the outcomes
+      // the server doesn't push, for any offer this player is part of.
+      const mine = o.buyerPlayer === client.you?.id || o.sellerPlayer === client.you?.id;
+      const prev = this.offerStatusSeen.get(o.id);
+      if (mine && prev && prev !== o.status) {
+        if (o.status === 'rejected') this.toast(t('offer.toast.rejected'), 'info');
+        else if (o.status === 'expired') this.toast(t('offer.toast.expired'), 'info');
+        else if (o.status === 'cancelled') this.toast(t('offer.toast.withdrawn'), 'info');
+      }
+      if (o.status === 'accepted' || o.status === 'rejected' || o.status === 'expired' || o.status === 'cancelled') {
+        this.offerStatusSeen.delete(o.id);
+      } else {
+        this.offerStatusSeen.set(o.id, o.status);
+      }
     });
     client.on('admin', () => {
       if (this.panelKind === 'admin') this.renderAdminPanel(
@@ -1441,7 +1459,7 @@ export class UI {
         this.msgOtherId = biz.ownerId;
         client.send({ t: 'get_conversation', otherId: biz.ownerId });
         this.openPanel('messages');
-        setTimeout(() => this.makeOfferDialog(biz.ownerId), 200);
+        setTimeout(() => this.openOfferModal({ mode: 'create', otherId: biz.ownerId }), 200);
       });
       b.querySelector('#ct-open')?.addEventListener('click', () => {
         this.proposeFor = biz.id;
@@ -1990,6 +2008,8 @@ export class UI {
   // 1s ticker that keeps the urgent-order countdown live.
   private urgentAttempted = new Set<number>();
   private urgentTimer: ReturnType<typeof setInterval> | null = null;
+  // Last-seen status per live offer, to toast terminal transitions once.
+  private offerStatusSeen = new Map<number, string>();
   private chatUnread = 0;
   private adminTab = 'dashboard';
   private adminDetailId: number | null = null;
@@ -2068,7 +2088,7 @@ export class UI {
       document.getElementById('dm-send')!.addEventListener('click', submit);
       input.addEventListener('keydown', (e) => { if ((e as KeyboardEvent).key === 'Enter') submit(); });
       document.getElementById('dm-back')!.addEventListener('click', () => { this.msgOtherId = null; client.send({ t: 'get_conversations' }); this.lastDmHTML = ''; this.renderMessagesPanel(document.getElementById('panel-title')!, document.getElementById('panel-tabs')!, document.getElementById('panel-body')!); });
-      document.getElementById('dm-offer')!.addEventListener('click', () => this.makeOfferDialog(otherId));
+      document.getElementById('dm-offer')!.addEventListener('click', () => { sfx.click(); this.openOfferModal({ mode: 'create', otherId }); });
       this.bindOfferActions(body);
     } else {
       this.bindOfferActions(body); // buttons re-attached each render pass
@@ -2106,31 +2126,225 @@ export class UI {
     body.querySelectorAll('[data-offer-cancel]').forEach((el) => el.addEventListener('click', () =>
       client.send({ t: 'offer_cancel', offerId: parseInt((el as HTMLElement).dataset.offerCancel!, 10) })));
     body.querySelectorAll('[data-offer-counter]').forEach((el) => el.addEventListener('click', () => {
+      sfx.click();
       const [id, v] = (el as HTMLElement).dataset.offerCounter!.split(':');
       const o = client.offers.get(parseInt(id, 10)); if (!o) return;
-      const qty = parseInt(prompt(t('offer.counter_qty'), String(o.qty)) ?? '', 10);
-      if (!Number.isFinite(qty) || qty < 1) return;
-      const price = parseInt(prompt(t('offer.counter_price'), String(o.price)) ?? '', 10);
-      if (!Number.isFinite(price) || price < 1) return;
-      client.send({ t: 'offer_counter', offerId: parseInt(id, 10), qty, unitPrice: price, version: parseInt(v, 10) });
+      // Counter uses the SAME polished modal, prefilled and locked to the deal.
+      this.openOfferModal({
+        mode: 'counter',
+        otherId: o.iAmBuyer ? o.sellerPlayer : o.buyerPlayer,
+        counter: { offerId: o.id, version: parseInt(v, 10), product: o.product, qty: o.qty, price: o.price, iAmBuyer: o.iAmBuyer },
+      });
     }));
   }
 
-  /** Make-offer dialog. `otherId` is the counterparty player; pick their business. */
-  private makeOfferDialog(otherId: number): void {
-    const theirBiz = [...client.businesses.values()].filter((b) => b.ownerId === otherId);
-    if (!theirBiz.length) { this.toast(t('offer.no_biz'), 'error'); return; }
+  // ---- V2.7 Phase 3 UI polish: in-game offer / counter-offer modal ----
+  private static readonly OFFER_TRADABLE: ProductId[] = ['milk', 'beans', 'wheat', 'bread'];
+  private static readonly OFFER_EXPIRY_MINUTES = [5, 10, 15, 30];
+
+  /**
+   * The in-game trade-offer modal — replaces the old native prompt()/confirm()
+   * flow. `mode:'create'` proposes a new offer to `otherId`'s company;
+   * `mode:'counter'` reopens it prefilled and locked to an existing offer.
+   * Client validation is UX-only; the server stays authoritative.
+   */
+  private openOfferModal(opts: {
+    mode: 'create' | 'counter';
+    otherId: number;
+    counter?: { offerId: number; version: number; product: ProductId; qty: number; price: number; iAmBuyer: boolean };
+  }): void {
+    if (document.getElementById('offer-overlay')) return;
     const myBiz = client.myBiz;
     if (!myBiz) return;
-    const side = confirm(t('offer.side_prompt')) ? 'buy' : 'sell'; // OK = BUY, Cancel = SELL
-    const target = theirBiz[0]; // simplest: their first business (usually one)
-    const product = prompt(t('offer.product_prompt', { list: 'milk, wheat, beans, bread' }), 'milk') as ProductId | null;
-    if (!product) return;
-    const qty = parseInt(prompt(t('offer.qty_prompt')) ?? '', 10);
-    if (!Number.isFinite(qty) || qty < 1) return;
-    const price = parseInt(prompt(t('offer.price_prompt')) ?? '', 10);
-    if (!Number.isFinite(price) || price < 1) return;
-    client.send({ t: 'offer_create', toBizId: target.id, fromBizId: myBiz.id, side, product, qty, unitPrice: price });
+    const theirBiz = [...client.businesses.values()].filter((b) => b.ownerId === opts.otherId);
+    if (!theirBiz.length) { this.toast(t('offer.no_biz'), 'error'); return; }
+    const target = theirBiz[0];
+    const otherName = bizTitle(target.type, target.ownerName);
+    const otherLabel = target.companyName ?? otherName;
+    const isCounter = opts.mode === 'counter';
+
+    // Products valid for direct trade that this business actually tracks.
+    const storable = UI.OFFER_TRADABLE.filter((p) => (myBiz.inventory[p]?.capacity ?? 0) > 0 || (myBiz.inventory[p]?.qty ?? 0) > 0);
+    const products = storable.length ? storable : UI.OFFER_TRADABLE;
+
+    const state = {
+      side: (isCounter ? (opts.counter!.iAmBuyer ? 'buy' : 'sell') : 'buy') as 'buy' | 'sell',
+      product: (isCounter ? opts.counter!.product : products[0]) as ProductId,
+      qty: isCounter ? opts.counter!.qty : 100,
+      price: isCounter ? opts.counter!.price : 10,
+      expiryMin: 10,
+    };
+
+    const sideCard = (id: 'buy' | 'sell', icon: string) =>
+      `<button type="button" class="side-card ${state.side === id ? 'selected' : ''}" data-side="${id}" ${isCounter ? 'disabled' : ''}>
+         <span class="sc-icon">${icon}</span>
+         <span class="sc-title">${t('offer.' + id)}</span>
+         <span class="sc-desc">${t('offer.' + id + '_desc')}</span>
+       </button>`;
+
+    const prodChip = (p: ProductId) =>
+      `<button type="button" class="prod-chip ${state.product === p ? 'selected' : ''}" data-prod="${p}" ${isCounter ? 'disabled' : ''}>
+         ${PRODUCTS[p].emoji} <span>${pName(p)}</span></button>`;
+
+    const expiryChip = (m: number) =>
+      `<button type="button" class="expiry-chip ${state.expiryMin === m ? 'selected' : ''}" data-exp="${m}">${t('offer.expiry_min', { n: m })}</button>`;
+
+    const overlay = document.createElement('div');
+    overlay.className = 'overlay modal';
+    overlay.id = 'offer-overlay';
+    overlay.innerHTML = `
+      <div class="card offer-modal">
+        <div class="offer-modal-head">
+          <h1>${t(isCounter ? 'offer.modal.title_counter' : 'offer.modal.title_create')}</h1>
+          <div class="offer-sub">${t('offer.modal.subtitle', { company: escapeHtml(otherLabel) })}</div>
+        </div>
+        <div class="offer-scroll">
+          ${isCounter ? `<div class="offer-current">
+            <div class="oc-label">${t('offer.current')}</div>
+            <div class="oc-line">${PRODUCTS[state.product].emoji} ${state.qty} ${pName(state.product)} · ${fmt(state.price)}/${t('offer.per_unit')}</div>
+          </div>` : `
+          <div class="offer-sides">${sideCard('buy', '🛒')}${sideCard('sell', '📦')}</div>`}
+
+          <label class="offer-lbl">${t('offer.field.product')}</label>
+          <div class="prod-picker" id="prod-picker">${products.map(prodChip).join('')}</div>
+
+          <div class="offer-two">
+            <div class="offer-col">
+              <label class="offer-lbl">${t('offer.field.qty')}</label>
+              <div class="qty-stepper">
+                <button type="button" class="qs-btn" id="qty-dec">−</button>
+                <input id="offer-qty" type="number" min="1" value="${state.qty}" inputmode="numeric" />
+                <button type="button" class="qs-btn" id="qty-inc">+</button>
+              </div>
+              <div class="offer-ctx" id="offer-ctx"></div>
+            </div>
+            <div class="offer-col">
+              <label class="offer-lbl">${t('offer.field.price')}</label>
+              <div class="price-input"><span class="pi-cur">$</span><input id="offer-price" type="number" min="1" value="${state.price}" inputmode="numeric" /></div>
+            </div>
+          </div>
+
+          ${isCounter ? '' : `
+          <label class="offer-lbl">${t('offer.field.expiry')}</label>
+          <div class="expiry-row" id="expiry-row">${UI.OFFER_EXPIRY_MINUTES.map(expiryChip).join('')}</div>`}
+
+          <div class="offer-review" id="offer-review"></div>
+          <div class="offer-err" id="offer-err"></div>
+        </div>
+        <div class="offer-actions">
+          <button class="btn ghost" id="offer-cancel">${t('offer.cancel_btn')}</button>
+          <button class="btn primary" id="offer-submit">${t(isCounter ? 'offer.send_counter' : 'offer.send')}</button>
+        </div>
+      </div>`;
+    document.body.appendChild(overlay);
+
+    const $ = <T extends HTMLElement>(sel: string) => overlay.querySelector(sel) as T;
+    const qtyEl = $('#offer-qty') as HTMLInputElement;
+    const priceEl = $('#offer-price') as HTMLInputElement;
+    const submitEl = $('#offer-submit') as HTMLButtonElement;
+
+    const readState = () => {
+      state.qty = Math.floor(Number(qtyEl.value));
+      state.price = Math.floor(Number(priceEl.value));
+    };
+
+    // Own-company context only (never the counterparty's private inventory).
+    const contextHtml = (): string => {
+      const rec = myBiz.inventory[state.product];
+      if (state.side === 'buy') {
+        const cap = rec?.capacity ?? 0;
+        const used = (rec?.qty ?? 0) + (rec?.reserved ?? 0) + (rec?.incoming ?? 0);
+        const free = Math.max(0, cap - used);
+        const after = Math.min(cap, used + Math.max(0, state.qty || 0));
+        return `<span>${t('offer.ctx.free')}: <b>${free}</b></span><span>${t('offer.ctx.after')}: <b>${after} / ${cap}</b></span>`;
+      }
+      const stock = rec?.qty ?? 0;
+      return `<span>${t('offer.ctx.stock')}: <b>${stock}</b></span>`;
+    };
+
+    const validate = (): string | null => {
+      if (!state.product) return t('offer.err.product');
+      if (!Number.isFinite(state.qty) || state.qty < 1) return t('offer.err.qty');
+      if (state.qty > MARKET_MAX_QTY) return t('offer.err.qty_max', { max: MARKET_MAX_QTY });
+      if (!Number.isFinite(state.price) || state.price < MARKET_MIN_PRICE) return t('offer.err.price');
+      if (state.price > MARKET_MAX_PRICE) return t('offer.err.price_max', { max: MARKET_MAX_PRICE });
+      return null;
+    };
+
+    const refresh = () => {
+      readState();
+      const ctx = $('#offer-ctx'); if (ctx) ctx.innerHTML = contextHtml();
+      const total = (state.qty > 0 && state.price > 0) ? state.qty * state.price : 0;
+      const titleKey = state.side === 'buy' ? 'offer.review.title_buy' : 'offer.review.title_sell';
+      const expLine = isCounter ? '' : `<div class="orv-kv"><span>${t('offer.field.expiry')}</span><span>${t('offer.expiry_min', { n: state.expiryMin })}</span></div>`;
+      $('#offer-review').innerHTML = `
+        <div class="orv-title">${t(titleKey)}</div>
+        <div class="orv-company">${escapeHtml(otherLabel)}</div>
+        <div class="orv-line">${PRODUCTS[state.product].emoji} <b>${state.qty > 0 ? state.qty : 0}</b> ${pName(state.product)}</div>
+        <div class="orv-kv"><span>${t('offer.field.price')}</span><span>${fmt(state.price > 0 ? state.price : 0)}</span></div>
+        ${expLine}
+        <div class="orv-total"><span>${t('offer.field.total')}</span><span>${fmt(total)}</span></div>`;
+      // Soft storage warning for BUY (non-blocking; server is authoritative).
+      const err = validate();
+      let warn = '';
+      if (!err && state.side === 'buy') {
+        const rec = myBiz.inventory[state.product];
+        const free = Math.max(0, (rec?.capacity ?? 0) - ((rec?.qty ?? 0) + (rec?.reserved ?? 0) + (rec?.incoming ?? 0)));
+        if (state.qty > free) warn = t('offer.warn.storage', { free });
+      }
+      const errEl = $('#offer-err');
+      errEl.className = 'offer-err' + (err ? ' error' : warn ? ' warn' : '');
+      errEl.textContent = err ? `⚠ ${err}` : warn ? `⚠ ${warn}` : '';
+      submitEl.disabled = !!err;
+    };
+
+    const close = () => { overlay.remove(); document.removeEventListener('keydown', onKey); };
+    const submit = () => {
+      readState();
+      if (validate()) { refresh(); return; }
+      sfx.click();
+      if (isCounter) {
+        client.send({ t: 'offer_counter', offerId: opts.counter!.offerId, qty: state.qty, unitPrice: state.price, version: opts.counter!.version });
+      } else {
+        client.send({ t: 'offer_create', toBizId: target.id, fromBizId: myBiz.id, side: state.side, product: state.product, qty: state.qty, unitPrice: state.price, expiresSecs: state.expiryMin * 60 });
+      }
+      this.toast(t('offer.sent'), 'success');
+      close();
+    };
+
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') { e.preventDefault(); close(); }
+      else if (e.key === 'Enter' && !submitEl.disabled) { e.preventDefault(); submit(); }
+    };
+    document.addEventListener('keydown', onKey);
+
+    // Wire selectors.
+    if (!isCounter) {
+      overlay.querySelectorAll('[data-side]').forEach((el) => el.addEventListener('click', () => {
+        state.side = (el as HTMLElement).dataset.side as 'buy' | 'sell';
+        overlay.querySelectorAll('.side-card').forEach((c) => c.classList.toggle('selected', (c as HTMLElement).dataset.side === state.side));
+        refresh();
+      }));
+      overlay.querySelectorAll('[data-exp]').forEach((el) => el.addEventListener('click', () => {
+        state.expiryMin = Number((el as HTMLElement).dataset.exp);
+        overlay.querySelectorAll('.expiry-chip').forEach((c) => c.classList.toggle('selected', Number((c as HTMLElement).dataset.exp) === state.expiryMin));
+        refresh();
+      }));
+      overlay.querySelectorAll('[data-prod]').forEach((el) => el.addEventListener('click', () => {
+        state.product = (el as HTMLElement).dataset.prod as ProductId;
+        overlay.querySelectorAll('.prod-chip').forEach((c) => c.classList.toggle('selected', (c as HTMLElement).dataset.prod === state.product));
+        refresh();
+      }));
+    }
+    $('#qty-dec').addEventListener('click', () => { qtyEl.value = String(Math.max(1, Math.floor(Number(qtyEl.value)) - 10)); refresh(); });
+    $('#qty-inc').addEventListener('click', () => { qtyEl.value = String(Math.floor(Number(qtyEl.value)) + 10); refresh(); });
+    qtyEl.addEventListener('input', refresh);
+    priceEl.addEventListener('input', refresh);
+    $('#offer-cancel').addEventListener('click', () => { sfx.click(); close(); });
+    submitEl.addEventListener('click', submit);
+    overlay.addEventListener('click', (e) => { if (e.target === overlay) close(); });
+    refresh();
+    qtyEl.focus();
   }
 
   // ================= V2.7 Phase 2: Admin & Live Ops console =================

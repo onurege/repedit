@@ -97,12 +97,14 @@ await A.waitForFunction(() => window.__bd.client.cityNews.some((n) => n.type ===
 check('a CITY_ORDER_WIN city-news item was generated',
   await A.evaluate(() => window.__bd.client.cityNews.some((n) => n.type === 'city_order_win')));
 
-// A late fulfil attempt on the settled order is rejected (no extra payout).
-const winner = aPaid === 1500 ? A : B;
+// A late fulfil attempt on the settled order is rejected (no second reward).
+// The winner keeps earning small NPC income, so assert the reward ($1500) was
+// not paid again rather than exact equality.
+const winner = aWon ? A : B;
 const wCashNow = await cash(winner);
 await send(winner, { t: 'urgent_fulfill', orderId });
 await winner.waitForTimeout(600);
-check('a late fulfil on the settled order does not pay again', (await cash(winner)) === wCashNow);
+check('a late fulfil on the settled order does not pay the reward again', (await cash(winner)) - wCashNow < 700, `+${(await cash(winner)) - wCashNow}`);
 
 await browser.close();
 console.log(failures ? `\nV2.7 URGENT ORDERS: ${failures} CHECK(S) FAILED` : '\nV2.7 URGENT ORDERS: ALL CHECKS PASSED');
