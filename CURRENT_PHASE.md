@@ -1,3 +1,15 @@
+# V2.6.2 — STORAGE CAPACITY INVARIANT (hotfix)
+
+Deliveries (Marketplace, Contracts, Wholesale) could unload into a full store,
+letting inventory exceed capacity (observed: milk 4157 / 1500). Root cause: a
+single unbounded `inv.qty += d.qty` in `completeDelivery`. Fixed by enforcing
+`qty + reserved <= capacityFor(product)` at unload; a delivery that cannot fit
+enters WAITING_FOR_STORAGE (goods held, money already settled once) and unloads
+exactly once when space frees (consumption, sale, or upgrade), surviving
+restart. Legacy over-capacity data is preserved but blocked from receiving more
+until it drains. See DECISIONS.md for the full design and the
+`report:overflow` admin query.
+
 # V2.5.1 — IMPORT COMMODITY AVAILABILITY (hotfix)
 
 Coffee Beans have no player producer, so the Central Wholesale + Emergency

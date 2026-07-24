@@ -331,3 +331,45 @@ business can hard-lock. Verified by `unreachableInputs()` (asserted empty in
 Consumers: Coffee Shop needs Milk + Beans; Bakery needs Wheat; Mini Market
 needs Bread + Milk. Beans is the only import commodity and is the reason the
 Emergency Import path must always stay open and penalty-free.
+
+## V2.6.2 — Storage capacity invariant (hotfix)
+
+- **Root cause: one line.** `completeDelivery` unconditionally did
+  `inv.qty += d.qty` ("Paid goods are never lost: deliveries may exceed nominal
+  capacity"). Every inventory increase from the Marketplace, Contracts and the
+  Central Wholesale flows through a delivery, so that single unload path let
+  stock exceed capacity (observed: milk 4157 / 1500). Production and offline
+  catch-up already capped correctly (`space = capacity − qty − reserved`).
+- **The invariant is per-product, matching the existing model.** Capacity is
+  per storage slot (`capacityFor(biz, product)`), not a shared pool — so the
+  rule enforced is `qty + reserved ≤ capacityFor` for every product. Two
+  reusable helpers (`usedStorage`, `freeSpaceFor`) centralise it so future
+  admin ADD/SET inventory tools reuse the same guard.
+- **Deliveries wait rather than overflow or vanish.** A delivery that cannot
+  fit on arrival enters `WAITING_FOR_STORAGE` (new delivery status). Goods stay
+  with the delivery; money and seller stock were already settled at
+  creation/execution, so nothing duplicates or is lost. It is retried when
+  space frees — in the tick loop (cheap: the deliveries map is small) and
+  immediately after a capacity upgrade. Waiting deliveries are loaded on
+  startup and survive restart.
+- **All-or-nothing (no partial unload in this hotfix).** The full quantity must
+  fit or the delivery keeps waiting, deferring partial-settlement complexity.
+- **Concurrency is serial by construction.** Unload mutates in memory
+  synchronously then persists, so two deliveries into the same slot cannot both
+  see the same free space — exactly one takes it, the other waits.
+- **Direct purchases pre-validate for UX.** Wholesale already rejected
+  over-capacity buys; the Marketplace now rejects a fulfiller's over-capacity
+  purchase before escrow (`err.insufficient_storage`). The unload check is still
+  the authority — a concurrent change can only make a delivery wait, never
+  overflow. Contract deliveries never reject the contract; they wait.
+- **Legacy overflow is quarantined, not deleted.** Existing businesses already
+  over capacity keep their goods. The same unload check blocks any further
+  inbound (delivery waits; wholesale/marketplace pre-checks reject) until
+  physical stock falls back below capacity through consumption or sales. The
+  inventory UI shows "STORAGE OVER CAPACITY" and blocks are explained.
+
+### Production over-capacity report
+
+`npm run report:overflow -w server` lists every over-capacity slot
+(business, owner, type, product, capacity, used, overflow) read-only — it never
+touches player goods. Use it to inspect production before/after deploy.

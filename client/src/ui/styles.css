@@ -505,3 +505,9 @@ button { font-family: inherit; }
   background: #fff4e5; color: #b45309; font-size: 11.5px; font-weight: 700;
   border: 1px solid #fed7aa;
 }
+
+/* ---- V2.6.2: storage over-capacity + waiting delivery ---- */
+.invrow.over { background: #fef2f2; border-radius: 8px; }
+.capbar > div.over { background: #dc2626; }
+.cap.wait { color: #b45309; font-weight: 700; }
+.hint.neg { color: #b91c1c; }

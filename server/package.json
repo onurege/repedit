@@ -9,7 +9,8 @@
     "build": "tsc --noEmit",
     "migrate": "tsx src/migrate-cli.ts",
     "seed": "tsx src/seed.ts",
-    "test": "vitest run --pool=forks --poolOptions.forks.singleFork=true"
+    "test": "vitest run --pool=forks --poolOptions.forks.singleFork=true",
+    "report:overflow": "tsx src/report-overflow.ts"
   },
   "dependencies": {
     "@district/shared": "*",

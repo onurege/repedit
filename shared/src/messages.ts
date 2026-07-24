@@ -353,7 +353,7 @@ export interface DeliveryPub {
   toLot: string;
   departAt: number; // epoch ms
   arriveAt: number; // epoch ms
-  status: 'in_transit' | 'delivered';
+  status: 'in_transit' | 'waiting' | 'delivered';
 }
 
 export interface TradeRow {
