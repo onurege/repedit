@@ -2,6 +2,14 @@
 
 Shipping in tested, deployable phases per the prompt's P0->P2 priority.
 
+## Phase 3 (shipped) — Direct messaging & live negotiation
+Company-to-company private messaging (realtime, persistent, unread, sanitised,
+rate-limited, reportable) plus negotiated one-off trade offers with counter
+chains. Accepting an offer is server-authoritative and exactly-once (per-offer
+lock + DB status/version guard), reuses the V2.6.2 storage guard (no overflow),
+creates one delivery, and records DIRECT_SELL/DIRECT_BUY ledger rows. Offers
+carry a persisted expiry swept each tick. See DECISIONS.md.
+
 ## Phase 2 (shipped) — Admin & Live Ops console
 Routine live administration no longer needs direct PostgreSQL access. On the
 Phase 1 `requireAdmin` + `admin_audit_log` foundation: dashboard, player

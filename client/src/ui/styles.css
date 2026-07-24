@@ -534,3 +534,16 @@ button { font-family: inherit; }
 .btn.danger { background: #dc2626; color: #fff; }
 .btn.danger:hover { background: #b91c1c; }
 #nav-admin.active, #nav-admin { color: #b45309; }
+
+/* ---- V2.7 Phase 3: Direct messages & offers ---- */
+.dm-log { display: flex; flex-direction: column; gap: 6px; max-height: 46vh; overflow-y: auto; padding: 4px 2px; }
+.dm-row { display: flex; }
+.dm-row.self { justify-content: flex-end; }
+.dm-body { background: #f1f5f9; border-radius: 9px; padding: 6px 10px; font-size: 13px; max-width: 82%; word-break: break-word; }
+.dm-row.self .dm-body { background: #dbeafe; }
+.offer-card { border: 1.5px solid #dbe3ee; border-radius: 11px; padding: 9px 11px; margin: 4px 0; background: #fff; }
+.offer-card.ok { border-color: #86efac; background: #f0fdf4; }
+.offer-card.bad { opacity: 0.7; }
+.offer-head { font-size: 13.5px; }
+.offer-total { font-size: 12px; color: #475569; margin: 2px 0 6px; }
+.offer-exp { color: #b45309; font-weight: 700; }

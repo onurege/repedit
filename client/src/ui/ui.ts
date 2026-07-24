@@ -25,7 +25,7 @@ const BIZ_ICON: Record<string, string> = {
   farm: '🐄', coffee_shop: '☕', bakery: '🥖', mini_market: '🛒',
 };
 
-type PanelKind = 'none' | 'business' | 'market' | 'wholesale' | 'dev' | 'info' | 'contracts' | 'rankings' | 'profile' | 'citymarket' | 'news' | 'citystatus' | 'chat' | 'admin';
+type PanelKind = 'none' | 'business' | 'market' | 'wholesale' | 'dev' | 'info' | 'contracts' | 'rankings' | 'profile' | 'citymarket' | 'news' | 'citystatus' | 'chat' | 'admin' | 'messages';
 
 const EVENT_ICON: Record<string, string> = {
   city_festival: '🎉', university_week: '🎓', heat_wave: '☀️',
@@ -137,6 +137,18 @@ export class UI {
     });
     client.on('chat_muted', () => {
       if (client.chatMuted) this.toast(t('chat.you_are_muted'), 'error');
+    });
+    client.on('dm', (msg?: { otherId: number; message: ChatMessagePub }) => {
+      if (this.panelKind === 'messages') this.renderMessagesPanel(
+        document.getElementById('panel-title')!, document.getElementById('panel-tabs')!, document.getElementById('panel-body')!);
+      this.updateMessagesBadge();
+      if (msg && msg.message && !(msg.message as any).self && this.panelKind !== 'messages') this.toast(t('dm.new_notice'), 'info');
+    });
+    client.on('offer', (o: any) => {
+      if (this.panelKind === 'messages') this.renderMessagesPanel(
+        document.getElementById('panel-title')!, document.getElementById('panel-tabs')!, document.getElementById('panel-body')!);
+      this.updateMessagesBadge();
+      if (o && o.awaitingPlayer === client.you?.id && o.canAct) this.toast(t('offer.new_notice'), 'info');
     });
     client.on('admin', () => {
       if (this.panelKind === 'admin') this.renderAdminPanel(
@@ -264,6 +276,7 @@ export class UI {
     // chat after visiting another panel always re-renders (the shared body
     // element was overwritten by the other panel).
     this.lastChatHTML = '';
+    this.lastDmHTML = '';
   }
 
   // ================= AUTH =================
@@ -410,6 +423,7 @@ export class UI {
         <button id="nav-rankings">${t('nav.rankings')}</button>
         <button id="nav-news">${t('nav.news')} <span id="nav-news-badge"></span></button>
         <button id="nav-chat">${t('nav.chat')} <span id="nav-chat-badge"></span></button>
+        <button id="nav-messages">${t('nav.messages')} <span id="nav-messages-badge"></span></button>
         <button id="nav-dev" style="display:none">${t('nav.dev')}</button>
         <button id="nav-admin" style="display:none">${t('nav.admin')}</button>
       </div>
@@ -471,6 +485,12 @@ export class UI {
       client.send({ t: 'get_chat' });
       this.chatUnread = 0;
       this.openPanel('chat');
+    });
+    document.getElementById('nav-messages')!.addEventListener('click', () => {
+      sfx.click();
+      this.msgOtherId = null;
+      client.send({ t: 'get_conversations' });
+      this.openPanel('messages');
     });
     document.getElementById('hud-logout')!.addEventListener('click', () => {
       sfx.click();
@@ -554,6 +574,7 @@ export class UI {
     document.getElementById('nav-rankings')!.classList.toggle('active', this.panelKind === 'rankings');
     document.getElementById('nav-news')!.classList.toggle('active', this.panelKind === 'news');
     document.getElementById('nav-chat')!.classList.toggle('active', this.panelKind === 'chat');
+    document.getElementById('nav-messages')!.classList.toggle('active', this.panelKind === 'messages');
     document.getElementById('nav-dev')!.classList.toggle('active', this.panelKind === 'dev');
     document.getElementById('nav-admin')!.classList.toggle('active', this.panelKind === 'admin');
   }
@@ -949,6 +970,9 @@ export class UI {
         break;
       case 'admin':
         this.renderAdminPanel(title, tabs, body);
+        break;
+      case 'messages':
+        this.renderMessagesPanel(title, tabs, body);
         break;
       case 'news':
         this.renderNewsPanel(title, tabs, body);
@@ -1367,13 +1391,30 @@ export class UI {
       <div class="kv"><span class="k">${t('info.supplies_label')}</span><span class="v">${suppliesTxt}</span></div>
       <div class="kv"><span class="k">${t('info.successful_trades')}</span><span class="v">${biz.tradeCount ?? 0}</span></div>
       <div class="kv"><span class="k">${t('info.status')}</span><span class="v">${statusText(biz.status)}</span></div>
-      <button class="btn ghost" id="view-company" style="width:100%;margin-top:8px">${t('profile.view_company')}</button>
+      <div class="mkt-row" style="margin-top:8px">
+        <button class="btn small primary" id="info-message">${t('info.message')}</button>
+        <button class="btn small primary" id="info-offer">${t('offer.make')}</button>
+        <button class="btn small ghost" id="view-company">${t('profile.view_company')}</button>
+      </div>
       ${proposeBlock}
       ${!canContract ? `<div class="hint">${t(myBiz ? 'info.cannot_contract' : 'info.choose_business_first')}</div>` : ''}
     `, (b) => {
       b.querySelector('#view-company')?.addEventListener('click', () => {
         sfx.click();
         this.openCompanyProfile(biz.companyId);
+      });
+      b.querySelector('#info-message')?.addEventListener('click', () => {
+        sfx.click();
+        if (biz.ownerId === client.you?.id) return;
+        this.openConversation(biz.ownerId);
+      });
+      b.querySelector('#info-offer')?.addEventListener('click', () => {
+        sfx.click();
+        if (biz.ownerId === client.you?.id) return;
+        this.msgOtherId = biz.ownerId;
+        client.send({ t: 'get_conversation', otherId: biz.ownerId });
+        this.openPanel('messages');
+        setTimeout(() => this.makeOfferDialog(biz.ownerId), 200);
       });
       b.querySelector('#ct-open')?.addEventListener('click', () => {
         this.proposeFor = biz.id;
@@ -1872,6 +1913,145 @@ export class UI {
   private chatUnread = 0;
   private adminTab = 'dashboard';
   private adminDetailId: number | null = null;
+  private msgOtherId: number | null = null;
+
+  // ================= V2.7 Phase 3: Direct messages & offers =================
+
+  private updateMessagesBadge(): void {
+    const badge = document.getElementById('nav-messages-badge');
+    if (!badge) return;
+    const unread = client.conversations.reduce((n, c) => n + c.unread, 0)
+      + [...client.offers.values()].filter((o) => o.canAct).length;
+    badge.textContent = unread > 0 ? String(Math.min(99, unread)) : '';
+    badge.className = unread > 0 ? 'badge' : '';
+  }
+
+  /** Open a conversation with another company (from business inspection). */
+  openConversation(otherPlayerId: number): void {
+    this.msgOtherId = otherPlayerId;
+    client.send({ t: 'get_conversation', otherId: otherPlayerId });
+    this.openPanel('messages');
+  }
+
+  private renderMessagesPanel(title: HTMLElement, tabs: HTMLElement, body: HTMLElement): void {
+    tabs.innerHTML = '';
+    if (this.msgOtherId == null) { this.renderConversationList(title, body); return; }
+    this.renderConversationThread(title, body, this.msgOtherId);
+  }
+
+  private renderConversationList(title: HTMLElement, body: HTMLElement): void {
+    title.textContent = t('dm.title');
+    const rows = client.conversations.map((c) => `
+      <div class="order" data-open-conv="${c.otherId}" style="cursor:pointer">
+        <span class="grow"><b>${escapeHtml(c.otherName)}</b> ${c.online ? '🟢' : '⚪'} ${c.otherCompany ? `<span class="who">${escapeHtml(c.otherCompany)}</span>` : ''}<br/>
+          <span class="who">${c.lastBody ? escapeHtml(c.lastBody.slice(0, 48)) : t('dm.no_messages')}</span></span>
+        ${c.unread ? `<span class="badge">${c.unread}</span>` : ''}
+      </div>`).join('') || `<p class="hint">${t('dm.list_empty')}</p>`;
+    this.setBody(body, rows, (b) => {
+      b.querySelectorAll('[data-open-conv]').forEach((el) => el.addEventListener('click', () => {
+        this.openConversation(parseInt((el as HTMLElement).dataset.openConv!, 10));
+      }));
+    });
+  }
+
+  private renderConversationThread(title: HTMLElement, body: HTMLElement, otherId: number): void {
+    const conv = client.activeConv && client.activeConv.otherId === otherId ? client.activeConv : null;
+    const summary = client.conversations.find((c) => c.otherId === otherId);
+    title.textContent = summary ? `💬 ${summary.otherName}` : t('dm.title');
+    if (!conv) { this.setBody(body, `<p class="hint">${t('admin.loading')}</p>`); return; }
+
+    const rows = conv.messages.map((m) => {
+      if (m.kind === 'offer' && m.offerId != null) {
+        const o = client.offers.get(m.offerId) ?? conv.offers.find((x) => x.id === m.offerId);
+        return o ? this.offerCard(o) : '';
+      }
+      return `<div class="dm-row ${m.self ? 'self' : ''}"><span class="dm-body">${escapeHtml(m.body ?? '')}</span></div>`;
+    }).join('');
+
+    const active = document.activeElement as HTMLInputElement | null;
+    const typed = active?.id === 'dm-input' ? active.value : '';
+    const html = `
+      <button class="btn small ghost" id="dm-back">← ${t('admin.back')}</button>
+      <div class="dm-log" id="dm-log">${rows || `<p class="hint">${t('dm.no_messages')}</p>`}</div>
+      <div class="mkt-row"><button class="btn small primary" id="dm-offer">${t('offer.make')}</button></div>
+      <div class="chat-composer">
+        <input id="dm-input" maxlength="500" placeholder="${t('dm.placeholder')}" />
+        <button class="btn small primary" id="dm-send">${t('chat.send')}</button>
+      </div>`;
+    if (html !== this.lastDmHTML) {
+      this.lastDmHTML = html;
+      body.innerHTML = html;
+      const log = document.getElementById('dm-log'); if (log) log.scrollTop = log.scrollHeight;
+      const input = document.getElementById('dm-input') as HTMLInputElement;
+      input.value = typed;
+      const submit = () => { const v = input.value.trim(); if (!v) return; client.send({ t: 'dm_send', toId: otherId, body: v }); input.value = ''; };
+      document.getElementById('dm-send')!.addEventListener('click', submit);
+      input.addEventListener('keydown', (e) => { if ((e as KeyboardEvent).key === 'Enter') submit(); });
+      document.getElementById('dm-back')!.addEventListener('click', () => { this.msgOtherId = null; client.send({ t: 'get_conversations' }); this.lastDmHTML = ''; this.renderMessagesPanel(document.getElementById('panel-title')!, document.getElementById('panel-tabs')!, document.getElementById('panel-body')!); });
+      document.getElementById('dm-offer')!.addEventListener('click', () => this.makeOfferDialog(otherId));
+      this.bindOfferActions(body);
+    } else {
+      this.bindOfferActions(body); // buttons re-attached each render pass
+    }
+  }
+  private lastDmHTML = '';
+
+  private offerCard(o: import('@district/shared').OfferPub): string {
+    const p = PRODUCTS[o.product];
+    const dirLabel = o.iAmBuyer ? t('offer.you_buy') : t('offer.you_sell');
+    const statusCls = o.status === 'accepted' ? 'ok' : (o.status === 'rejected' || o.status === 'cancelled' || o.status === 'expired') ? 'bad' : '';
+    const actions = o.canAct
+      ? `<div class="mkt-row">
+           <button class="btn small success" data-offer-accept="${o.id}:${o.version}">${t('offer.accept')}</button>
+           <button class="btn small ghost" data-offer-counter="${o.id}:${o.version}">${t('offer.counter')}</button>
+           <button class="btn small warn" data-offer-reject="${o.id}">${t('offer.reject')}</button>
+         </div>`
+      : (o.status === 'pending' || o.status === 'countered')
+        ? `<div class="who">${t('offer.awaiting')} <button class="btn small ghost" data-offer-cancel="${o.id}">${t('offer.cancel')}</button></div>`
+        : `<div class="who ${statusCls}">${t(`offer.status.${o.status}`)}</div>`;
+    return `<div class="offer-card ${statusCls}">
+      <div class="offer-head">${p.emoji} <b>${dirLabel}</b> · ${o.qty} ${pName(o.product)} @ ${fmt(o.price)}</div>
+      <div class="offer-total">${t('offer.total')}: <b>${fmt(o.total)}</b>${(o.status === 'pending' || o.status === 'countered') ? ` · <span class="offer-exp" data-exp="${o.expiresAt}">${countdown(o.expiresAt)}</span>` : ''}</div>
+      ${actions}
+    </div>`;
+  }
+
+  private bindOfferActions(body: HTMLElement): void {
+    body.querySelectorAll('[data-offer-accept]').forEach((el) => el.addEventListener('click', () => {
+      const [id, v] = (el as HTMLElement).dataset.offerAccept!.split(':');
+      client.send({ t: 'offer_accept', offerId: parseInt(id, 10), version: parseInt(v, 10) });
+    }));
+    body.querySelectorAll('[data-offer-reject]').forEach((el) => el.addEventListener('click', () =>
+      client.send({ t: 'offer_reject', offerId: parseInt((el as HTMLElement).dataset.offerReject!, 10) })));
+    body.querySelectorAll('[data-offer-cancel]').forEach((el) => el.addEventListener('click', () =>
+      client.send({ t: 'offer_cancel', offerId: parseInt((el as HTMLElement).dataset.offerCancel!, 10) })));
+    body.querySelectorAll('[data-offer-counter]').forEach((el) => el.addEventListener('click', () => {
+      const [id, v] = (el as HTMLElement).dataset.offerCounter!.split(':');
+      const o = client.offers.get(parseInt(id, 10)); if (!o) return;
+      const qty = parseInt(prompt(t('offer.counter_qty'), String(o.qty)) ?? '', 10);
+      if (!Number.isFinite(qty) || qty < 1) return;
+      const price = parseInt(prompt(t('offer.counter_price'), String(o.price)) ?? '', 10);
+      if (!Number.isFinite(price) || price < 1) return;
+      client.send({ t: 'offer_counter', offerId: parseInt(id, 10), qty, unitPrice: price, version: parseInt(v, 10) });
+    }));
+  }
+
+  /** Make-offer dialog. `otherId` is the counterparty player; pick their business. */
+  private makeOfferDialog(otherId: number): void {
+    const theirBiz = [...client.businesses.values()].filter((b) => b.ownerId === otherId);
+    if (!theirBiz.length) { this.toast(t('offer.no_biz'), 'error'); return; }
+    const myBiz = client.myBiz;
+    if (!myBiz) return;
+    const side = confirm(t('offer.side_prompt')) ? 'buy' : 'sell'; // OK = BUY, Cancel = SELL
+    const target = theirBiz[0]; // simplest: their first business (usually one)
+    const product = prompt(t('offer.product_prompt', { list: 'milk, wheat, beans, bread' }), 'milk') as ProductId | null;
+    if (!product) return;
+    const qty = parseInt(prompt(t('offer.qty_prompt')) ?? '', 10);
+    if (!Number.isFinite(qty) || qty < 1) return;
+    const price = parseInt(prompt(t('offer.price_prompt')) ?? '', 10);
+    if (!Number.isFinite(price) || price < 1) return;
+    client.send({ t: 'offer_create', toBizId: target.id, fromBizId: myBiz.id, side, product, qty, unitPrice: price });
+  }
 
   // ================= V2.7 Phase 2: Admin & Live Ops console =================
 

@@ -167,6 +167,11 @@ import {
   type AdminCashOp,
   type AdminInvOp,
   type AdminWholesaleOp,
+  type OfferPub,
+  type OfferSide,
+  type OfferStatus,
+  type DirectMessagePub,
+  type ConversationSummary,
 } from '@district/shared';
 import { query, tx } from '../db.js';
 
@@ -440,6 +445,24 @@ function capacityFor(biz: BizRec, product: ProductId): number {
   }
 }
 
+interface OfferRec {
+  id: number;
+  conversationId: number;
+  product: ProductId;
+  buyerPlayer: number;
+  sellerPlayer: number;
+  buyerBizId: number;
+  sellerBizId: number;
+  side: OfferSide;
+  status: OfferStatus;
+  curQty: number;
+  curPrice: number;
+  proposedBy: number;
+  awaitingPlayer: number;
+  version: number;
+  expiresAtMs: number;
+}
+
 export class World extends EventEmitter {
   players = new Map<number, PlayerRec>();
   companies = new Map<number, CompanyRec>(); // keyed by ownerId (1 company/player)
@@ -464,6 +487,11 @@ export class World extends EventEmitter {
   private chatBuffer: ChatMessagePub[] = [];   // bounded recent history
   private chatMutes = new Map<number, { until: number | null; reason: string | null }>();
   private chatRate = new Map<number, number[]>(); // playerId -> recent send timestamps
+  // V2.7 Phase 3: live trade offers (pending/countered) kept in memory for the
+  // expiration sweep and exactly-once accept locking. History lives in the DB.
+  offers = new Map<number, OfferRec>();  // live (pending/countered) offers; public for tests
+  private offerLocks = new Set<number>();
+  private dmRate = new Map<number, number[]>();
   timeScale = 1;
   private tickTimer: ReturnType<typeof setInterval> | null = null;
   private ticksSinceFlush = 0;
@@ -744,6 +772,7 @@ export class World extends EventEmitter {
     await this.processWholesale(now);
     await this.seedExpansionAnnouncement();
     await this.loadChat();
+    await this.loadOffers();
 
     await this.flush();
     console.log(
@@ -897,6 +926,7 @@ export class World extends EventEmitter {
     }
     await this.processEvents(now);
     await this.processWholesale(now);
+    await this.sweepExpiredOffers(now);
     this.ticksSinceFlush++;
     if (this.ticksSinceFlush >= 5) {
       this.ticksSinceFlush = 0;
@@ -3940,6 +3970,371 @@ export class World extends EventEmitter {
       suspended: row.suspended ?? false, suspendedReason: row.suspended_reason ?? null,
       awaySnapshot: row.away_snapshot ?? null, dirty: false,
     } as PlayerRec;
+  }
+
+  // ==================== V2.7 Phase 3: Direct messaging ====================
+
+  private static readonly DM_MAX_LEN = 500;
+  private static readonly DM_MAX_PER_WINDOW = 8;   // per 10s
+  private static readonly DM_MIN_GAP_MS = 700;
+  private static readonly OFFER_DEFAULT_TTL = 15 * 60; // seconds
+  private static readonly OFFER_MAX_TTL = 24 * 3600;
+  private static readonly OFFER_MIN_TTL = 60;
+  private static readonly CONV_HISTORY = 80;
+
+  private async loadOffers(): Promise<void> {
+    const rows = await query("SELECT * FROM trade_offers WHERE status IN ('pending','countered')");
+    for (const r of rows.rows) this.offers.set(Number(r.id), this.offerRowToRec(r));
+  }
+
+  private offerRowToRec(r: any): OfferRec {
+    return {
+      id: Number(r.id), conversationId: Number(r.conversation_id), product: r.product,
+      buyerPlayer: r.buyer_player, sellerPlayer: r.seller_player,
+      buyerBizId: r.buyer_business, sellerBizId: r.seller_business,
+      side: r.side, status: r.status, curQty: r.cur_qty, curPrice: r.cur_price,
+      proposedBy: r.proposed_by, awaitingPlayer: r.awaiting_player, version: r.version,
+      expiresAtMs: new Date(r.expires_at).getTime(),
+    };
+  }
+
+  /** Canonical conversation id for a player pair, created on first contact. */
+  private async ensureConversation(a: number, b: number): Promise<number> {
+    const lo = Math.min(a, b), hi = Math.max(a, b);
+    const res = await query(
+      `INSERT INTO direct_conversations (player_lo, player_hi) VALUES ($1,$2)
+       ON CONFLICT (player_lo, player_hi) DO UPDATE SET last_at=direct_conversations.last_at
+       RETURNING id`, [lo, hi]
+    );
+    return Number(res.rows[0].id);
+  }
+
+  private sanitizeDm(raw: string): string {
+    return (raw ?? '').replace(/[<>]/g, '').replace(/[ -]/g, ' ')
+      .replace(/\s+/g, ' ').trim().slice(0, World.DM_MAX_LEN);
+  }
+
+  private dmRateOk(playerId: number): boolean {
+    const now = Date.now();
+    const st = (this.dmRate.get(playerId) ?? []).filter((t) => now - t < 10_000);
+    if (st.length >= World.DM_MAX_PER_WINDOW) return false;
+    if (st.length && now - st[st.length - 1] < World.DM_MIN_GAP_MS) return false;
+    st.push(now); this.dmRate.set(playerId, st); return true;
+  }
+
+  async sendDirectMessage(playerId: number, toId: number, rawBody: string): Promise<{ otherId: number; message: DirectMessagePub }> {
+    const p = this.player(playerId);
+    if (toId === playerId) throw new GameError('err.dm_self');
+    if (!this.players.has(toId) && !(await this.playerExists(toId))) throw new GameError('err.unknown_player');
+    if (this.isMuted(playerId)) throw new GameError('err.chat_muted');
+    const body = this.sanitizeDm(rawBody);
+    if (!body) throw new GameError('err.chat_empty');
+    if (!this.dmRateOk(playerId)) throw new GameError('err.chat_rate');
+    const convId = await this.ensureConversation(playerId, toId);
+    const res = await query(
+      `INSERT INTO direct_messages (conversation_id, sender_id, sender_name, kind, body)
+       VALUES ($1,$2,$3,'text',$4) RETURNING id, created_at`, [convId, playerId, p.name, body]
+    );
+    await query('UPDATE direct_conversations SET last_at=now() WHERE id=$1', [convId]);
+    const msg: DirectMessagePub = {
+      id: Number(res.rows[0].id), senderId: playerId, senderName: p.name, kind: 'text',
+      body, offerId: null, at: new Date(res.rows[0].created_at).getTime(), self: false,
+    };
+    this.emit('dm', { fromId: playerId, toId, message: msg });
+    return { otherId: toId, message: msg };
+  }
+
+  private async playerExists(id: number): Promise<boolean> {
+    const r = await query('SELECT 1 FROM players WHERE id=$1', [id]);
+    return !!r.rowCount;
+  }
+
+  async listConversations(playerId: number): Promise<ConversationSummary[]> {
+    const rows = await query(
+      `SELECT c.id, c.last_at,
+              CASE WHEN c.player_lo=$1 THEN c.player_hi ELSE c.player_lo END AS other_id,
+              (SELECT body FROM direct_messages m WHERE m.conversation_id=c.id AND NOT m.deleted ORDER BY m.id DESC LIMIT 1) AS last_body,
+              (SELECT count(*)::int FROM direct_messages m
+                 WHERE m.conversation_id=c.id AND m.sender_id<>$1 AND NOT m.deleted
+                   AND m.id > COALESCE((SELECT last_read_id FROM direct_reads r WHERE r.conversation_id=c.id AND r.player_id=$1),0)) AS unread
+         FROM direct_conversations c
+        WHERE c.player_lo=$1 OR c.player_hi=$1
+        ORDER BY c.last_at DESC LIMIT 50`, [playerId]
+    );
+    return rows.rows.map((r) => {
+      const other = this.players.get(r.other_id);
+      return {
+        otherId: r.other_id, otherName: other?.name ?? '???',
+        otherCompany: this.companies.get(r.other_id)?.name ?? null,
+        online: (other?.connections ?? 0) > 0,
+        lastBody: r.last_body ?? null, lastAt: new Date(r.last_at).getTime(), unread: r.unread,
+      };
+    });
+  }
+
+  async getConversation(playerId: number, otherId: number): Promise<{ messages: DirectMessagePub[]; offers: OfferPub[] }> {
+    const convId = await this.ensureConversation(playerId, otherId);
+    const rows = await query(
+      `SELECT id, sender_id, sender_name, kind, body, offer_id, created_at FROM direct_messages
+        WHERE conversation_id=$1 AND NOT deleted ORDER BY id DESC LIMIT $2`, [convId, World.CONV_HISTORY]
+    );
+    const messages = rows.rows.reverse().map((r) => ({
+      id: Number(r.id), senderId: r.sender_id, senderName: r.sender_name, kind: r.kind,
+      body: r.body ?? null, offerId: r.offer_id != null ? Number(r.offer_id) : null,
+      at: new Date(r.created_at).getTime(), self: r.sender_id === playerId,
+    }));
+    // Mark read up to the latest message.
+    const lastId = messages.length ? messages[messages.length - 1].id : 0;
+    await query(
+      `INSERT INTO direct_reads (conversation_id, player_id, last_read_id) VALUES ($1,$2,$3)
+       ON CONFLICT (conversation_id, player_id) DO UPDATE SET last_read_id=GREATEST(direct_reads.last_read_id,$3)`,
+      [convId, playerId, lastId]
+    );
+    const offerRows = await query(
+      `SELECT * FROM trade_offers WHERE conversation_id=$1 ORDER BY id DESC LIMIT 20`, [convId]
+    );
+    const offers = offerRows.rows.map((r) => this.toOfferPub(this.offers.get(Number(r.id)) ?? this.offerRowToRec(r), playerId));
+    return { messages, offers };
+  }
+
+  async reportDirectMessage(playerId: number, messageId: number, reason: string, note?: string): Promise<void> {
+    this.player(playerId);
+    const valid = ['spam', 'harassment', 'offensive', 'other'];
+    if (!valid.includes(reason)) throw new GameError('err.bad_report_reason');
+    const cleanNote = (note ?? '').replace(/[<>]/g, '').trim().slice(0, 200) || null;
+    await query(
+      `INSERT INTO dm_reports (message_id, reporter_id, reason, note) VALUES ($1,$2,$3,$4)
+       ON CONFLICT (message_id, reporter_id) DO NOTHING`, [messageId, playerId, reason, cleanNote]
+    );
+  }
+
+  // ==================== V2.7 Phase 3: Trade offers ====================
+
+  toOfferPub(o: OfferRec, viewerId: number): OfferPub {
+    const live = o.status === 'pending' || o.status === 'countered';
+    return {
+      id: o.id, conversationWith: viewerId === o.buyerPlayer ? o.sellerPlayer : o.buyerPlayer,
+      product: o.product, side: o.side,
+      buyerPlayer: o.buyerPlayer, sellerPlayer: o.sellerPlayer,
+      buyerBizId: o.buyerBizId, sellerBizId: o.sellerBizId,
+      qty: o.curQty, price: o.curPrice, total: o.curQty * o.curPrice,
+      status: o.status, proposedBy: o.proposedBy, awaitingPlayer: o.awaitingPlayer,
+      version: o.version, expiresAt: o.expiresAtMs,
+      iAmBuyer: viewerId === o.buyerPlayer,
+      canAct: live && o.awaitingPlayer === viewerId,
+    };
+  }
+
+  private emitOffer(o: OfferRec): void {
+    this.emit('offer', o);
+  }
+
+  async createOffer(
+    playerId: number, toBizId: number, side: OfferSide, product: ProductId,
+    qty: number, unitPrice: number, expiresSecs?: number, fromBizId?: number
+  ): Promise<OfferRec> {
+    const proposer = this.player(playerId);
+    const myBiz = this.requireOwnedBiz(playerId, fromBizId);
+    const otherBiz = this.businesses.get(toBizId);
+    if (!otherBiz) throw new GameError('err.counterparty_no_business');
+    if (otherBiz.ownerId === playerId) throw new GameError('err.offer_self');
+    if (!TRADABLE.includes(product)) throw new GameError('err.not_tradable');
+    qty = Math.floor(qty); unitPrice = Math.floor(unitPrice);
+    if (!Number.isFinite(qty) || qty < 1 || qty > MARKET_MAX_QTY) throw new GameError('err.invalid_qty');
+    if (!Number.isFinite(unitPrice) || unitPrice < MARKET_MIN_PRICE || unitPrice > MARKET_MAX_PRICE) {
+      throw new GameError('err.price_range', { min: MARKET_MIN_PRICE, max: MARKET_MAX_PRICE });
+    }
+    // Roles fixed by side (from the proposer's perspective).
+    const buyerPlayer = side === 'buy' ? playerId : otherBiz.ownerId;
+    const sellerPlayer = side === 'buy' ? otherBiz.ownerId : playerId;
+    const buyerBiz = side === 'buy' ? myBiz : otherBiz;
+    const sellerBiz = side === 'buy' ? otherBiz : myBiz;
+    // The buyer's business must be able to store the product at all.
+    if (capacityFor(buyerBiz, product) <= 0) throw new GameError('err.cannot_store_that');
+
+    const ttl = Math.min(World.OFFER_MAX_TTL, Math.max(World.OFFER_MIN_TTL, Math.floor(expiresSecs ?? World.OFFER_DEFAULT_TTL)));
+    const expiresAt = Date.now() + ttl * 1000;
+    const otherId = otherBiz.ownerId;
+    const convId = await this.ensureConversation(playerId, otherId);
+
+    const res = await tx(async (c) => {
+      const ins = await c.query(
+        `INSERT INTO trade_offers (conversation_id, product, buyer_player, seller_player, buyer_business, seller_business,
+           side, status, cur_qty, cur_price, proposed_by, awaiting_player, version, expires_at)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,'pending',$8,$9,$10,$11,1,to_timestamp($12/1000.0)) RETURNING id`,
+        [convId, product, buyerPlayer, sellerPlayer, buyerBiz.id, sellerBiz.id, side, qty, unitPrice, playerId, otherId, expiresAt]
+      );
+      const offerId = Number(ins.rows[0].id);
+      await c.query('INSERT INTO trade_offer_versions (offer_id, version, by_player, qty, price) VALUES ($1,1,$2,$3,$4)',
+        [offerId, playerId, qty, unitPrice]);
+      await c.query(`INSERT INTO direct_messages (conversation_id, sender_id, sender_name, kind, offer_id) VALUES ($1,$2,$3,'offer',$4)`,
+        [convId, playerId, proposer.name, offerId]);
+      await c.query('UPDATE direct_conversations SET last_at=now() WHERE id=$1', [convId]);
+      return offerId;
+    });
+    const rec: OfferRec = {
+      id: res, conversationId: convId, product, buyerPlayer, sellerPlayer,
+      buyerBizId: buyerBiz.id, sellerBizId: sellerBiz.id, side, status: 'pending',
+      curQty: qty, curPrice: unitPrice, proposedBy: playerId, awaitingPlayer: otherId, version: 1, expiresAtMs: expiresAt,
+    };
+    this.offers.set(rec.id, rec);
+    this.emitOffer(rec);
+    return rec;
+  }
+
+  private liveOffer(playerId: number, offerId: number): OfferRec {
+    const o = this.offers.get(offerId);
+    if (!o || (o.status !== 'pending' && o.status !== 'countered')) throw new GameError('err.offer_unavailable');
+    if (o.buyerPlayer !== playerId && o.sellerPlayer !== playerId) throw new GameError('err.offer_not_yours');
+    if (o.expiresAtMs <= Date.now()) throw new GameError('err.offer_expired');
+    return o;
+  }
+
+  async counterOffer(playerId: number, offerId: number, qty: number, unitPrice: number, expectedVersion: number): Promise<OfferRec> {
+    this.player(playerId);
+    const o = this.liveOffer(playerId, offerId);
+    if (o.awaitingPlayer !== playerId) throw new GameError('err.offer_not_your_turn');
+    if (o.version !== expectedVersion) throw new GameError('err.offer_stale');
+    qty = Math.floor(qty); unitPrice = Math.floor(unitPrice);
+    if (!Number.isFinite(qty) || qty < 1 || qty > MARKET_MAX_QTY) throw new GameError('err.invalid_qty');
+    if (!Number.isFinite(unitPrice) || unitPrice < MARKET_MIN_PRICE || unitPrice > MARKET_MAX_PRICE) {
+      throw new GameError('err.price_range', { min: MARKET_MIN_PRICE, max: MARKET_MAX_PRICE });
+    }
+    const other = o.buyerPlayer === playerId ? o.sellerPlayer : o.buyerPlayer;
+    o.curQty = qty; o.curPrice = unitPrice; o.proposedBy = playerId; o.awaitingPlayer = other;
+    o.version += 1; o.status = 'countered';
+    await tx(async (c) => {
+      const upd = await c.query(
+        `UPDATE trade_offers SET cur_qty=$1, cur_price=$2, proposed_by=$3, awaiting_player=$4, version=$5, status='countered', updated_at=now()
+         WHERE id=$6 AND version=$7 AND status IN ('pending','countered') RETURNING id`,
+        [qty, unitPrice, playerId, other, o.version, offerId, expectedVersion]
+      );
+      if (!upd.rowCount) throw new GameError('err.offer_stale');
+      await c.query('INSERT INTO trade_offer_versions (offer_id, version, by_player, qty, price) VALUES ($1,$2,$3,$4,$5)',
+        [offerId, o.version, playerId, qty, unitPrice]);
+    });
+    this.emitOffer(o);
+    return o;
+  }
+
+  async rejectOffer(playerId: number, offerId: number): Promise<OfferRec> {
+    this.player(playerId);
+    const o = this.liveOffer(playerId, offerId);
+    if (o.awaitingPlayer !== playerId) throw new GameError('err.offer_not_your_turn');
+    o.status = 'rejected';
+    await query("UPDATE trade_offers SET status='rejected', updated_at=now() WHERE id=$1 AND status IN ('pending','countered')", [offerId]);
+    this.offers.delete(offerId);
+    this.emitOffer(o);
+    return o;
+  }
+
+  async cancelOffer(playerId: number, offerId: number): Promise<OfferRec> {
+    this.player(playerId);
+    const o = this.liveOffer(playerId, offerId);
+    o.status = 'cancelled';
+    await query("UPDATE trade_offers SET status='cancelled', updated_at=now() WHERE id=$1 AND status IN ('pending','countered')", [offerId]);
+    this.offers.delete(offerId);
+    this.emitOffer(o);
+    return o;
+  }
+
+  /**
+   * Accept a negotiated offer — the exactly-once economic execution. Mirrors
+   * marketplace fulfillment discipline: synchronous in-memory validation +
+   * mutation, a per-offer lock, and a DB status/version guard so a duplicate or
+   * concurrent accept cannot move money or goods twice. Reuses the V2.6.2
+   * storage guard: no direct trade can overflow the buyer's storage.
+   */
+  async acceptOffer(playerId: number, offerId: number, expectedVersion: number): Promise<OfferRec> {
+    if (this.offerLocks.has(offerId)) throw new GameError('err.offer_processing');
+    this.player(playerId);
+    const o = this.liveOffer(playerId, offerId);
+    if (o.awaitingPlayer !== playerId) throw new GameError('err.offer_not_your_turn');
+    if (o.version !== expectedVersion) throw new GameError('err.offer_stale');
+
+    const buyer = this.players.get(o.buyerPlayer);
+    const seller = this.players.get(o.sellerPlayer);
+    const buyerBiz = this.businesses.get(o.buyerBizId);
+    const sellerBiz = this.businesses.get(o.sellerBizId);
+    if (!buyer || !seller || !buyerBiz || !sellerBiz) throw new GameError('err.counterparty_no_business');
+    const amount = o.curQty * o.curPrice;
+    const sellerStock = inv(sellerBiz, o.product);
+    if (sellerStock.qty < o.curQty) throw new GameError('err.only_have', { qty: sellerStock.qty, product: o.product });
+    if (buyer.cash < amount) throw new GameError('err.not_enough_cash', { cost: amount });
+    // V2.6.2 storage guard: the full quantity must fit (physical + incoming).
+    const avail = Math.max(0, capacityFor(buyerBiz, o.product) - usedStorage(buyerBiz, o.product) - this.incomingFor(buyerBiz.id, o.product));
+    if (o.curQty > avail) throw new GameError('err.insufficient_storage', { required: o.curQty, available: avail });
+
+    this.offerLocks.add(offerId);
+    try {
+      // Mutate memory synchronously.
+      sellerStock.qty -= o.curQty;
+      seller.cash += amount; buyer.cash -= amount;
+      buyer.dirty = seller.dirty = true;
+      sellerBiz.revenue += amount; buyerBiz.expenses += amount;
+      sellerBiz.tradeCount += 1; buyerBiz.tradeCount += 1;
+      sellerBiz.reputation = Math.min(REP_MAX, sellerBiz.reputation + REP_TRADE_FULFILLED);
+      sellerBiz.dirty = buyerBiz.dirty = true;
+      this.addXp(buyer, XP.perTrade); this.addXp(seller, XP.perTrade);
+      const bCo = this.companies.get(buyer.id); const sCo = this.companies.get(seller.id);
+      if (bCo) this.addCompanyXp(bCo, COMPANY_XP.perTrade);
+      if (sCo) this.addCompanyXp(sCo, COMPANY_XP.perTrade);
+      o.status = 'accepted';
+
+      const delivery = await this.createDelivery(o.product, o.curQty, sellerBiz.lotId, buyerBiz);
+      await tx(async (c) => {
+        const upd = await c.query(
+          "UPDATE trade_offers SET status='accepted', updated_at=now() WHERE id=$1 AND version=$2 AND status IN ('pending','countered') RETURNING id",
+          [offerId, expectedVersion]
+        );
+        if (!upd.rowCount) throw new GameError('err.offer_stale');
+        await c.query('UPDATE players SET cash=$1, xp=$2, level=$3 WHERE id=$4', [buyer.cash, buyer.xp, buyer.level, buyer.id]);
+        await c.query('UPDATE players SET cash=$1, xp=$2, level=$3 WHERE id=$4', [seller.cash, seller.xp, seller.level, seller.id]);
+        await c.query(
+          `INSERT INTO inventories (business_id, product, qty, reserved) VALUES ($1,$2,$3,$4)
+           ON CONFLICT (business_id, product) DO UPDATE SET qty=$3, reserved=$4`,
+          [sellerBiz.id, o.product, sellerStock.qty, sellerStock.reserved]
+        );
+        await c.query('UPDATE businesses SET revenue=$1, reputation=$2 WHERE id=$3', [sellerBiz.revenue, sellerBiz.reputation, sellerBiz.id]);
+        await c.query('UPDATE businesses SET expenses=$1 WHERE id=$2', [buyerBiz.expenses, buyerBiz.id]);
+        await c.query(LEDGER_SQL, ledgerParams({
+          playerId: seller.id, businessId: sellerBiz.id, type: 'DIRECT_SELL', amount,
+          refType: 'offer', refId: offerId, before: seller.cash - amount, after: seller.cash,
+        }));
+        await c.query(LEDGER_SQL, ledgerParams({
+          playerId: buyer.id, businessId: buyerBiz.id, type: 'DIRECT_BUY', amount: -amount,
+          refType: 'offer', refId: offerId, before: buyer.cash + amount, after: buyer.cash,
+        }));
+      });
+      this.offers.delete(offerId);
+      console.log(`[econ] OFFER_ACCEPT id=${offerId} ${o.curQty}x${o.product} @$${o.curPrice} buyer=${buyer.id} seller=${seller.id} delivery=${delivery.id}`);
+      this.emit('delivery', delivery);
+      this.emitOffer(o);
+      this.emit('push_state', { playerId: buyer.id });
+      this.emit('push_state', { playerId: seller.id });
+      return o;
+    } catch (err) {
+      // Roll back the in-memory mutation on failure.
+      sellerStock.qty += o.curQty; seller.cash -= amount; buyer.cash += amount;
+      sellerBiz.revenue -= amount; buyerBiz.expenses -= amount;
+      sellerBiz.tradeCount -= 1; buyerBiz.tradeCount -= 1;
+      o.status = 'countered';
+      throw err;
+    } finally {
+      this.offerLocks.delete(offerId);
+    }
+  }
+
+  /** Tick sweep: expire offers past their deadline (restart-safe via expires_at). */
+  private async sweepExpiredOffers(now: number): Promise<void> {
+    for (const o of [...this.offers.values()]) {
+      if ((o.status === 'pending' || o.status === 'countered') && o.expiresAtMs <= now) {
+        o.status = 'expired';
+        this.offers.delete(o.id);
+        await query("UPDATE trade_offers SET status='expired', updated_at=now() WHERE id=$1 AND status IN ('pending','countered')", [o.id]).catch(() => {});
+        this.emitOffer(o);
+      }
+    }
   }
 
   async createAnnouncement(

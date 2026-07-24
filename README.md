@@ -120,6 +120,7 @@ npm run e2e:districts  # V2.6: districts, expansion & cross-district delivery
 npm run e2e:storage    # V2.6.2: storage capacity invariant & waiting deliveries
 npm run e2e:chat       # V2.7: City Chat realtime + moderation
 npm run e2e:admin      # V2.7: admin console live ops + hard delete
+npm run e2e:negotiation # V2.7: direct messaging, offers & counter-offers
 ```
 
 Each E2E creates fresh persistent businesses; the shared city has a limited
