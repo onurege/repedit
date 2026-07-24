@@ -1,3 +1,13 @@
+# V2.5.1 — IMPORT COMMODITY AVAILABILITY (hotfix)
+
+Coffee Beans have no player producer, so the Central Wholesale + Emergency
+Import is their only supply path. This hotfix ensures that path never hard-locks
+a Coffee Shop and — the actual bug — that being forced to use Emergency Import
+for an import commodity no longer accrues market-manipulation suspicion. The
+exemption is data-driven (a good is "import-dependent" when no business supplies
+it) and surgical (player-producible goods still accrue the signal). See
+DECISIONS.md for the supply-chain validation table.
+
 # V2.6 — CITY EXPANSION, DISTRICTS & LIVING CITY (current)
 
 Old Town had reached its practical lot capacity. Rather than enlarging the old

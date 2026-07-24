@@ -178,6 +178,52 @@ export function contractableProducts(
   return supplies.filter((p) => consumes.includes(p));
 }
 
+// ---- V2.5.1: supply origin classification ----
+// A product is PLAYER-PRODUCIBLE if some business type supplies it, and
+// IMPORT-DEPENDENT otherwise. Derived from SELLER_SUPPLIES so the distinction
+// lives in one place instead of being hard-coded around the app. Import goods
+// (currently Coffee Beans) have no player production path, so the Central
+// Wholesale + Emergency Import is their only source and must never hard-lock.
+export function playerProducerOf(product: ProductId): BusinessType | null {
+  for (const type of Object.keys(SELLER_SUPPLIES) as BusinessType[]) {
+    if (SELLER_SUPPLIES[type].includes(product)) return type;
+  }
+  return null;
+}
+export function isImportDependent(product: ProductId): boolean {
+  return playerProducerOf(product) === null;
+}
+
+// The raw inputs each business type consumes to make its goods (its recipe).
+// Single source of truth for supply-chain reasoning and low-stock alerts.
+export const BUSINESS_INPUTS: Record<BusinessType, ProductId[]> = {
+  farm: [],
+  coffee_shop: ['milk', 'beans'],
+  bakery: ['wheat'],
+  mini_market: ['bread', 'milk'],
+};
+
+/** True if a product can be obtained at all: a player producer or the NPC. */
+export function hasSupplyPath(product: ProductId): boolean {
+  return playerProducerOf(product) !== null || NPC_WHOLESALE_PRICES[product] != null;
+}
+
+/**
+ * Audit: every recipe input must have at least one reachable supply path, so
+ * no business can ever hard-lock. Returns offending inputs (always empty in a
+ * correct configuration). Import-dependent inputs count as reachable via the
+ * Central Wholesale + Emergency Import.
+ */
+export function unreachableInputs(): { business: BusinessType; product: ProductId }[] {
+  const out: { business: BusinessType; product: ProductId }[] = [];
+  for (const type of Object.keys(BUSINESS_INPUTS) as BusinessType[]) {
+    for (const product of BUSINESS_INPUTS[type]) {
+      if (!hasSupplyPath(product)) out.push({ business: type, product });
+    }
+  }
+  return out;
+}
+
 export const CONTRACT_MIN_QTY = 1;
 export const CONTRACT_MAX_QTY = 2000;
 export const CONTRACT_MIN_DELIVERIES = 1;

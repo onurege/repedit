@@ -17,6 +17,15 @@ export interface UpdateDef {
 // Newest first. Adding an entry makes it pop for players who haven't seen it.
 export const UPDATES: UpdateDef[] = [
   {
+    // V2.5.1 — balancing hotfix (import commodity availability). Small patch
+    // note, not a feature release.
+    id: 'v2_5_1',
+    version: 'V2.5.1',
+    titleKey: 'update.v2_5_1.title',
+    taglineKey: 'update.v2_5_1.tagline',
+    featureKeys: ['update.v2_5_1.f1'],
+  },
+  {
     id: 'v2_6',
     version: 'V2.6',
     titleKey: 'update.v2_6.title',

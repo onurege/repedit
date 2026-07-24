@@ -1201,12 +1201,18 @@ export class UI {
         const catCls = w.category === 'out_of_stock' ? 'oos' : w.category === 'low' ? 'low' : w.category === 'limited' ? 'limited' : 'ok';
         const pct = Math.min(100, Math.round((w.remaining / Math.max(1, w.dailyStock)) * 100));
         const priceLabel = w.emergency ? t('wholesale.emergency_price', { price: fmt(w.basePrice) }) : t('wholesale.per_unit', { price: fmt(w.basePrice) });
+        // An import-dependent good (no player producer) that is out of normal
+        // stock is never a dead end: surface the Emergency Import lifeline.
+        const emergencyBanner = w.emergency && w.importDependent
+          ? `<div class="ws-emergency">🚨 ${t('wholesale.emergency_available')}</div>`
+          : '';
         return `<div class="wsrow">
           <div class="ws-top">
             <span class="emoji">${PRODUCTS[pid].emoji}</span>
             <span class="ws-name">${pName(pid)}</span>
             <span class="ws-tag ${catCls}">${t(`stock.${w.category}`)}</span>
           </div>
+          ${emergencyBanner}
           <div class="ws-bar"><div class="${catCls}" style="width:${pct}%"></div></div>
           <div class="ws-meta">
             <span>${t('wholesale.remaining', { remaining: w.remaining.toLocaleString(), daily: w.dailyStock.toLocaleString() })}</span>
