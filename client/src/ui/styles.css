@@ -215,6 +215,34 @@ button { font-family: inherit; }
 .event-banner .eb-time { font-weight: 700; opacity: 0.85; }
 .badge.live { background: #16a34a; }
 
+/* ---------- V2.7 Phase 4: urgent city order HUD banner ---------- */
+.urgent-banner {
+  position: absolute; top: 156px; left: 50%; transform: translateX(-50%);
+  display: flex; align-items: center; gap: 10px; pointer-events: auto;
+  background: linear-gradient(135deg,#ef4444,#b91c1c); color: #fff;
+  border-radius: 999px; padding: 6px 8px 6px 14px; box-shadow: 0 6px 20px rgba(220,38,38,0.45);
+  font-size: 13px; z-index: 12; max-width: 92vw; animation: urgentPulse 2s ease-in-out infinite;
+}
+@keyframes urgentPulse { 0%,100% { box-shadow: 0 6px 20px rgba(220,38,38,0.4); } 50% { box-shadow: 0 6px 26px rgba(220,38,38,0.75); } }
+.urgent-banner .ub-badge { background: #fff; color: #b91c1c; font-weight: 900; font-size: 11px; padding: 2px 8px; border-radius: 999px; letter-spacing: 0.5px; }
+.urgent-banner .ub-title { font-weight: 800; }
+.urgent-banner .ub-reward { font-weight: 800; }
+.urgent-banner .ub-time { font-weight: 700; opacity: 0.9; font-variant-numeric: tabular-nums; }
+.urgent-banner .ub-hint { opacity: 0.85; font-size: 12px; }
+.urgent-banner .btn.small { padding: 4px 12px; }
+
+/* ---------- V2.7 Phase 4: City News feed ---------- */
+.citynews-row { padding: 8px 10px; border-left: 3px solid #64748b; background: rgba(148,163,184,0.08); border-radius: 6px; margin-bottom: 8px; }
+.citynews-row .cn-text { font-size: 13px; }
+.citynews-row .cn-when { font-size: 11px; opacity: 0.6; margin-top: 3px; }
+.citynews-row.cn-city_order_win { border-left-color: #f59e0b; }
+.citynews-row.cn-major_deal { border-left-color: #16a34a; }
+.citynews-row.cn-market_leader_change { border-left-color: #a855f7; }
+.citynews-row.cn-business_opened { border-left-color: #3b82f6; }
+.citynews-row.cn-wholesale_low { border-left-color: #ef4444; }
+.alert-row.warn { color: #f59e0b; }
+.alert-row.info { color: #60a5fa; }
+
 /* ---------- V2.4: morning brief ---------- */
 .brief-card { width: min(460px, 94vw); }
 .brief-hi { font-size: 12px; font-weight: 800; letter-spacing: 1px; color: #94a3b8; }

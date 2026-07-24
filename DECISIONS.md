@@ -490,3 +490,56 @@ new logistics or realtime stack.
   The client countdown is informational only — server time is authoritative.
 
 Not in Phase 3 (later): urgent city orders, rival alerts, city news, feedback.
+
+## V2.7 Phase 4 — Urgent City Orders, Rival Alerts & City News
+
+- **Urgent orders — exactly one winner.** `urgent_orders` holds each order's
+  lifecycle (`upcoming/active/fulfilled/expired/cancelled`). Fulfilment mirrors
+  the fulfillOrder/acceptOffer discipline: a synchronous in-memory
+  validate+mutate, a per-order lock, and a DB
+  `UPDATE urgent_orders SET status='fulfilled', winner_* … WHERE id=$ AND status='active' RETURNING`
+  guard. A concurrent, duplicate, reconnect-replayed or spoofed second claim
+  finds zero rows and is rejected — so the goods leave exactly once and the
+  reward is paid exactly once. FULL fulfilment only (no partial in Phase 4).
+- **Settlement & audit.** The winner loses the required goods from ONE business
+  holding enough *unreserved* stock (reserved = escrowed for the market, never
+  counted), gains the fixed reward, and the move is recorded as a single
+  `CITY_ORDER_REWARD` ledger row + a `company_activity` row of kind `city_order`
+  — a new kind deliberately excluded from `recentUnits`, so city orders can
+  never be used to game final-sale/supplier rankings. The city is the buyer:
+  inventory is consumed atomically, no fake warehouse, delivery is not modelled.
+- **Scheduler.** A conservative tick scheduler keeps at most `URGENT_MAX_ACTIVE`
+  (default 1) live at once, gated by a spawn cooldown, an online-player minimum,
+  and a per-tick probability. Product choice is loosely coupled to V2.3 city
+  demand (highest effective demand + jitter). All limits are shared constants.
+  Live orders are restart-safe (reloaded from the DB; anything past its deadline
+  is retired on load).
+- **Admin.** `createUrgentOrder`/`cancelUrgentOrder` require admin, are bounded
+  to a safe envelope, audited (`CREATE_URGENT_ORDER`/`CANCEL_URGENT_ORDER`), and
+  pushed in realtime. City-news auto-generation is deliberately NOT audited (it
+  is not an admin action).
+- **Rival alerts — committed data only.** Two derivations: (1) a coarse
+  market-share sweep (`RIVAL_SWEEP_SECONDS`, never per-player, one query per
+  product) compares this window's committed `final_sale` rank order against the
+  last snapshot and alerts the overtaken company; (2) a fresh, materially
+  cheaper (`>= RIVAL_MIN_UNDERCUT_FRACTION`) sell listing raises a price-undercut
+  alert on order creation. Both use a stable dedupe key + a per-key cooldown
+  (`RIVAL_ALERT_COOLDOWN_SECS`) and a minimum-volume floor, so a rival nudging a
+  price by a cent, or trivial-volume products, never spam the feed. Alerts are a
+  bounded per-player buffer, private to the affected player.
+- **City news — bounded feed from real events.** `city_news` is append-only and
+  pruned to `NEWS_MAX_ITEMS`. Types: city-order win (mandatory, awaited so it is
+  never lost), major deal (single-deal money over threshold), market-leader
+  change (only when leadership actually changes), business opened, wholesale low
+  (once per depletion cycle via an in-memory flag re-armed on refill). Payloads
+  are privacy-safe: a public actor name plus render params that are never cash,
+  inventory, integrity, messages, or admin notes — the client renders via i18n.
+  Leader-change / wholesale-low items carry a `dedupe_key` suppressed for 30 min.
+- **Realtime & UI.** Urgent orders + city news broadcast; rival alerts push to
+  the affected player only; all three are re-seeded on connect so a reconnect
+  recovers state. A non-blocking HUD banner shows the soonest order with a live
+  1s countdown and a Fulfil action gated on local unreserved stock (server stays
+  authoritative on expiry and the single winner). A new CITY tab in the News
+  panel is kept separate from What's New / announcements.
+
+Not in Phase 4 (later): feedback, V2.8.

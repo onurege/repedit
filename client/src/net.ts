@@ -32,6 +32,9 @@ import type {
   ConversationSummary,
   DirectMessagePub,
   OfferPub,
+  UrgentOrderPub,
+  RivalAlert,
+  CityNewsItem,
 } from '@district/shared';
 import { t } from './i18n.js';
 
@@ -83,6 +86,10 @@ export class GameClient {
   updatesAll: UpdatePub[] = [];
   announcementsActive: AnnouncementPub[] = [];
   announcementsHistory: AnnouncementPub[] = [];
+  // V2.7 Phase 4: live urgent orders, bounded city news, and rival alerts.
+  urgentOrders = new Map<number, UrgentOrderPub>();
+  cityNews: CityNewsItem[] = [];
+  rivalAlerts: RivalAlert[] = [];
   connected = false;
 
   private ws: WebSocket | null = null;
@@ -445,6 +452,42 @@ export class GameClient {
         this.announcementsActive = [msg.announcement, ...this.announcementsActive];
         this.announcementsHistory = [msg.announcement, ...this.announcementsHistory];
         this.emit('announcement', msg.announcement);
+        this.emit('update');
+        break;
+      // ---- V2.7 Phase 4: urgent orders, rival alerts, city news ----
+      case 'urgent_orders':
+        this.urgentOrders = new Map(msg.orders.map((o) => [o.id, o]));
+        this.emit('urgent_orders');
+        this.emit('update');
+        break;
+      case 'urgent_order': {
+        const o = msg.order;
+        // Live states stay in the HUD; terminal states drop out of the map.
+        if (o.status === 'active' || o.status === 'upcoming') this.urgentOrders.set(o.id, o);
+        else this.urgentOrders.delete(o.id);
+        this.emit('urgent_order', o);
+        this.emit('update');
+        break;
+      }
+      case 'rival_alerts':
+        this.rivalAlerts = msg.alerts;
+        this.emit('rival_alerts');
+        this.emit('update');
+        break;
+      case 'rival_alert':
+        this.rivalAlerts.push(msg.alert);
+        if (this.rivalAlerts.length > 20) this.rivalAlerts.shift();
+        this.emit('rival_alert', msg.alert);
+        this.emit('update');
+        break;
+      case 'city_news':
+        this.cityNews = msg.items;
+        this.emit('city_news');
+        this.emit('update');
+        break;
+      case 'city_news_item':
+        this.cityNews = [msg.item, ...this.cityNews].slice(0, 40);
+        this.emit('city_news_item', msg.item);
         this.emit('update');
         break;
     }
