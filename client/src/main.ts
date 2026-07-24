@@ -167,6 +167,11 @@ client.on('unauthorized', () => {
   ui.showAuth(t('auth.session_expired'));
 });
 
+// V2.7 Phase 2: forced off by an admin (force-logout, suspend, or deletion).
+client.on('force_logout', (reason: string | null) => {
+  ui.showAuth(t(reason === 'suspended' ? 'auth.suspended' : reason === 'deleted' ? 'auth.deleted' : 'auth.forced_logout'));
+});
+
 // Dev-only hook for local testing/automation.
 if ((import.meta as any).env?.DEV) {
   (window as any).__bd = { client, ui, rig, city };

@@ -25,7 +25,7 @@ const BIZ_ICON: Record<string, string> = {
   farm: '🐄', coffee_shop: '☕', bakery: '🥖', mini_market: '🛒',
 };
 
-type PanelKind = 'none' | 'business' | 'market' | 'wholesale' | 'dev' | 'info' | 'contracts' | 'rankings' | 'profile' | 'citymarket' | 'news' | 'citystatus' | 'chat';
+type PanelKind = 'none' | 'business' | 'market' | 'wholesale' | 'dev' | 'info' | 'contracts' | 'rankings' | 'profile' | 'citymarket' | 'news' | 'citystatus' | 'chat' | 'admin';
 
 const EVENT_ICON: Record<string, string> = {
   city_festival: '🎉', university_week: '🎓', heat_wave: '☀️',
@@ -137,6 +137,10 @@ export class UI {
     });
     client.on('chat_muted', () => {
       if (client.chatMuted) this.toast(t('chat.you_are_muted'), 'error');
+    });
+    client.on('admin', () => {
+      if (this.panelKind === 'admin') this.renderAdminPanel(
+        document.getElementById('panel-title')!, document.getElementById('panel-tabs')!, document.getElementById('panel-body')!);
     });
     client.on('level_up', (level: number) => {
       sfx.levelUp();
@@ -403,6 +407,7 @@ export class UI {
         <button id="nav-news">${t('nav.news')} <span id="nav-news-badge"></span></button>
         <button id="nav-chat">${t('nav.chat')} <span id="nav-chat-badge"></span></button>
         <button id="nav-dev" style="display:none">${t('nav.dev')}</button>
+        <button id="nav-admin" style="display:none">${t('nav.admin')}</button>
       </div>
       <div class="district-bar" id="district-bar"></div>
       <div class="panel" id="panel">
@@ -470,6 +475,11 @@ export class UI {
     document.getElementById('nav-dev')!.addEventListener('click', () => {
       sfx.click();
       this.openPanel('dev');
+    });
+    document.getElementById('nav-admin')!.addEventListener('click', () => {
+      sfx.click();
+      client.send({ t: 'admin_dashboard' });
+      this.openPanel('admin');
     });
     document.getElementById('panel-close')!.addEventListener('click', () => {
       sfx.click();
@@ -541,6 +551,7 @@ export class UI {
     document.getElementById('nav-news')!.classList.toggle('active', this.panelKind === 'news');
     document.getElementById('nav-chat')!.classList.toggle('active', this.panelKind === 'chat');
     document.getElementById('nav-dev')!.classList.toggle('active', this.panelKind === 'dev');
+    document.getElementById('nav-admin')!.classList.toggle('active', this.panelKind === 'admin');
   }
 
   private updateContractBadge(): void {
@@ -559,6 +570,7 @@ export class UI {
     const you = client.you;
     if (!you) return;
     document.getElementById('nav-dev')!.style.display = client.devTools ? '' : 'none';
+    document.getElementById('nav-admin')!.style.display = client.you?.isAdmin ? '' : 'none';
     (document.getElementById('st-cash') as HTMLElement).textContent = fmt(you.cash);
     const biz = client.myBiz;
     const profit = biz ? biz.revenue - biz.expenses : 0;
@@ -930,6 +942,9 @@ export class UI {
         break;
       case 'chat':
         this.renderChatPanel(title, tabs, body);
+        break;
+      case 'admin':
+        this.renderAdminPanel(title, tabs, body);
         break;
       case 'news':
         this.renderNewsPanel(title, tabs, body);
@@ -1851,6 +1866,188 @@ export class UI {
 
   private newsTab = 'announcements';
   private chatUnread = 0;
+  private adminTab = 'dashboard';
+  private adminDetailId: number | null = null;
+
+  // ================= V2.7 Phase 2: Admin & Live Ops console =================
+
+  private renderAdminPanel(title: HTMLElement, tabs: HTMLElement, body: HTMLElement): void {
+    if (!client.you?.isAdmin) { title.textContent = 'Admin'; this.setBody(body, `<p class="hint">${t('err.not_admin')}</p>`); return; }
+    title.textContent = t('admin.title');
+    const tab = this.tabBar(tabs, [
+      { id: 'dashboard', label: t('admin.tab.dashboard') },
+      { id: 'players', label: t('admin.tab.players') },
+      { id: 'wholesale', label: t('admin.tab.wholesale') },
+      { id: 'audit', label: t('admin.tab.audit') },
+    ]);
+    this.adminTab = tab;
+    if (tab === 'dashboard') this.renderAdminDashboard(body);
+    else if (tab === 'players') this.renderAdminPlayers(body);
+    else if (tab === 'wholesale') this.renderAdminWholesale(body);
+    else this.renderAdminAudit(body);
+  }
+
+  private renderAdminDashboard(body: HTMLElement): void {
+    const d = client.adminDashboard;
+    if (!d) { client.send({ t: 'admin_dashboard' }); this.setBody(body, `<p class="hint">${t('admin.loading')}</p>`); return; }
+    const stat = (k: string, v: number | string) => `<div class="kv"><span class="k">${k}</span><span class="v">${v}</span></div>`;
+    const ws = d.wholesale.map((w) => `<div class="kv"><span class="k">${pName(w.product)}</span><span class="v">${w.remaining}/${w.dailyStock} · $${w.basePrice}</span></div>`).join('');
+    const audit = d.recentAudit.map((e) => `<div class="trade-row"><b>${escapeHtml(e.adminName)}</b> ${escapeHtml(e.action)}${e.targetId ? ` → ${escapeHtml(e.targetType ?? '')}:${escapeHtml(e.targetId)}` : ''}</div>`).join('') || `<p class="hint">${t('admin.no_audit')}</p>`;
+    const reports = d.recentReports.map((r) => `<div class="trade-row">⚑ ${escapeHtml(r.reason)} — ${r.body ? escapeHtml(r.body.slice(0, 40)) : t('admin.deleted_msg')}</div>`).join('') || `<p class="hint">${t('admin.no_reports')}</p>`;
+    this.setBody(body, `
+      <div class="admin-grid">
+        ${stat(t('admin.online'), d.online)}${stat(t('admin.players'), d.players)}
+        ${stat(t('admin.companies'), d.companies)}${stat(t('admin.businesses'), d.businesses)}
+        ${stat(t('admin.deliveries'), d.deliveries)}${stat(t('admin.waiting'), d.waitingDeliveries)}
+        ${stat(t('admin.contracts'), d.contracts)}${stat(t('admin.orders'), d.orders)}
+        ${stat(t('admin.events'), d.cityEvents)}
+      </div>
+      <h4 class="admin-h">${t('admin.wholesale_stock')}</h4>${ws}
+      <h4 class="admin-h">${t('admin.recent_audit')}</h4>${audit}
+      <h4 class="admin-h">${t('admin.recent_reports')}</h4>${reports}
+      <button class="btn small ghost" id="admin-refresh" style="margin-top:10px">${t('admin.refresh')}</button>`, (b) => {
+      b.querySelector('#admin-refresh')!.addEventListener('click', () => client.send({ t: 'admin_dashboard' }));
+    });
+  }
+
+  private renderAdminPlayers(body: HTMLElement): void {
+    const detail = this.adminDetailId != null ? client.adminPlayerDetail : null;
+    if (detail && detail.id === this.adminDetailId) { this.renderAdminPlayerDetail(body, detail); return; }
+    const rows = client.adminPlayers.map((p) => `
+      <div class="order">
+        <span class="grow"><b>${escapeHtml(p.username)}</b> ${p.online ? '🟢' : '⚪'} ${p.suspended ? '⛔' : ''}<br/>
+          <span class="who">#${p.id} · ${p.companyName ? escapeHtml(p.companyName) : '—'} · ${p.businesses} biz</span></span>
+        <button class="btn small primary" data-admin-detail="${p.id}">${t('admin.view')}</button>
+      </div>`).join('') || `<p class="hint">${t('admin.search_hint')}</p>`;
+    this.setBody(body, `
+      <div class="mkt-row">
+        <input id="admin-search" placeholder="${t('admin.search_placeholder')}" style="flex:1;padding:8px;border:1.5px solid #dbe3ee;border-radius:8px" />
+        <button class="btn small primary" id="admin-search-go">${t('admin.search')}</button>
+      </div>
+      ${rows}`, (b) => {
+      const go = () => { const q = (b.querySelector('#admin-search') as HTMLInputElement).value.trim(); if (q) client.send({ t: 'admin_search_players', q }); };
+      b.querySelector('#admin-search-go')!.addEventListener('click', go);
+      b.querySelector('#admin-search')!.addEventListener('keydown', (e) => { if ((e as KeyboardEvent).key === 'Enter') go(); });
+      b.querySelectorAll('[data-admin-detail]').forEach((el) => el.addEventListener('click', () => {
+        this.adminDetailId = parseInt((el as HTMLElement).dataset.adminDetail!, 10);
+        client.send({ t: 'admin_player_detail', playerId: this.adminDetailId });
+      }));
+    });
+  }
+
+  private renderAdminPlayerDetail(body: HTMLElement, d: import('@district/shared').AdminPlayerDetail): void {
+    const inv = d.inventory.map((s) => `
+      <div class="kv"><span class="k">${pName(s.product)} <span class="cap">(${bizName(s.bizType)})</span></span>
+      <span class="v">${s.qty}+${s.reserved}/${s.capacity}
+        <button class="btn small ghost" data-inv="${s.bizId}:${s.product}:add">＋</button>
+        <button class="btn small ghost" data-inv="${s.bizId}:${s.product}:remove">−</button>
+        <button class="btn small ghost" data-inv="${s.bizId}:${s.product}:set">=</button>
+      </span></div>`).join('');
+    this.setBody(body, `
+      <button class="btn small ghost" id="admin-back">← ${t('admin.back')}</button>
+      <div class="kv"><span class="k">${t('admin.username')}</span><span class="v">${escapeHtml(d.username)} ${d.online ? '🟢' : '⚪'} ${d.suspended ? '⛔' : ''}</span></div>
+      <div class="kv"><span class="k">${t('admin.company')}</span><span class="v">${d.company ? escapeHtml(d.company.name) + ' · Lv ' + d.company.level : '—'}</span></div>
+      <div class="kv"><span class="k">${t('admin.cash')}</span><span class="v">${fmt(d.cash)}
+        <button class="btn small ghost" data-cash="add">＋</button>
+        <button class="btn small ghost" data-cash="remove">−</button>
+        <button class="btn small ghost" data-cash="set">=</button></span></div>
+      <div class="kv"><span class="k">${t('admin.level')}</span><span class="v">${d.level} · ${d.xp} XP · ★${d.reputation.toFixed(1)}</span></div>
+      <div class="kv"><span class="k">${t('admin.joined')}</span><span class="v">${new Date(d.joinedAt).toLocaleDateString()}</span></div>
+      <div class="kv"><span class="k">${t('admin.orders')}/${t('admin.contracts')}</span><span class="v">${d.activeOrders} / ${d.activeContracts}</span></div>
+      <h4 class="admin-h">${t('admin.inventory')}</h4>${inv || `<p class="hint">—</p>`}
+      <h4 class="admin-h">${t('admin.moderation')}</h4>
+      <div class="mkt-row">
+        <button class="btn small warn" id="admin-suspend">${d.suspended ? t('admin.unsuspend') : t('admin.suspend')}</button>
+        <button class="btn small ghost" id="admin-forcelogout">${t('admin.force_logout')}</button>
+        <button class="btn small ${d.muted ? 'ghost' : 'warn'}" id="admin-mute">${d.muted ? t('admin.unmute') : t('admin.mute')}</button>
+      </div>
+      <div class="mkt-row"><button class="btn small danger" id="admin-delete">${t('admin.hard_delete')}</button></div>`, (b) => {
+      b.querySelector('#admin-back')!.addEventListener('click', () => { this.adminDetailId = null; client.adminPlayerDetail = null; this.renderAdminPanel(document.getElementById('panel-title')!, document.getElementById('panel-tabs')!, document.getElementById('panel-body')!); });
+      b.querySelectorAll('[data-cash]').forEach((el) => el.addEventListener('click', () => this.adminCashAction(d, (el as HTMLElement).dataset.cash as any)));
+      b.querySelectorAll('[data-inv]').forEach((el) => el.addEventListener('click', () => {
+        const [bizId, product, op] = (el as HTMLElement).dataset.inv!.split(':');
+        const amt = parseInt(prompt(t('admin.inv_prompt', { op, product }), '0') ?? '', 10);
+        if (!Number.isFinite(amt) || amt < 0) return;
+        client.send({ t: 'admin_inventory', bizId: parseInt(bizId, 10), product: product as ProductId, op: op as any, amount: amt, reason: this.askReason() });
+      }));
+      b.querySelector('#admin-suspend')!.addEventListener('click', () => {
+        const reason = this.askReason();
+        client.send({ t: 'admin_suspend', playerId: d.id, suspend: !d.suspended, reason });
+        setTimeout(() => client.send({ t: 'admin_player_detail', playerId: d.id }), 300);
+      });
+      b.querySelector('#admin-forcelogout')!.addEventListener('click', () => client.send({ t: 'admin_force_logout', playerId: d.id, reason: this.askReason() }));
+      b.querySelector('#admin-mute')!.addEventListener('click', () => {
+        if (d.muted) client.send({ t: 'admin_unmute', playerId: d.id });
+        else client.send({ t: 'admin_mute', playerId: d.id, minutes: 60, reason: this.askReason() });
+        setTimeout(() => client.send({ t: 'admin_player_detail', playerId: d.id }), 300);
+      });
+      b.querySelector('#admin-delete')!.addEventListener('click', () => this.adminHardDelete(d));
+    });
+  }
+
+  private adminCashAction(d: import('@district/shared').AdminPlayerDetail, op: 'add' | 'remove' | 'set'): void {
+    const amt = parseInt(prompt(t('admin.cash_prompt', { op }), '0') ?? '', 10);
+    if (!Number.isFinite(amt)) return;
+    // Strong confirmation for large adjustments.
+    if (Math.abs(amt) >= 1_000_000 && !confirm(t('admin.confirm_large_cash', { amount: fmt(amt) }))) return;
+    client.send({ t: 'admin_cash', playerId: d.id, op, amount: amt, reason: this.askReason() });
+  }
+
+  private adminHardDelete(d: import('@district/shared').AdminPlayerDetail): void {
+    const typed = prompt(t('admin.delete_confirm_prompt', { name: d.username }));
+    if (typed !== d.username) { if (typed != null) this.toast(t('admin.delete_mismatch'), 'error'); return; }
+    if (!confirm(t('admin.delete_final', { name: d.username, biz: d.businesses.length, cash: fmt(d.cash) }))) return;
+    client.send({ t: 'admin_hard_delete', playerId: d.id, confirmName: d.username, reason: this.askReason() });
+    this.adminDetailId = null;
+    client.adminPlayerDetail = null;
+  }
+
+  private askReason(): string | undefined {
+    const r = prompt(t('admin.reason_prompt'));
+    return r ? r.slice(0, 200) : undefined;
+  }
+
+  private renderAdminWholesale(body: HTMLElement): void {
+    const d = client.adminDashboard;
+    const rows = (d?.wholesale ?? []).map((w) => `
+      <div class="wsrow">
+        <div class="ws-top"><span class="emoji">${PRODUCTS[w.product].emoji}</span><span class="ws-name">${pName(w.product)}</span>
+          <span class="ws-tag ok">${w.remaining}/${w.dailyStock} · $${w.basePrice}</span></div>
+        <div class="mkt-row" style="flex-wrap:wrap">
+          <button class="btn small success" data-ws="${w.product}:refill">${t('admin.refill')}</button>
+          <button class="btn small ghost" data-ws="${w.product}:set">${t('admin.set_stock')}</button>
+          <button class="btn small ghost" data-ws="${w.product}:add">${t('admin.add_stock')}</button>
+          <button class="btn small ghost" data-ws="${w.product}:set_daily">${t('admin.daily')}</button>
+          <button class="btn small ghost" data-ws="${w.product}:set_price">${t('admin.price')}</button>
+          <button class="btn small ghost" data-ws="${w.product}:reset">${t('admin.reset')}</button>
+        </div>
+      </div>`).join('');
+    this.setBody(body, `${rows}<button class="btn success" id="ws-refill-all" style="width:100%;margin-top:8px">${t('admin.refill_all')}</button>`, (b) => {
+      b.querySelector('#ws-refill-all')!.addEventListener('click', () => client.send({ t: 'admin_wholesale_refill_all', reason: this.askReason() }));
+      b.querySelectorAll('[data-ws]').forEach((el) => el.addEventListener('click', () => {
+        const [product, op] = (el as HTMLElement).dataset.ws!.split(':');
+        let amount: number | undefined;
+        if (op === 'set' || op === 'add' || op === 'set_daily' || op === 'set_price') {
+          const v = parseInt(prompt(t('admin.ws_prompt', { op, product })) ?? '', 10);
+          if (!Number.isFinite(v)) return;
+          amount = v;
+        }
+        client.send({ t: 'admin_wholesale', product: product as ProductId, op: op as any, amount, reason: this.askReason() });
+        setTimeout(() => client.send({ t: 'admin_dashboard' }), 300);
+      }));
+    });
+  }
+
+  private renderAdminAudit(body: HTMLElement): void {
+    if (!client.adminAudit.length) { client.send({ t: 'admin_audit', limit: 40 }); }
+    const rows = client.adminAudit.map((e) => `
+      <div class="trade-row"><span class="chat-time">${new Date(e.at).toLocaleString()}</span><br/>
+        <b>${escapeHtml(e.adminName)}</b> <span class="chat-who">${escapeHtml(e.action)}</span>${e.targetId ? ` → ${escapeHtml(e.targetType ?? '')}:${escapeHtml(e.targetId)}` : ''}
+        ${e.detail?.reason ? `<br/><span class="who">"${escapeHtml(String(e.detail.reason))}"</span>` : ''}</div>`).join('') || `<p class="hint">${t('admin.no_audit')}</p>`;
+    this.setBody(body, `${rows}<button class="btn small ghost" id="audit-refresh" style="margin-top:8px">${t('admin.refresh')}</button>`, (b) => {
+      b.querySelector('#audit-refresh')!.addEventListener('click', () => client.send({ t: 'admin_audit', limit: 40 }));
+    });
+  }
 
   // ================= V2.7 Phase 1: City Chat =================
 

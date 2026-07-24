@@ -119,6 +119,7 @@ npm run e2e:wholesale  # V2.5: finite wholesale & market integrity
 npm run e2e:districts  # V2.6: districts, expansion & cross-district delivery
 npm run e2e:storage    # V2.6.2: storage capacity invariant & waiting deliveries
 npm run e2e:chat       # V2.7: City Chat realtime + moderation
+npm run e2e:admin      # V2.7: admin console live ops + hard delete
 ```
 
 Each E2E creates fresh persistent businesses; the shared city has a limited
@@ -139,6 +140,14 @@ fail even though the code is correct.
 All money movements (NPC purchases, coffee sales, market escrow/refunds/trades,
 upgrades) are recorded in the append-only `economic_ledger` table for debugging:
 `SELECT * FROM economic_ledger WHERE player_id = $1 ORDER BY id;`
+
+## Admin & Live Ops
+
+Admins (players with `is_admin`) get an in-game **Live Ops** console: dashboard,
+player search/management, cash/inventory adjustments, full Central Wholesale
+control, announcements, an audit viewer, and hard delete. Routine live
+administration no longer requires direct database access. Every consequential
+action is recorded in `admin_audit_log`.
 
 ## Storage over-capacity report
 

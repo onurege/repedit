@@ -409,3 +409,45 @@ Later phases (Direct Messaging, Live Offers/counter-offers, Urgent City Orders,
 the full Admin Console incl. wholesale/cash/inventory controls + hard delete,
 Rival Alerts, City News, Feedback) build on this same audit + authorization
 foundation.
+
+### Phase 2 — Admin & Live Ops console
+
+Goal: routine live-game administration no longer requires direct PostgreSQL
+access. Built entirely on the Phase 1 `requireAdmin` + `admin_audit_log`
+foundation and the existing WebSocket stack — no parallel admin backend.
+
+- **Server-side authorization is the only authorization.** Every admin method
+  calls `requireAdmin(adminId)`; a normal player crafting the WebSocket message
+  is rejected with `err.not_admin` (a dedicated regression test drives every
+  admin method as a non-admin). The client hides the Admin nav for non-admins,
+  but that is convenience, never the gate.
+- **Every consequential action is audited and pushes realtime state.** Cash,
+  inventory and wholesale mutations write an `admin_audit_log` entry (admin,
+  action, target, before/after, reason) and emit a targeted push/broadcast, so
+  changes appear on connected clients with no restart. A reason is accepted on
+  all consequential actions.
+- **Admin inventory reuses the V2.6.2 storage guard.** Add/Set clamp to
+  `capacity - reserved`; an admin can never recreate the storage-overflow bug,
+  and freeing space retries waiting deliveries.
+- **Cash is integer, non-negative, ledgered.** Add/Remove/Set clamp to >= 0 and
+  record an `ADMIN_CASH` ledger row inside the same transaction.
+- **Central Wholesale admin fixes the operational pain directly.** Add / remove
+  / set stock, refill (product or all), set daily stock, set base price, force
+  reset — all live-pushed. Coffee Beans can be refilled from the console; no
+  SQL or restart is ever needed again.
+- **Suspend / force-logout.** Suspending sets `players.suspended`, forces the
+  player off, and blocks re-entry at connect. Force-logout deletes the player's
+  sessions and closes their sockets. Both audited.
+- **Hard delete is transactional and FK-complete.** The two real blockers — a
+  `trades` row references the player AND the fulfilled `market_order`, neither
+  with a cascade — are resolved by deleting the player's trades inside the
+  transaction first; everything else cascades from `players` / `companies` /
+  `businesses`. In-memory world state (business, company, integrity, orders,
+  contracts, deliveries, mutes) is purged and a `biz_removed` broadcast drops
+  the buildings for every client, so no ghost company / building / occupied lot
+  survives. Sessions cascade-delete, so the token is dead — the player cannot
+  reconnect. Requires an exact-username typed confirmation and refuses
+  self-deletion.
+
+Not in Phase 2 (later P0/P1 phases): direct messaging, live offers/counter
+offers, urgent city orders, rival alerts, city news, player feedback.

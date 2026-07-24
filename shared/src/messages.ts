@@ -34,7 +34,93 @@ export interface ChatMessagePub {
   self?: boolean;          // set per-recipient for the sender
 }
 
+// ---------- V2.7 Phase 2: Admin & Live Ops ----------
+
+export type AdminCashOp = 'add' | 'remove' | 'set';
+export type AdminInvOp = 'add' | 'remove' | 'set';
+export type AdminWholesaleOp = 'add' | 'remove' | 'set' | 'refill' | 'set_daily' | 'set_price' | 'reset';
+
+/** Cheap city-wide operational overview (admin-only). */
+export interface AdminDashboard {
+  online: number;
+  players: number;
+  companies: number;
+  businesses: number;
+  districts: number;
+  deliveries: number;
+  waitingDeliveries: number;
+  contracts: number;
+  orders: number;
+  urgentOrders: number;   // reserved for a later phase; 0 for now
+  cityEvents: number;
+  wholesale: { product: ProductId; remaining: number; dailyStock: number; basePrice: number }[];
+  recentAudit: AdminAuditEntry[];
+  recentReports: AdminReportEntry[];
+}
+
+export interface AdminPlayerRow {
+  id: number;
+  username: string;
+  companyName: string | null;
+  online: boolean;
+  suspended: boolean;
+  cash: number;
+  businesses: number;
+}
+
+export interface AdminInventorySlot {
+  bizId: number;
+  bizType: BusinessType;
+  district: DistrictId;
+  product: ProductId;
+  qty: number;
+  reserved: number;
+  capacity: number;
+}
+
+/** Full admin-only player profile. Contains values normal players never see. */
+export interface AdminPlayerDetail {
+  id: number;
+  username: string;
+  online: boolean;
+  suspended: boolean;
+  suspendedReason: string | null;
+  muted: boolean;
+  joinedAt: number;
+  cash: number;
+  xp: number;
+  level: number;
+  reputation: number;
+  company: { id: number; name: string; level: number; xp: number } | null;
+  businesses: { id: number; type: BusinessType; district: DistrictId; level: number; lotId: string }[];
+  inventory: AdminInventorySlot[];
+  activeOrders: number;
+  activeContracts: number;
+  recentLedger: { type: string; amount: number; at: number }[];
+}
+
+export interface AdminAuditEntry {
+  id: number;
+  adminName: string;
+  action: string;
+  targetType: string | null;
+  targetId: string | null;
+  detail: Record<string, unknown> | null;
+  at: number;
+}
+
+export interface AdminReportEntry {
+  id: number;
+  messageId: number;
+  reason: string;
+  note: string | null;
+  body: string | null;      // the reported message body (may be deleted)
+  authorName: string | null;
+  at: number;
+}
+
 export type ClientMsg =
+
   | { t: 'choose_business'; type: BusinessType }
   | { t: 'open_business'; lotId: string; type: BusinessType }
   | { t: 'rename_company'; name: string }
@@ -69,6 +155,20 @@ export type ClientMsg =
   | { t: 'admin_delete_chat'; messageId: number }
   | { t: 'admin_mute'; playerId: number; minutes?: number; reason?: string }
   | { t: 'admin_unmute'; playerId: number }
+  // ---- V2.7 Phase 2: Admin & Live Ops ----
+  | { t: 'admin_dashboard' }
+  | { t: 'admin_search_players'; q: string }
+  | { t: 'admin_player_detail'; playerId: number }
+  | { t: 'admin_suspend'; playerId: number; suspend: boolean; reason?: string }
+  | { t: 'admin_force_logout'; playerId: number; reason?: string }
+  | { t: 'admin_cash'; playerId: number; op: AdminCashOp; amount: number; reason?: string }
+  | { t: 'admin_inventory'; bizId: number; product: ProductId; op: AdminInvOp; amount: number; reason?: string }
+  | { t: 'admin_wholesale'; product: ProductId; op: AdminWholesaleOp; amount?: number; reason?: string }
+  | { t: 'admin_wholesale_refill_all'; reason?: string }
+  | { t: 'admin_announce_edit'; id: number; title?: string; message?: string; priority?: AnnouncementPriority; durationSecs?: number }
+  | { t: 'admin_announce_deactivate'; id: number }
+  | { t: 'admin_hard_delete'; playerId: number; confirmName: string; reason?: string }
+  | { t: 'admin_audit'; limit?: number }
   | { t: 'ping' };
 
 // ---------- server -> client ----------
@@ -479,6 +579,7 @@ export type ServerMsg =
   | { t: 'biz'; biz: BizPub }             // someone else's business upsert
   | { t: 'my_biz'; biz: BizPriv }          // one of your businesses' detail
   | { t: 'my_biz_removed'; bizId: number }
+  | { t: 'biz_removed'; bizId: number }  // public: drop the business everywhere
   | { t: 'order'; order: OrderPub }        // upsert (remaining=0 -> remove)
   | { t: 'order_removed'; orderId: number }
   | { t: 'delivery'; delivery: DeliveryPub }
@@ -509,4 +610,10 @@ export type ServerMsg =
   | { t: 'chat'; message: ChatMessagePub }
   | { t: 'chat_deleted'; messageId: number }
   | { t: 'chat_muted'; muted: boolean; until: number | null; reason: string | null }
+  // ---- V2.7 Phase 2: Admin & Live Ops ----
+  | { t: 'admin_dashboard'; dashboard: AdminDashboard }
+  | { t: 'admin_players'; results: AdminPlayerRow[] }
+  | { t: 'admin_player_detail'; detail: AdminPlayerDetail }
+  | { t: 'admin_audit'; entries: AdminAuditEntry[] }
+  | { t: 'force_logout'; reason: string | null }
   | { t: 'pong' };

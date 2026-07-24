@@ -25,6 +25,10 @@ import type {
   AnnouncementPub,
   WholesaleState,
   ChatMessagePub,
+  AdminDashboard,
+  AdminPlayerRow,
+  AdminPlayerDetail,
+  AdminAuditEntry,
 } from '@district/shared';
 import { t } from './i18n.js';
 
@@ -64,6 +68,10 @@ export class GameClient {
   chatMuted = false;
   chatMutedReason: string | null = null;
   canModerate = false;
+  adminDashboard: AdminDashboard | null = null;
+  adminPlayers: AdminPlayerRow[] = [];
+  adminPlayerDetail: AdminPlayerDetail | null = null;
+  adminAudit: AdminAuditEntry[] = [];
   tutorial: TutorialState | null = null;
   updatesUnseen: UpdatePub[] = [];
   updatesAll: UpdatePub[] = [];
@@ -150,6 +158,14 @@ export class GameClient {
         this.emit('unauthorized');
         return;
       }
+      // V2.7 Phase 2: admin force-logout / hard-delete / suspend close the
+      // socket with a distinct code — clear the token and do NOT reconnect.
+      if (e.code === 4003 || e.code === 4004) {
+        this.shouldReconnect = false;
+        localStorage.removeItem('bd_token');
+        this.emit('force_logout', e.code === 4004 ? 'deleted' : 'suspended');
+        return;
+      }
       if (this.shouldReconnect) {
         setTimeout(() => this.connect(), this.reconnectDelay);
         this.reconnectDelay = Math.min(10000, this.reconnectDelay * 1.7);
@@ -208,6 +224,11 @@ export class GameClient {
         this.myBusinesses.set(msg.biz.id, msg.biz);
         this.businesses.set(msg.biz.id, msg.biz);
         if (this.selectedBizId == null) this.selectedBizId = msg.biz.id;
+        this.emit('update');
+        break;
+      case 'biz_removed':
+        this.businesses.delete(msg.bizId);
+        if (this.myBusinesses.has(msg.bizId)) this.myBusinesses.delete(msg.bizId);
         this.emit('update');
         break;
       case 'my_biz_removed':
@@ -347,6 +368,25 @@ export class GameClient {
         this.chatMutedReason = msg.reason;
         this.emit('chat');
         this.emit('chat_muted', msg);
+        break;
+      case 'admin_dashboard':
+        this.adminDashboard = msg.dashboard;
+        this.emit('admin');
+        break;
+      case 'admin_players':
+        this.adminPlayers = msg.results;
+        this.emit('admin');
+        break;
+      case 'admin_player_detail':
+        this.adminPlayerDetail = msg.detail;
+        this.emit('admin');
+        break;
+      case 'admin_audit':
+        this.adminAudit = msg.entries;
+        this.emit('admin');
+        break;
+      case 'force_logout':
+        this.emit('force_logout', msg.reason);
         break;
       case 'wholesale':
         this.wholesale = msg.wholesale;
