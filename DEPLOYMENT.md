@@ -54,7 +54,25 @@ time warp, business reset) — they cannot be invoked in production.
 
 ```bash
 git pull
-docker compose -f docker-compose.prod.yml up -d --build
+docker compose -f docker-compose.prod.yml up -d --build --force-recreate
+```
+
+`--force-recreate` is required. The `server` and `client-build` services run
+the plain `node:22-alpine` image with the repo bind-mounted, so `--build`
+rebuilds nothing and Compose leaves an already-running `server` container in
+place — its long-lived `tsx` process keeps the *old* code in memory even
+though `git pull` updated the files on disk. `--force-recreate` restarts the
+container so the server picks up the new code. (Symptom of skipping it: the
+client shows new content but the server rejects actions that depend on new
+code — e.g. after the V2.6 release, "no free lots" and failure to open
+businesses in the new district.)
+
+Verify the running server loaded the current code, e.g. after V2.6:
+
+```bash
+docker compose -f docker-compose.prod.yml exec server \
+  node -e "import('@district/shared').then(m=>console.log('lots',m.LOTS.length))"
+# V2.6 => lots 43   (18 Old Town + 24 Green Valley + 1 wholesale)
 ```
 
 ## Database backup & restore
