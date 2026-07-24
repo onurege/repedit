@@ -117,6 +117,7 @@ npm run e2e:events     # V2.3: city events & dynamic demand
 npm run e2e:experience # V2.4: Mira tutorial, brief, What's New
 npm run e2e:wholesale  # V2.5: finite wholesale & market integrity
 npm run e2e:districts  # V2.6: districts, expansion & cross-district delivery
+npm run e2e:storage    # V2.6.2: storage capacity invariant & waiting deliveries
 ```
 
 Each E2E creates fresh persistent businesses; the shared city has a limited
@@ -137,6 +138,15 @@ fail even though the code is correct.
 All money movements (NPC purchases, coffee sales, market escrow/refunds/trades,
 upgrades) are recorded in the append-only `economic_ledger` table for debugging:
 `SELECT * FROM economic_ledger WHERE player_id = $1 ORDER BY id;`
+
+## Storage over-capacity report
+
+List any businesses whose stored inventory exceeds capacity (read-only, never
+deletes goods — legacy data from before the V2.6.2 invariant):
+
+```bash
+npm run report:overflow -w server
+```
 
 ## Production build
 

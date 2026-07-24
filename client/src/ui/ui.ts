@@ -974,20 +974,35 @@ export class UI {
         <div class="hint">${hint}</div>
       `);
     } else if (tab === 'inventory') {
-      this.setBody(body, Object.entries(biz.inventory)
+      // Waiting deliveries bound for this business (storage was full on arrival).
+      const waitingByProduct = new Map<string, number>();
+      for (const d of client.deliveries.values()) {
+        if (d.toLot === biz.lotId && d.status === 'waiting') {
+          waitingByProduct.set(d.product, (waitingByProduct.get(d.product) ?? 0) + d.qty);
+        }
+      }
+      const overCapacity = Object.entries(biz.inventory).some(([, e]) => e.qty + e.reserved > e.capacity);
+      const overBanner = overCapacity
+        ? `<div class="bigstatus bad">${t('inv.over_capacity_title')}</div><div class="hint neg">${t('inv.over_capacity_hint')}</div>`
+        : '';
+      this.setBody(body, overBanner + Object.entries(biz.inventory)
         .map(([pid, e]) => {
           const p = PRODUCTS[pid as ProductId];
           const used = e.qty + e.reserved;
+          const over = used > e.capacity;
           const pct = e.capacity > 0 ? Math.min(100, (used / e.capacity) * 100) : 0;
-          return `<div class="invrow">
+          const waiting = waitingByProduct.get(pid) ?? 0;
+          const free = Math.max(0, e.capacity - used);
+          return `<div class="invrow${over ? ' over' : ''}">
             <span class="emoji">${p.emoji}</span>
             <span class="name">${pName(pid as ProductId)}
-              <div class="capbar"><div style="width:${pct}%"></div></div>
+              <div class="capbar"><div class="${over ? 'over' : ''}" style="width:${pct}%"></div></div>
             </span>
             <span>
-              <span class="qty">${e.qty}</span>
+              <span class="qty ${over ? 'neg' : ''}">${e.qty}</span>
               <span class="cap">/ ${e.capacity}</span><br/>
               <span class="cap">${e.reserved ? `${t('inv.on_market', { qty: e.reserved })} · ` : ''}${e.incoming ? t('inv.incoming', { qty: e.incoming }) : ''}</span>
+              ${waiting ? `<br/><span class="cap wait">⏳ ${t('inv.delivery_waiting', { qty: waiting, free })}</span>` : ''}
             </span>
           </div>`;
         })

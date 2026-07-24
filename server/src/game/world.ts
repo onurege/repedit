@@ -284,7 +284,7 @@ export interface DeliveryRec {
   fromLot: string;
   toLot: string;
   toBusinessId: number;
-  status: 'in_transit' | 'delivered';
+  status: 'in_transit' | 'waiting' | 'delivered';
   departAtMs: number;
   arriveAtMs: number;
 }
@@ -386,6 +386,23 @@ function inv(biz: BizRec, product: ProductId): InvRec {
     biz.inv.set(product, rec);
   }
   return rec;
+}
+
+/**
+ * Physical goods currently occupying a product's storage slot: on-hand plus
+ * goods reserved for outgoing market sell orders (still on the lot).
+ */
+function usedStorage(biz: BizRec, product: ProductId): number {
+  const rec = biz.inv.get(product);
+  return rec ? rec.qty + rec.reserved : 0;
+}
+
+/**
+ * Free space in a product's storage slot right now (never negative). A
+ * business over its (possibly reduced/legacy) capacity reports 0 free.
+ */
+function freeSpaceFor(biz: BizRec, product: ProductId): number {
+  return Math.max(0, capacityFor(biz, product) - usedStorage(biz, product));
 }
 
 function capacityFor(biz: BizRec, product: ProductId): number {
@@ -626,7 +643,7 @@ export class World extends EventEmitter {
         createdAtMs: new Date(r.created_at).getTime(),
       });
     }
-    const deliveries = await query("SELECT * FROM deliveries WHERE status = 'in_transit'");
+    const deliveries = await query("SELECT * FROM deliveries WHERE status IN ('in_transit','waiting')");
     for (const r of deliveries.rows) {
       this.deliveries.set(r.id, {
         id: r.id,
@@ -848,6 +865,9 @@ export class World extends EventEmitter {
     }
     for (const d of [...this.deliveries.values()]) {
       if (d.status === 'in_transit' && d.arriveAtMs <= now) {
+        await this.completeDelivery(d);
+      } else if (d.status === 'waiting') {
+        // Periodic fallback: retry a delivery that couldn't fit earlier.
         await this.completeDelivery(d);
       }
     }
@@ -1804,7 +1824,8 @@ export class World extends EventEmitter {
   private incomingFor(bizId: number, product: ProductId): number {
     let total = 0;
     for (const d of this.deliveries.values()) {
-      if (d.toBusinessId === bizId && d.product === product && d.status === 'in_transit') {
+      if (d.toBusinessId === bizId && d.product === product &&
+          (d.status === 'in_transit' || d.status === 'waiting')) {
         total += d.qty;
       }
     }
@@ -1844,29 +1865,71 @@ export class World extends EventEmitter {
     return d;
   }
 
+  /**
+   * Try to unload an arrived (or waiting) delivery into its destination while
+   * preserving the storage invariant: physical stock never exceeds capacity.
+   *
+   * - Fits fully -> unload all goods, mark delivered exactly once.
+   * - Does not fit (incl. legacy over-capacity) -> enter WAITING_FOR_STORAGE.
+   *   Goods stay with the delivery (money was already settled at creation), so
+   *   nothing is destroyed, duplicated, or overflowed. It is retried when space
+   *   frees (consumption, sale, upgrade) via the tick and explicit retries.
+   *
+   * No partial unload in V2.6.2: the full quantity must fit or the delivery
+   * keeps waiting. Runs synchronously in-memory then persists, so concurrent
+   * deliveries into the same slot serialise — exactly one can take the space.
+   */
   private async completeDelivery(d: DeliveryRec): Promise<void> {
-    if (d.status !== 'in_transit') return;
-    d.status = 'delivered';
+    if (d.status === 'delivered') return;
     const biz = this.businesses.get(d.toBusinessId);
-    if (biz) {
-      // Paid goods are never lost: deliveries may exceed nominal capacity.
-      inv(biz, d.product).qty += d.qty;
-      biz.dirty = true;
+    if (!biz) {
+      // Destination is gone (e.g. business reset). Money was already settled;
+      // there is nowhere to deliver, so retire the delivery without overflow.
+      d.status = 'delivered';
+      await query("UPDATE deliveries SET status='delivered' WHERE id=$1", [d.id]).catch(() => {});
+      this.deliveries.delete(d.id);
+      return;
     }
-    await tx(async (c) => {
-      await c.query("UPDATE deliveries SET status='delivered' WHERE id=$1 AND status='in_transit'", [d.id]);
-      if (biz) {
-        const rec = inv(biz, d.product);
-        await c.query(
-          `INSERT INTO inventories (business_id, product, qty, reserved) VALUES ($1,$2,$3,$4)
-           ON CONFLICT (business_id, product) DO UPDATE SET qty=$3, reserved=$4`,
-          [biz.id, d.product, rec.qty, rec.reserved]
-        );
+    const rec = inv(biz, d.product);
+    const cap = capacityFor(biz, d.product);
+    // All-or-nothing: the full quantity must fit alongside current physical
+    // stock (on-hand + reserved). Over-capacity slots report 0 free -> waits.
+    if (rec.qty + rec.reserved + d.qty > cap) {
+      if (d.status !== 'waiting') {
+        d.status = 'waiting';
+        await query("UPDATE deliveries SET status='waiting' WHERE id=$1 AND status='in_transit'", [d.id]).catch(() => {});
+        console.log(`[econ] DELIVERY_WAIT id=${d.id} ${d.qty}x${d.product} biz=${biz.id} (free=${Math.max(0, cap - rec.qty - rec.reserved)})`);
+        this.emit('delivery', d); // push updated (waiting) state to clients
       }
+      return;
+    }
+    // Fits — unload the whole delivery.
+    rec.qty += d.qty;
+    biz.dirty = true;
+    d.status = 'delivered';
+    await tx(async (c) => {
+      await c.query("UPDATE deliveries SET status='delivered' WHERE id=$1 AND status<>'delivered'", [d.id]);
+      await c.query(
+        `INSERT INTO inventories (business_id, product, qty, reserved) VALUES ($1,$2,$3,$4)
+         ON CONFLICT (business_id, product) DO UPDATE SET qty=$3, reserved=$4`,
+        [biz.id, d.product, rec.qty, rec.reserved]
+      );
     });
     this.deliveries.delete(d.id);
     console.log(`[econ] DELIVERY_DONE id=${d.id} ${d.qty}x${d.product} -> biz=${d.toBusinessId}`);
     this.emit('delivery_done', d);
+  }
+
+  /**
+   * Retry every waiting delivery bound for a business (e.g. after a capacity
+   * upgrade or inventory drop). Cheap: iterates only the small deliveries map.
+   */
+  private async retryWaitingDeliveries(bizId: number): Promise<void> {
+    for (const d of [...this.deliveries.values()]) {
+      if (d.status === 'waiting' && d.toBusinessId === bizId) {
+        await this.completeDelivery(d);
+      }
+    }
   }
 
   async createOrder(
@@ -2038,6 +2101,13 @@ export class World extends EventEmitter {
       buyer = fulfiller;
       buyerBiz = fulfillerBiz;
       if (capacityFor(buyerBiz, order.product) <= 0) throw new GameError('err.cannot_store_that');
+      // Pre-validate storage: the buyer is acting now, so reject up front rather
+      // than escrow for an impossible immediate purchase. completeDelivery
+      // revalidates atomically at unload, so a concurrent change can only make
+      // the delivery wait, never overflow.
+      const availBuy = Math.max(0, capacityFor(buyerBiz, order.product)
+        - usedStorage(buyerBiz, order.product) - this.incomingFor(buyerBiz.id, order.product));
+      if (qty > availBuy) throw new GameError('err.insufficient_storage', { required: qty, available: availBuy });
       if (buyer.cash < amount) throw new GameError('err.not_enough_cash', { cost: amount });
       const rec = inv(sellerBiz, order.product);
       if (rec.reserved < qty) throw new GameError('err.seller_stock_unavailable');
@@ -2192,6 +2262,8 @@ export class World extends EventEmitter {
       const company = this.companies.get(playerId);
       if (company) this.addCompanyXp(company, COMPANY_XP.perUpgrade);
       this.emit('upgraded', { biz });
+      // A bigger store may now fit deliveries that were WAITING_FOR_STORAGE.
+      await this.retryWaitingDeliveries(biz.id);
     } catch (err) {
       p.cash += cost;
       biz.level -= 1;
@@ -2576,9 +2648,13 @@ export class World extends EventEmitter {
       case 'add_bread': {
         const biz = this.requireOwnedBiz(playerId, bizId);
         const product = cmd.slice(4) as ProductId;
-        inv(biz, product).qty += v > 0 ? v : 50;
+        // Respect the storage invariant even for dev/admin adds (V2.6.2): clamp
+        // to free space so no mutation path can push stock over capacity.
+        const want = v > 0 ? v : 50;
+        const added = Math.min(want, freeSpaceFor(biz, product));
+        inv(biz, product).qty += added;
         biz.dirty = true;
-        return `+${v > 0 ? v : 50} ${PRODUCTS[product].name}`;
+        return `+${added} ${PRODUCTS[product].name}${added < want ? ' (storage full)' : ''}`;
       }
       case 'company_xp': {
         const company = await this.ensureCompany(playerId);
@@ -2742,6 +2818,35 @@ export class World extends EventEmitter {
       districts,
       recent,
     };
+  }
+
+  /**
+   * V2.6.2 admin/report helper: businesses whose physical stock exceeds a
+   * product's capacity (legacy overflow). Read-only — never deletes goods.
+   */
+  overCapacityReport(): {
+    bizId: number; ownerName: string; type: BusinessType; product: ProductId;
+    capacity: number; used: number; overflow: number;
+  }[] {
+    const rows = [];
+    for (const biz of this.businesses.values()) {
+      for (const [product, rec] of biz.inv) {
+        const cap = capacityFor(biz, product);
+        const used = rec.qty + rec.reserved;
+        if (used > cap) {
+          rows.push({
+            bizId: biz.id,
+            ownerName: this.players.get(biz.ownerId)?.name ?? '???',
+            type: biz.type,
+            product,
+            capacity: cap,
+            used,
+            overflow: used - cap,
+          });
+        }
+      }
+    }
+    return rows.sort((a, b) => b.overflow - a.overflow);
   }
 
   toCompanyPriv(company: CompanyRec): CompanyPriv {
