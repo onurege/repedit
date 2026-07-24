@@ -260,6 +260,10 @@ export class UI {
     this.lastBodyHTML = '';
     this.lastTabsHTML = '';
     this.lastObjHTML = '';
+    // The chat panel keeps its own body cache; clear it too so re-opening the
+    // chat after visiting another panel always re-renders (the shared body
+    // element was overwritten by the other panel).
+    this.lastChatHTML = '';
   }
 
   // ================= AUTH =================
