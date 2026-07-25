@@ -674,7 +674,9 @@ html.touch .controls-hint { display: none; }
 .mobile-hint .btn { margin-top: 14px; width: 100%; }
 
 /* ---------- Phone portrait / small screens ---------- */
-@media (max-width: 640px) {
+/* Phones in portrait (narrow) OR any short viewport — landscape phones are wide
+   but short, so height must trigger the compact layout too, not just width. */
+@media (max-width: 640px), (max-height: 500px) {
   /* Language switcher: flag-only, tucked into the TOP-LEFT corner so it never
      covers the centred HUD stats or a panel's top-right close button. */
   #langbar { top: calc(8px + env(safe-area-inset-top)); left: 8px; right: auto; padding: 3px; gap: 2px; }
@@ -816,7 +818,7 @@ html.touch .controls-hint { display: none; }
 }
 
 /* ---------- Tablet portrait & narrow windows (phone rules already cover ≤640) ---------- */
-@media (min-width: 641px) and (max-width: 1024px) {
+@media (min-width: 641px) and (max-width: 1024px) and (min-height: 501px) {
   /* A docked panel is large relative to the screen here, so the centred top
      banners / district selector would overlap it — hide them while it's open. */
   #hud:has(.panel.visible) .urgent-banner,
@@ -830,4 +832,32 @@ html.touch .controls-hint { display: none; }
   .urgent-banner .ub-title, .urgent-banner .ub-hint { display: none; }
   .announce-banner { max-width: 70vw; }
   .announce-banner .ab-msg { max-width: 40vw; }
+}
+
+/* ---------- Landscape phones (wide but very short) ----------
+   The compact phone rules already apply via (max-height: 500px); here we reclaim
+   scarce vertical space and keep the onboarding tutorial from filling the screen. */
+@media (max-height: 500px) {
+  /* Reclaim vertical room: hide the dismissible/info banners; keep only the
+     gameplay-critical urgent order, left-anchored (not full width) so the
+     top-right corner is free. Layout uses the FOUR CORNERS so nothing overlaps:
+     urgent top-left · toasts top-right · tutorial bottom-left · districts bottom-right. */
+  .announce-banner, .event-banner { display: none !important; }
+  .urgent-banner {
+    top: calc(112px + env(safe-area-inset-top)); left: 8px; right: auto; transform: none; max-width: 66vw;
+  }
+
+  #toasts {
+    top: calc(112px + env(safe-area-inset-top)); left: auto; right: 8px; transform: none;
+    width: min(320px, 30vw); align-items: flex-end;
+  }
+
+  .mira {
+    left: 8px; right: auto; width: min(430px, 52vw);
+    bottom: calc(60px + env(safe-area-inset-bottom));
+    max-height: calc(var(--app-vh, 100dvh) - 176px); overflow-y: auto;
+  }
+  .panel.visible ~ .mira { display: none !important; }
+
+  .district-bar { left: auto; right: 8px; transform: none; }
 }
