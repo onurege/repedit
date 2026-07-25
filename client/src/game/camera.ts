@@ -58,7 +58,9 @@ export class CameraRig {
     window.addEventListener('blur', () => this.keys.clear());
 
     dom.addEventListener('mousedown', (e) => {
-      // 0 = left (select), 1 = middle (pan), 2 = right (rotate)
+      // 0 = left (click=select / drag=pan), 1 = middle (pan), 2 = right (rotate).
+      // Only mousedowns on the canvas start a world gesture, so dragging over a
+      // UI panel never moves the camera.
       this.dragging = true;
       this.dragButton = e.button;
       this.dragMoved = 0;
@@ -75,8 +77,10 @@ export class CameraRig {
       if (this.dragButton === 2) {
         // RIGHT drag: orbit (yaw) — horizontal; a little pitch on vertical.
         this.yaw -= dx * 0.006;
-      } else if (this.dragButton === 1) {
-        // MIDDLE drag: pan across the ground plane.
+      } else if (this.dragButton === 1 || this.dragButton === 0) {
+        // LEFT or MIDDLE drag: pan across the ground plane (same map-drag feel
+        // as the mobile one-finger pan). A left CLICK still selects because the
+        // mouseup below only fires onSelect when travel stayed under threshold.
         const scale = this.curDist * 0.0016;
         const fwd = new THREE.Vector3(-Math.sin(this.curYaw), 0, -Math.cos(this.curYaw));
         const right = new THREE.Vector3(-fwd.z, 0, fwd.x);
@@ -88,8 +92,9 @@ export class CameraRig {
     window.addEventListener('mouseup', (e) => {
       if (!this.dragging) return;
       this.dragging = false;
-      // LEFT click without a drag = select.
-      if (e.button === 0 && this.dragButton === 0 && this.dragMoved <= 6 && this.onSelect) {
+      // LEFT click without a meaningful drag = select (same tap-vs-drag
+      // threshold as touch). A left DRAG panned above and must NOT select.
+      if (e.button === 0 && this.dragButton === 0 && this.dragMoved <= CameraRig.TAP_THRESHOLD && this.onSelect) {
         const ndcX = (e.clientX / window.innerWidth) * 2 - 1;
         const ndcY = -(e.clientY / window.innerHeight) * 2 + 1;
         this.onSelect(ndcX, ndcY);
