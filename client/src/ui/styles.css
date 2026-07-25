@@ -673,13 +673,13 @@ html.touch .controls-hint { display: none; }
   /* Language switcher: flag-only, tucked into the TOP-LEFT corner so it never
      covers the centred HUD stats or a panel's top-right close button. */
   #langbar { top: calc(8px + env(safe-area-inset-top)); left: 8px; right: auto; padding: 3px; gap: 2px; }
-  #langbar button { padding: 7px 8px; min-height: 40px; }
+  #langbar button { padding: 6px 6px; min-height: 38px; }
   #langbar .llabel { display: none; }
   #langbar .lflag { margin-right: 0; }
 
-  /* Compact top HUD, shifted right of the language switcher; scrolls if needed. */
+  /* Compact top HUD, shifted fully clear of the language switcher; scrolls if needed. */
   .topbar {
-    left: 62px; right: 8px; transform: none; justify-content: flex-start;
+    left: 92px; right: 8px; transform: none; justify-content: flex-start;
     gap: 3px; padding: 6px 8px; border-radius: 12px;
     max-width: none; width: auto; overflow-x: auto; -webkit-overflow-scrolling: touch;
     scrollbar-width: none;
@@ -693,7 +693,7 @@ html.touch .controls-hint { display: none; }
   .account-btn { padding: 4px; }
   .account-btn .acc-name { max-width: 52px; font-size: 12px; }
 
-  .company-bar { top: calc(58px + env(safe-area-inset-top)); left: 62px; right: 8px; transform: none; justify-content: flex-start; padding: 5px 8px; gap: 6px; max-width: none; width: auto; }
+  .company-bar { top: calc(58px + env(safe-area-inset-top)); left: 92px; right: 8px; transform: none; justify-content: flex-start; padding: 5px 8px; gap: 6px; max-width: none; width: auto; }
   .company-name { max-width: 120px; font-size: 12px; }
   .company-meta { font-size: 11px; }
 
@@ -731,21 +731,22 @@ html.touch .controls-hint { display: none; }
   .panel-tabs button { flex: 0 0 auto; min-height: 40px; padding: 9px 12px; white-space: nowrap; }
   .panel-body { padding: 12px 14px calc(16px + env(safe-area-inset-bottom)); }
 
-  /* Onboarding objectives: narrow, left-anchored, hidden when a panel is open. */
-  .objectives { left: 8px; right: auto; width: min(210px, 58vw); top: calc(96px + env(safe-area-inset-top)); font-size: 12px; max-height: 34vh; overflow-y: auto; }
-  .panel.visible ~ .objectives { display: none !important; }
+  /* The onboarding objectives checklist duplicates the Mira tutorial and would
+     dominate a phone screen — hide it here (Mira still guides new players). */
+  .objectives { display: none !important; }
 
-  /* Top notifications stack vertically below the HUD without overlapping. */
+  /* Notifications stack cleanly under the HUD: full-width, compact, no overlap. */
   .announce-banner {
-    top: calc(96px + env(safe-area-inset-top)); left: auto; right: 8px; transform: none;
-    max-width: 60vw; font-size: 12px; padding: 6px 10px;
+    top: calc(94px + env(safe-area-inset-top)); left: 8px; right: 8px; transform: none;
+    max-width: none; font-size: 12px; padding: 6px 10px;
   }
-  .announce-banner .ab-msg { max-width: 34vw; }
+  .announce-banner .ab-msg { max-width: 52vw; }
   .urgent-banner {
-    top: calc(140px + env(safe-area-inset-top)); left: 50%; transform: translateX(-50%); font-size: 12px;
-    max-width: calc(100vw - 16px); flex-wrap: wrap; gap: 6px 8px; padding: 6px 10px;
+    top: calc(138px + env(safe-area-inset-top)); left: 8px; right: 8px; transform: none;
+    max-width: none; font-size: 12px; flex-wrap: wrap; gap: 4px 8px; padding: 6px 10px;
   }
-  .event-banner { top: calc(190px + env(safe-area-inset-top)); font-size: 12px; }
+  .urgent-banner .ub-title { display: none; }  /* drop the flavour title for a slim pill */
+  .event-banner { top: calc(186px + env(safe-area-inset-top)); left: 8px; right: 8px; transform: none; max-width: none; font-size: 12px; }
 
   /* Toasts sit below the compact top HUD. */
   #toasts { top: calc(92px + env(safe-area-inset-top)); width: calc(100vw - 24px); }
