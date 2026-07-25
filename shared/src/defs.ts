@@ -3,7 +3,9 @@
 // Extend by adding entries — no engine changes needed.
 // ============================================================
 
-export type ProductId = 'milk' | 'beans' | 'coffee' | 'wheat' | 'bread';
+// `latte` is the V2.8 Phase-1 foundation product (licensable + recipe-previewable;
+// its manual production lands in Phase 2). All other ids are pre-existing.
+export type ProductId = 'milk' | 'beans' | 'coffee' | 'wheat' | 'bread' | 'latte';
 
 export interface ProductDef {
   id: ProductId;
@@ -18,6 +20,7 @@ export const PRODUCTS: Record<ProductId, ProductDef> = {
   coffee: { id: 'coffee', name: 'Coffee', basePrice: 30, emoji: '☕' },
   wheat: { id: 'wheat', name: 'Wheat', basePrice: 8, emoji: '🌾' },
   bread: { id: 'bread', name: 'Bread', basePrice: 20, emoji: '🍞' },
+  latte: { id: 'latte', name: 'Latte', basePrice: 42, emoji: '🥤' },
 };
 
 // Reference retail prices used for demand/fairness of retail sales.
