@@ -646,6 +646,9 @@ button { font-family: inherit; }
 
 /* The permanent WASD/mouse hint is meaningless on touch. */
 html.touch .controls-hint { display: none; }
+/* Robust fallback: any coarse-pointer (touch) device hides the desktop key/mouse
+   hint even if JS touch detection was inconclusive. */
+@media (pointer: coarse) { .controls-hint { display: none !important; } }
 
 /* Safe-area aware anchors (env insets are 0 on desktop, so no visual change). */
 .topbar { top: calc(12px + env(safe-area-inset-top)); }
@@ -685,9 +688,13 @@ html.touch .controls-hint { display: none; }
     scrollbar-width: none;
   }
   .topbar::-webkit-scrollbar { display: none; }
-  .stat { min-width: 0; padding: 0 3px; }
+  .stat { min-width: 0; padding: 0 4px; }
+  .stat .k, .stat .v { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 84px; }
   .stat .v { font-size: 13.5px; }
-  .stat .k { font-size: 8.5px; letter-spacing: 0.4px; }
+  .stat .k { font-size: 8.5px; letter-spacing: 0.3px; }
+  /* Drop the least-critical HUD stat (online count) + its trailing separator on
+     phones so the core cash/profit/level/reputation stats aren't cramped. */
+  .stat:has(#st-online), .stat:has(#st-online) + .sep { display: none; }
   .sep { height: 22px; }
   .xpbar { width: 48px; }
   .account-btn { padding: 4px; }
@@ -735,18 +742,20 @@ html.touch .controls-hint { display: none; }
      dominate a phone screen — hide it here (Mira still guides new players). */
   .objectives { display: none !important; }
 
-  /* Notifications stack cleanly under the HUD: full-width, compact, no overlap. */
+  /* Notifications: slim single-line pills stacked cleanly under the HUD. */
   .announce-banner {
-    top: calc(94px + env(safe-area-inset-top)); left: 8px; right: 8px; transform: none;
-    max-width: none; font-size: 12px; padding: 6px 10px;
+    top: calc(92px + env(safe-area-inset-top)); left: 8px; right: 8px; transform: none;
+    max-width: none; font-size: 11.5px; padding: 5px 10px;
   }
-  .announce-banner .ab-msg { max-width: 52vw; }
+  .announce-banner .ab-msg { max-width: 50vw; }
   .urgent-banner {
-    top: calc(138px + env(safe-area-inset-top)); left: 8px; right: 8px; transform: none;
-    max-width: none; font-size: 12px; flex-wrap: wrap; gap: 4px 8px; padding: 6px 10px;
+    top: calc(130px + env(safe-area-inset-top)); left: 8px; right: 8px; transform: none;
+    max-width: none; font-size: 11.5px; flex-wrap: wrap; gap: 4px 8px; padding: 5px 10px;
+    align-items: center;
   }
-  .urgent-banner .ub-title { display: none; }  /* drop the flavour title for a slim pill */
-  .event-banner { top: calc(186px + env(safe-area-inset-top)); left: 8px; right: 8px; transform: none; max-width: none; font-size: 12px; }
+  .urgent-banner .ub-title,
+  .urgent-banner .ub-hint { display: none; }   /* slim pill: badge + need + reward + time (+ action) */
+  .event-banner { top: calc(168px + env(safe-area-inset-top)); left: 8px; right: 8px; transform: none; max-width: none; font-size: 11.5px; padding: 5px 10px; }
 
   /* Toasts sit below the compact top HUD. */
   #toasts { top: calc(92px + env(safe-area-inset-top)); width: calc(100vw - 24px); }
@@ -756,8 +765,8 @@ html.touch .controls-hint { display: none; }
   .district-bar { bottom: calc(62px + env(safe-area-inset-bottom)); max-width: calc(100vw - 16px); overflow-x: auto; -webkit-overflow-scrolling: touch; scrollbar-width: none; }
   .district-bar::-webkit-scrollbar { display: none; }
 
-  /* Mira tutorial sits above the nav, full-width, and clears an open panel. */
-  .mira { right: 8px; left: 8px; width: auto; bottom: calc(110px + env(safe-area-inset-bottom)); }
+  /* Mira tutorial sits above the district selector + nav, and clears an open panel. */
+  .mira { right: 8px; left: 8px; width: auto; bottom: calc(128px + env(safe-area-inset-bottom)); }
   .panel.visible ~ .mira, .panel.visible ~ .mira-note { right: 8px; display: none; }
 
   /* Modals rise as bottom sheets and fit the visible viewport. */
@@ -812,6 +821,7 @@ html.touch .controls-hint { display: none; }
 
   /* Keep the notification banners compact and single-purpose (no odd wrapping). */
   .urgent-banner { max-width: 70vw; }
+  .urgent-banner .ub-title, .urgent-banner .ub-hint { display: none; }
   .announce-banner { max-width: 70vw; }
   .announce-banner .ab-msg { max-width: 40vw; }
 }
