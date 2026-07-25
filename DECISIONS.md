@@ -543,3 +543,38 @@ Not in Phase 3 (later): urgent city orders, rival alerts, city news, feedback.
   panel is kept separate from What's New / announcements.
 
 Not in Phase 4 (later): feedback, V2.8.
+
+## V2.7 Mobile Web Compatibility Hotfix — touch controls + responsive UI
+
+Frontend/input/CSS only — no backend, economy, schema, or WebSocket changes.
+
+- **Touch as an adapter, not a second game.** `CameraRig` gains touch handlers
+  that drive the SAME `target`/`yaw`/`dist` the desktop mouse path uses:
+  one-finger drag pans (same math as middle-drag), pinch scales `dist`
+  (fingers apart → zoom in), a two-finger midpoint slide rotates `yaw`. A
+  12px travel threshold discriminates tap (→ existing `onSelect` raycast) from
+  drag; a drag never selects; multitouch transitions re-baseline without a
+  jump; `touchcancel` clears all gesture state. Desktop WASD/mouse/wheel are
+  untouched (verified). Touch capability is detected via `ontouchstart` /
+  `maxTouchPoints` (`src/touch.ts`), never viewport width, so hybrid devices
+  keep both paths.
+- **Gestures scoped to the canvas.** `touch-action: none` is set on the WebGL
+  canvas only; `preventDefault` on canvas touch events stops page scroll/zoom
+  and synthesized mouse events. UI panels keep native scrolling and never move
+  the world (proven in the mobile E2E).
+- **Responsive UI.** A `@media (max-width: 640px)` layer turns the docked side
+  panel into a full-screen sheet that shrinks with the soft keyboard (a
+  `--app-vh` CSS var fed by `visualViewport`), makes the bottom nav a
+  horizontally-scrollable persistent tab bar above the panel, compacts the top
+  HUD, moves the language switcher to a flag-only top-left chip, stacks the
+  offer modal's controls, and enforces ~44px touch targets. A
+  `641–1024px` layer hides the transient top banners/objectives while a panel
+  is open (they would overlap a large docked panel). Safe-area insets
+  (`env(safe-area-inset-*)`) are applied to the HUD, nav, panels and modals;
+  `viewport-fit=cover` is set. The desktop WASD hint is hidden on touch and
+  replaced by a one-time gesture card (EN/TR).
+- **Mobile performance.** On touch devices the renderer caps DPR at 1.5 (vs 2),
+  disables MSAA, and uses a 1024² (vs 2048²) shadow map + PCF (vs PCFSoft).
+  Desktop visual quality is unchanged.
+
+Not in this hotfix: any gameplay/economy change, V2.7 Phase 5, native apps.

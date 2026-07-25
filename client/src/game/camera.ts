@@ -33,7 +33,22 @@ export class CameraRig {
   private lastY = 0;
   onSelect: ((ndcX: number, ndcY: number) => void) | null = null;
 
+  // --- Touch (mobile) gesture state: one-finger pan, tap-to-select, pinch
+  // zoom, two-finger rotate. These are an ADAPTER over the same target/yaw/dist
+  // the desktop mouse path drives — no separate mobile camera. ---
+  private touchMode: 'none' | 'pan' | 'gesture' = 'none';
+  private tLastX = 0;
+  private tLastY = 0;
+  private tMoved = 0;         // accumulated finger travel this sequence (tap vs drag)
+  private tGestured = false;  // a multitouch gesture happened -> suppress tap-select
+  private pinchDist = 0;      // last two-finger distance (px)
+  private pinchMidX = 0;      // last two-finger midpoint (px)
+  private static readonly TAP_THRESHOLD = 12; // px of travel below which a touch is a tap
+
   constructor(private camera: THREE.PerspectiveCamera, dom: HTMLElement) {
+    // Capture game gestures on the canvas only (never the whole page), so UI
+    // panels keep native scrolling and the page never scroll/zoom-bounces.
+    dom.style.touchAction = 'none';
     window.addEventListener('keydown', (e) => {
       if ((e.target as HTMLElement)?.tagName === 'INPUT') return;
       this.keys.add(e.key.toLowerCase());
@@ -90,6 +105,95 @@ export class CameraRig {
       },
       { passive: false }
     );
+
+    // ---- Touch adapter ----
+    dom.addEventListener('touchstart', (e) => this.onTouchStart(e), { passive: false });
+    dom.addEventListener('touchmove', (e) => this.onTouchMove(e), { passive: false });
+    dom.addEventListener('touchend', (e) => this.onTouchEnd(e), { passive: false });
+    dom.addEventListener('touchcancel', () => this.onTouchCancel(), { passive: false });
+  }
+
+  private setPinchBaseline(e: TouchEvent): void {
+    const a = e.touches[0], b = e.touches[1];
+    this.pinchDist = Math.hypot(b.clientX - a.clientX, b.clientY - a.clientY);
+    this.pinchMidX = (a.clientX + b.clientX) / 2;
+  }
+
+  private onTouchStart(e: TouchEvent): void {
+    e.preventDefault(); // also suppresses synthesized mouse events on touch
+    if (e.touches.length === 1) {
+      // New single-finger sequence (or a finger lifted back to one).
+      if (this.touchMode === 'none') { this.tMoved = 0; this.tGestured = false; }
+      this.touchMode = 'pan';
+      this.tLastX = e.touches[0].clientX;
+      this.tLastY = e.touches[0].clientY;
+    } else if (e.touches.length >= 2) {
+      // Second finger down -> pinch/rotate. Baseline set now = no camera jump.
+      this.touchMode = 'gesture';
+      this.tGestured = true;
+      this.setPinchBaseline(e);
+    }
+  }
+
+  private onTouchMove(e: TouchEvent): void {
+    e.preventDefault();
+    if (this.touchMode === 'pan' && e.touches.length === 1) {
+      const t = e.touches[0];
+      const dx = t.clientX - this.tLastX;
+      const dy = t.clientY - this.tLastY;
+      this.tMoved += Math.abs(dx) + Math.abs(dy);
+      this.tLastX = t.clientX;
+      this.tLastY = t.clientY;
+      // One-finger drag pans across the ground plane (same math as middle-drag).
+      const scale = this.curDist * 0.0016;
+      const fwd = new THREE.Vector3(-Math.sin(this.curYaw), 0, -Math.cos(this.curYaw));
+      const right = new THREE.Vector3(-fwd.z, 0, fwd.x);
+      this.target.addScaledVector(right, -dx * scale);
+      this.target.addScaledVector(fwd, dy * scale);
+      this.clampTarget();
+    } else if (this.touchMode === 'gesture' && e.touches.length >= 2) {
+      const a = e.touches[0], b = e.touches[1];
+      const nd = Math.hypot(b.clientX - a.clientX, b.clientY - a.clientY);
+      const mx = (a.clientX + b.clientX) / 2;
+      if (this.pinchDist > 0) {
+        // Fingers apart (nd grows) -> zoom IN (dist shrinks); together -> out.
+        this.dist = THREE.MathUtils.clamp(this.dist * (this.pinchDist / Math.max(1, nd)), MIN_DIST, MAX_DIST);
+        // Midpoint sliding horizontally rotates the city (yaw), like a map twist.
+        this.yaw -= (mx - this.pinchMidX) * 0.006;
+      }
+      this.pinchDist = nd;
+      this.pinchMidX = mx;
+    }
+  }
+
+  private onTouchEnd(e: TouchEvent): void {
+    e.preventDefault();
+    if (e.touches.length === 0) {
+      // Whole sequence ended: a short, single-finger, gesture-free touch = tap.
+      if (this.touchMode === 'pan' && !this.tGestured && this.tMoved <= CameraRig.TAP_THRESHOLD && this.onSelect) {
+        const t = e.changedTouches[0];
+        const ndcX = (t.clientX / window.innerWidth) * 2 - 1;
+        const ndcY = -(t.clientY / window.innerHeight) * 2 + 1;
+        this.onSelect(ndcX, ndcY);
+      }
+      this.touchMode = 'none';
+      this.pinchDist = 0;
+    } else if (e.touches.length === 1) {
+      // Two fingers -> one: re-baseline pan on the remaining finger (no jump),
+      // and keep tGestured so lifting it never triggers a stray selection.
+      this.touchMode = 'pan';
+      this.tLastX = e.touches[0].clientX;
+      this.tLastY = e.touches[0].clientY;
+      this.pinchDist = 0;
+    }
+  }
+
+  private onTouchCancel(): void {
+    // Clear all gesture state — never leave the camera stuck moving.
+    this.touchMode = 'none';
+    this.pinchDist = 0;
+    this.tGestured = false;
+    this.tMoved = CameraRig.TAP_THRESHOLD + 1; // any pending touch won't count as a tap
   }
 
   reset(): void {

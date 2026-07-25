@@ -123,7 +123,25 @@ npm run e2e:admin      # V2.7: admin console live ops + hard delete
 npm run e2e:negotiation # V2.7: direct messaging, offers & counter-offers
 npm run e2e:urgent     # V2.7 Phase 4: urgent city order race (exactly one winner)
 npm run e2e:citynews   # V2.7 Phase 4: rival alerts & city news from committed data
+npm run e2e:mobile     # V2.7 mobile: touch camera (drag/pinch/rotate), tap-vs-drag, responsive UI
 ```
+
+## Mobile / touch
+
+The city is fully playable from a mobile browser — no keyboard or mouse needed.
+Camera controls are gesture-based (touch capability is detected, not viewport
+width, so hybrid touch laptops keep both input paths):
+
+- **one-finger drag** — pan the city
+- **pinch** — zoom
+- **two-finger drag** — rotate the camera
+- **tap** — select a business / lot
+
+Desktop keeps WASD · right-drag rotate · middle-drag pan · wheel zoom · click
+select. Panels become full-screen sheets on phones (docked on tablet/desktop),
+the bottom navigation scrolls, safe-area insets and the soft keyboard are
+handled via `visualViewport`, and the renderer caps its pixel ratio on touch
+devices. There is no virtual joystick or D-pad — navigation is gesture-only.
 
 Each E2E creates fresh persistent businesses; the shared city has a limited
 number of lots, so reset the dev database and restart the server if you run

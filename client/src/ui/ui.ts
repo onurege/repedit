@@ -19,6 +19,7 @@ import {
   type RivalAlert, type CityNewsItem, type UrgentOrderPub,
   MARKET_MIN_PRICE, MARKET_MAX_PRICE, MARKET_MAX_QTY,
 } from '@district/shared';
+import { IS_TOUCH } from '../touch.js';
 import { client } from '../net.js';
 import { sfx, unlockAudio } from '../audio.js';
 import { t, fmtMoney as fmt, LANGS, getLang, setLang, onLangChange, type Lang } from '../i18n.js';
@@ -249,7 +250,7 @@ export class UI {
     bar.id = 'langbar';
     bar.title = t('lang.label');
     bar.innerHTML = LANGS.map(
-      (l) => `<button data-lang="${l.id}" class="${l.id === getLang() ? 'active' : ''}">${l.flag} ${l.label}</button>`
+      (l) => `<button data-lang="${l.id}" class="${l.id === getLang() ? 'active' : ''}"><span class="lflag">${l.flag}</span><span class="llabel">${l.label}</span></button>`
     ).join('');
     document.body.appendChild(bar);
     bar.querySelectorAll('button').forEach((b) =>
@@ -426,6 +427,7 @@ export class UI {
 
   hideChoose(): void {
     document.getElementById('choose-overlay')?.remove();
+    this.maybeShowMobileHint(); // now the player is in the city — safe to hint
   }
 
   // ================= HUD =================
@@ -556,11 +558,42 @@ export class UI {
     }, 1000);
   }
 
+  /**
+   * On touch devices, the permanent desktop control hint is hidden (CSS) and a
+   * compact first-time gesture card is shown once instead (§11). Reuses the
+   * modal-card look; dismissed forever via localStorage.
+   */
+  private mobileHintDone = false;
+  private maybeShowMobileHint(): void {
+    if (this.mobileHintDone) return;                     // at most once per session
+    if (!IS_TOUCH || !client.myBiz) return;              // only once the player is in the city
+    if (document.getElementById('choose-overlay')) return;
+    this.mobileHintDone = true;
+    try { if (localStorage.getItem('bd_mobile_hint') === '1') return; } catch { /* private mode */ }
+    if (document.getElementById('mobile-hint')) return;
+    const el = document.createElement('div');
+    el.id = 'mobile-hint';
+    el.className = 'mobile-hint';
+    el.innerHTML = `
+      <div class="mh-card">
+        <div class="mh-title">${t('mobile.hint.title')}</div>
+        <div class="mh-row"><span class="mh-ic">✋</span><span>${t('mobile.hint.drag')}</span></div>
+        <div class="mh-row"><span class="mh-ic">🤏</span><span>${t('mobile.hint.pinch')}</span></div>
+        <div class="mh-row"><span class="mh-ic">🔄</span><span>${t('mobile.hint.rotate')}</span></div>
+        <div class="mh-row"><span class="mh-ic">👆</span><span>${t('mobile.hint.tap')}</span></div>
+        <button class="btn primary" id="mh-ok">${t('mobile.hint.got_it')}</button>
+      </div>`;
+    document.body.appendChild(el);
+    const dismiss = () => { el.remove(); try { localStorage.setItem('bd_mobile_hint', '1'); } catch { /* ignore */ } };
+    el.querySelector('#mh-ok')!.addEventListener('click', dismiss);
+  }
+
   showHud(): void {
     this.authVisible = false;
     this.hud.classList.add('visible');
     this.loadFlags();
     this.refresh();
+    this.maybeShowMobileHint(); // touch-only, first time, after entering the city
   }
 
   openBusiness(): void {
