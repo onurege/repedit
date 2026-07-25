@@ -229,7 +229,9 @@ button { font-family: inherit; }
 .urgent-banner .ub-reward { font-weight: 800; }
 .urgent-banner .ub-time { font-weight: 700; opacity: 0.9; font-variant-numeric: tabular-nums; }
 .urgent-banner .ub-hint { opacity: 0.85; font-size: 12px; }
-.urgent-banner .btn.small { padding: 4px 12px; }
+/* Keep the "fulfil order" button compact inside the slim banner — override the
+   mobile 40px touch-target sizing (this selector is more specific, so it wins). */
+.urgent-banner .btn.small { padding: 4px 12px; min-height: 0; font-size: 12px; border-radius: 8px; }
 
 /* ---------- V2.7 Phase 4: City News feed ---------- */
 .citynews-row { padding: 8px 10px; border-left: 3px solid #64748b; background: rgba(148,163,184,0.08); border-radius: 6px; margin-bottom: 8px; }
