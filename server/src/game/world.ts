@@ -31,6 +31,7 @@ import {
   repDemandMultiplier,
   levelForXp,
   XP,
+  BIZ_XP,
   REP_MIN,
   REP_MAX,
   REP_START,
@@ -121,6 +122,23 @@ import {
   NEWS_MAJOR_DEAL_MIN,
   NEWS_MAX_ITEMS,
   NEWS_WHOLESALE_LOW_FRACTION,
+  // V2.8 Phase 1 — product economy
+  MAX_BUSINESS_LEVEL,
+  bizLevelForXp,
+  xpForBizLevel,
+  slotsForLevel,
+  activeSlotLimit,
+  storageMultForLevel,
+  starterLicenses,
+  licensableProducts,
+  licenseDef,
+  levelReward,
+  businessTier,
+  productCapability,
+  productCompatible,
+  SLOT_SWITCH_COOLDOWN_SECS,
+  LEDGER_PRODUCT_LICENSE,
+  type ProductCapability,
   type UrgentOrderKind,
   type UrgentOrderPub,
   type UrgentOrderStatus,
@@ -291,6 +309,13 @@ export interface BizRec {
   inv: Map<ProductId, InvRec>;
   tradeCount: number; // successful player trades + contract deliveries (public)
   dirty: boolean;
+  // V2.8 Phase 1 — product economy (additive; the 1–3 `level` tier is untouched).
+  bizXp: number;
+  bizLevel: number;                         // 1–50, derived from bizXp
+  licenses: Map<ProductId, ProductCapability>; // owned product licenses
+  activeProducts: Set<ProductId>;           // licensed products occupying slots
+  lastSlotChangeMs: number | null;          // active-config cooldown anchor
+  progressionLoaded: boolean;               // starter backfill has run
 }
 
 export interface ContractRec {
@@ -472,7 +497,8 @@ function freeSpaceFor(biz: BizRec, product: ProductId): number {
   return Math.max(0, capacityFor(biz, product) - usedStorage(biz, product));
 }
 
-function capacityFor(biz: BizRec, product: ProductId): number {
+// Base storage from the unchanged 1–3 facility tier.
+function baseCapacityFor(biz: BizRec, product: ProductId): number {
   switch (biz.type) {
     case 'farm':
       return product === 'milk' || product === 'wheat'
@@ -493,6 +519,13 @@ function capacityFor(biz: BizRec, product: ProductId): number {
         ? MARKET_LEVELS[biz.level].stockCapacity
         : 0;
   }
+}
+
+// V2.8: apply the modest Business-Level storage bonus on top of the base tier
+// (multiplier is 1.0 at bizLevel 1, so migrated businesses are unchanged).
+function capacityFor(biz: BizRec, product: ProductId): number {
+  const base = baseCapacityFor(biz, product);
+  return base <= 0 ? 0 : Math.round(base * storageMultForLevel(biz.bizLevel));
 }
 
 interface OfferRec {
@@ -729,6 +762,12 @@ export class World extends EventEmitter {
         inv: new Map(),
         tradeCount: 0,
         dirty: false,
+        bizXp: Number(r.biz_xp ?? 0),
+        bizLevel: r.biz_level ?? 1,
+        licenses: new Map(),
+        activeProducts: new Set(),
+        lastSlotChangeMs: r.last_slot_change ? new Date(r.last_slot_change).getTime() : null,
+        progressionLoaded: false,
       };
       this.businesses.set(biz.id, biz);
       // Catch up simulation for downtime (capped).
@@ -738,6 +777,18 @@ export class World extends EventEmitter {
     for (const r of invRows.rows) {
       const biz = this.businesses.get(r.business_id);
       if (biz) biz.inv.set(r.product, { qty: r.qty, reserved: r.reserved });
+    }
+    // V2.8: product licenses + active products, then backfill any legacy business
+    // with its starter licenses so nothing it currently sells disappears.
+    for (const r of (await query('SELECT * FROM business_licenses')).rows) {
+      this.businesses.get(r.business_id)?.licenses.set(r.product, r.capability);
+    }
+    for (const r of (await query('SELECT * FROM business_active_products')).rows) {
+      this.businesses.get(r.business_id)?.activeProducts.add(r.product);
+    }
+    for (const biz of this.businesses.values()) {
+      biz.bizLevel = bizLevelForXp(biz.bizXp); // keep level consistent with xp on load
+      await this.backfillProgression(biz);
     }
     const orders = await query("SELECT * FROM market_orders WHERE status = 'open'");
     for (const r of orders.rows) {
@@ -909,7 +960,7 @@ export class World extends EventEmitter {
         await c.query(
           `UPDATE businesses SET level=$1, price=$2, reputation=$3, revenue=$4, expenses=$5,
              milk_produced=$6, coffee_sold=$7, customers=$8, accums=$9, sim_ts=now(),
-             price2=$11, production=$12 WHERE id=$10`,
+             price2=$11, production=$12, biz_xp=$13, biz_level=$14 WHERE id=$10`,
           [
             b.level,
             b.price,
@@ -923,6 +974,8 @@ export class World extends EventEmitter {
             b.id,
             b.price2,
             b.production,
+            b.bizXp,
+            b.bizLevel,
           ]
         );
         for (const [product, rec] of b.inv) {
@@ -1453,6 +1506,7 @@ export class World extends EventEmitter {
           biz.milkProduced += add; // total units produced (milk or wheat)
           biz.prodAccum -= add;
           this.addXp(owner, add * XP.perMilkProduced, silent);
+          this.addBizXp(biz, add * BIZ_XP.perUnitProduced); // V2.8 committed production
           biz.dirty = true;
         }
         // Full storage must not bank production time.
@@ -1563,6 +1617,7 @@ export class World extends EventEmitter {
       owner.dirty = true;
       biz.revenue += gross;
       biz.coffeeSold += sold; // total units sold at retail
+      this.addBizXp(biz, sold * BIZ_XP.perRetailSale); // V2.8 legit NPC demand XP
       // V2.2: final-consumer sale -> market-share activity (units to NPCs).
       this.activityQueue.push({
         companyId: biz.companyId, businessId: biz.id,
@@ -1743,8 +1798,162 @@ export class World extends EventEmitter {
       inv: new Map(),
       tradeCount: 0,
       dirty: false,
+      bizXp: 0,
+      bizLevel: 1,
+      licenses: new Map(),
+      activeProducts: new Set(),
+      lastSlotChangeMs: null,
+      progressionLoaded: false,
     };
     for (const product of STARTING_PRODUCTS[type]) biz.inv.set(product, { qty: 0, reserved: 0 });
+    return biz;
+  }
+
+  // ============================================================
+  // V2.8 Phase 1 — Business progression: XP/level, licenses, product slots.
+  // ============================================================
+
+  /** Grant a business its starter licenses + active products exactly once. */
+  private async backfillProgression(biz: BizRec): Promise<void> {
+    if (biz.progressionLoaded) return;
+    biz.progressionLoaded = true;
+    if (biz.licenses.size > 0) return; // already has license rows
+    const starters = starterLicenses(biz.type);
+    for (const product of starters) {
+      const cap = productCapability(biz.type, product);
+      if (!cap) continue;
+      biz.licenses.set(product, cap);
+      biz.activeProducts.add(product);
+      await query(
+        `INSERT INTO business_licenses (business_id, product, capability) VALUES ($1,$2,$3) ON CONFLICT DO NOTHING`,
+        [biz.id, product, cap]
+      );
+      await query(`INSERT INTO business_active_products (business_id, product) VALUES ($1,$2) ON CONFLICT DO NOTHING`, [biz.id, product]);
+    }
+  }
+
+  /** Effective active-slot limit (never below the type's starter count). */
+  private slotLimit(biz: BizRec): number {
+    return activeSlotLimit(biz.type, biz.bizLevel);
+  }
+
+  /**
+   * Award Business XP from committed, hard-to-farm activity and derive the level.
+   * Emits `biz_level_up` when a threshold is crossed. Never awards XP for mere
+   * listings/transfers; player-to-player XP is gated against self-circular trades
+   * by the callers.
+   */
+  private addBizXp(biz: BizRec, amount: number): void {
+    if (amount <= 0 || biz.bizLevel >= MAX_BUSINESS_LEVEL) return;
+    biz.bizXp += amount;
+    biz.dirty = true;
+    const newLevel = bizLevelForXp(biz.bizXp);
+    if (newLevel > biz.bizLevel) {
+      biz.bizLevel = newLevel;
+      this.emit('biz_level_up', { bizId: biz.id, ownerId: biz.ownerId, level: newLevel });
+      this.emit('biz_pub', biz);
+      this.emit('push_state', { playerId: biz.ownerId });
+    }
+  }
+
+  private licenseLocks = new Set<string>();
+
+  /**
+   * Buy a product license for one business. Server-authoritative + exactly-once:
+   * the `business_licenses` primary key is the guard, so a duplicate / concurrent
+   * / replayed request finds the row already present (INSERT … ON CONFLICT
+   * RETURNING = 0 rows) and is rejected without a second charge or ledger row.
+   */
+  async buyLicense(playerId: number, bizId: number, product: ProductId): Promise<BizRec> {
+    const p = this.player(playerId);
+    const biz = this.requireOwnedBiz(playerId, bizId);
+    const def = licenseDef(product);
+    const cap = productCapability(biz.type, product);
+    if (!def || !cap || !productCompatible(biz.type, product)) throw new GameError('err.license_incompatible');
+    if (biz.licenses.has(product)) throw new GameError('err.license_owned');
+    if (biz.bizLevel < def.requiredLevel) throw new GameError('err.license_level', { level: def.requiredLevel });
+    if (def.prereqLicense && !biz.licenses.has(def.prereqLicense)) {
+      throw new GameError('err.license_prereq', { product: def.prereqLicense });
+    }
+    const fee = def.fee;
+    if (p.cash < fee) throw new GameError('err.not_enough_cash', { cost: fee });
+
+    const key = `${bizId}:${product}`;
+    if (this.licenseLocks.has(key)) throw new GameError('err.license_processing');
+    this.licenseLocks.add(key);
+    const before = p.cash;
+    try {
+      p.cash -= fee; p.dirty = true;
+      biz.licenses.set(product, cap);
+      await tx(async (c) => {
+        const ins = await c.query(
+          `INSERT INTO business_licenses (business_id, product, capability) VALUES ($1,$2,$3)
+           ON CONFLICT DO NOTHING RETURNING product`,
+          [bizId, product, cap]
+        );
+        if (!ins.rowCount) throw new GameError('err.license_owned'); // already licensed (race/replay)
+        await c.query('UPDATE players SET cash=$1 WHERE id=$2', [p.cash, p.id]);
+        if (fee > 0) {
+          await c.query(LEDGER_SQL, ledgerParams({
+            playerId, businessId: bizId, type: LEDGER_PRODUCT_LICENSE, amount: -fee,
+            refType: 'license', refId: bizId, before, after: p.cash,
+          }));
+        }
+      });
+      console.log(`[econ] LICENSE player=${playerId} biz=${bizId} ${product} fee=$${fee}`);
+      this.emit('biz_pub', biz);
+      this.emit('push_state', { playerId });
+      return biz;
+    } catch (err) {
+      p.cash = before; biz.licenses.delete(product); // roll back in-memory on failure
+      throw err;
+    } finally {
+      this.licenseLocks.delete(key);
+    }
+  }
+
+  /**
+   * Activate or deactivate a licensed product in one of the business's slots.
+   * Server-authoritative: requires the license, respects the level-scaled slot
+   * limit, and enforces a modest reconfiguration cooldown (admins bypass).
+   */
+  async setProductActive(playerId: number, bizId: number, product: ProductId, active: boolean): Promise<BizRec> {
+    const biz = this.requireOwnedBiz(playerId, bizId);
+    if (!biz.licenses.has(product)) throw new GameError('err.license_needed');
+    const now = Date.now();
+    const admin = this.isAdmin(playerId);
+    if (!admin && biz.lastSlotChangeMs && now - biz.lastSlotChangeMs < SLOT_SWITCH_COOLDOWN_SECS * 1000) {
+      throw new GameError('err.slot_cooldown', { secs: Math.ceil((SLOT_SWITCH_COOLDOWN_SECS * 1000 - (now - biz.lastSlotChangeMs)) / 1000) });
+    }
+    if (active) {
+      if (biz.activeProducts.has(product)) return biz;
+      if (biz.activeProducts.size >= this.slotLimit(biz)) throw new GameError('err.no_free_slot', { slots: this.slotLimit(biz) });
+      biz.activeProducts.add(product);
+      await query(`INSERT INTO business_active_products (business_id, product) VALUES ($1,$2) ON CONFLICT DO NOTHING`, [bizId, product]);
+    } else {
+      if (!biz.activeProducts.has(product)) return biz;
+      biz.activeProducts.delete(product);
+      await query(`DELETE FROM business_active_products WHERE business_id=$1 AND product=$2`, [bizId, product]);
+    }
+    biz.lastSlotChangeMs = now; biz.dirty = true;
+    await query(`UPDATE businesses SET last_slot_change=now() WHERE id=$1`, [bizId]);
+    this.emit('biz_pub', biz);
+    this.emit('push_state', { playerId });
+    return biz;
+  }
+
+  /** Admin: adjust a business's XP (audited by the caller). */
+  async adminSetBizXp(adminId: number, bizId: number, xp: number, mode: 'set' | 'add'): Promise<BizRec> {
+    this.requireAdmin(adminId);
+    const biz = this.businesses.get(bizId);
+    if (!biz) throw new GameError('err.unknown_business');
+    biz.bizXp = Math.max(0, mode === 'add' ? biz.bizXp + Math.floor(xp) : Math.floor(xp));
+    biz.bizLevel = bizLevelForXp(biz.bizXp);
+    biz.dirty = true;
+    await query('UPDATE businesses SET biz_xp=$1, biz_level=$2 WHERE id=$3', [biz.bizXp, biz.bizLevel, bizId]);
+    await this.logAdminAction(adminId, 'SET_BUSINESS_XP', 'business', String(bizId), { xp: biz.bizXp, level: biz.bizLevel, mode });
+    this.emit('biz_pub', biz);
+    this.emit('push_state', { playerId: biz.ownerId });
     return biz;
   }
 
@@ -1767,6 +1976,7 @@ export class World extends EventEmitter {
     const bizId = await tx((c) => this.insertBusinessRow(c, playerId, company.id, type, lot.id));
     const biz = this.buildBizRec(bizId, playerId, company.id, type, lot.id);
     this.businesses.set(biz.id, biz);
+    await this.backfillProgression(biz); // V2.8: grant starter licenses + active slots
     this.emit('biz_created', biz);
     this.emit('company', company);
     this.announceBusinessOpened(biz, company); // V2.7 Phase 4 city news
@@ -1820,6 +2030,7 @@ export class World extends EventEmitter {
       const biz = this.buildBizRec(bizId, playerId, company.id, type, lotId);
       this.businesses.set(biz.id, biz);
       console.log(`[econ] BUSINESS_OPENING player=${playerId} biz=${bizId} type=${type} lot=${lotId} cost=$${cost}`);
+      await this.backfillProgression(biz); // V2.8: grant starter licenses + active slots
       this.emit('biz_created', biz);
       this.emit('company', company);
       this.announceBusinessOpened(biz, company); // V2.7 Phase 4 city news
@@ -2612,6 +2823,7 @@ export class World extends EventEmitter {
       this.addCompanyRevenueXp(c.sellerId, amount);
       this.emit('delivery', delivery);
       this.emit('contract', c);
+      this.addBizXp(sellerBiz, c.quantity * BIZ_XP.perContractUnit); // V2.8 committed contract XP
       if (c.status === 'completed') this.contracts.delete(c.id);
       // V2.7 Phase 4: a large committed contract delivery is public city news.
       if (amount >= NEWS_MAJOR_DEAL_MIN) {
@@ -2874,10 +3086,41 @@ export class World extends EventEmitter {
       lotId: b.lotId,
       district: lotById(b.lotId)?.district ?? DEFAULT_DISTRICT,
       level: b.level,
+      bizLevel: b.bizLevel,
+      bizTier: businessTier(b.bizLevel),
       status: b.status,
       reputation: Math.round(b.reputation * 100) / 100,
       supplies: SELLER_SUPPLIES[b.type] ?? [],
       tradeCount: b.tradeCount,
+    };
+  }
+
+  /** Owner-private V2.8 progression: level/XP, slots, owned + available licenses. */
+  private toBizProgression(b: BizRec): import('@district/shared').BusinessProgression {
+    const atMax = b.bizLevel >= MAX_BUSINESS_LEVEL;
+    const curFloor = xpForBizLevel(b.bizLevel);
+    const span = atMax ? 0 : xpForBizLevel(b.bizLevel + 1) - curFloor;
+    const owned = [...b.licenses.entries()].map(([product, capability]) => ({
+      product, capability, active: b.activeProducts.has(product), recipe: licenseDef(product)?.recipe ?? null,
+    }));
+    const available = licensableProducts(b.type)
+      .filter((l) => !b.licenses.has(l.product))
+      .map((l) => {
+        const levelMet = b.bizLevel >= l.def.requiredLevel;
+        const prereqMet = !l.def.prereqLicense || b.licenses.has(l.def.prereqLicense);
+        return {
+          product: l.product, capability: l.capability, requiredLevel: l.def.requiredLevel,
+          prereqLicense: l.def.prereqLicense, fee: l.def.fee, recipe: l.def.recipe,
+          levelMet, prereqMet, met: levelMet && prereqMet,
+        };
+      });
+    const nextRewardLevel = atMax ? null : b.bizLevel + 1;
+    return {
+      bizLevel: b.bizLevel, bizXp: b.bizXp, tier: businessTier(b.bizLevel),
+      xpIntoLevel: Math.max(0, b.bizXp - curFloor), xpForNextLevel: span, atMax,
+      slotsUsed: b.activeProducts.size, slotLimit: this.slotLimit(b),
+      nextRewardKind: nextRewardLevel == null ? null : levelReward(nextRewardLevel).kind,
+      nextRewardLevel, owned, available,
     };
   }
 
@@ -4522,6 +4765,7 @@ export class World extends EventEmitter {
       coffeeSold: b.coffeeSold,
       customers: b.customers,
       reputation: Math.round(b.reputation * 100) / 100,
+      progression: this.toBizProgression(b),
     };
   }
 
@@ -4782,6 +5026,7 @@ export class World extends EventEmitter {
         }));
       });
       this.urgentOrders.delete(orderId);
+      this.addBizXp(biz, o.requiredQty * BIZ_XP.perUrgentUnit); // V2.8 committed urgent-order XP
       console.log(`[urgent] FULFILL #${orderId} player=${playerId} company=${company.id} ${o.requiredQty}x${o.product} reward=$${o.reward}`);
       this.emitUrgent(o);
       this.emit('push_state', { playerId });

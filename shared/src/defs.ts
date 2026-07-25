@@ -132,6 +132,17 @@ export const XP = {
   perNpcPurchase: 5,
 };
 
+// V2.8 — Business XP (per business, drives Business Level 1–50). Awarded only
+// from committed, demand-limited activity; player-to-player XP is gated against
+// self-circular trades by the caller. Deliberately small vs the nonlinear curve.
+export const BIZ_XP = {
+  perUnitProduced: 1,   // manufacturing output (bakery/coffee/farm)
+  perRetailSale: 2,     // NPC final sale (demand-limited)
+  perContractUnit: 2,   // fulfilled supply-contract delivery
+  perUrgentUnit: 2,     // urgent city-order contribution
+  perPlayerSaleUnit: 1, // player marketplace/offer sale (cross-owner only)
+};
+
 // ---- Reputation ----
 export const REP_MIN = 1.0;
 export const REP_MAX = 5.0;
