@@ -14,6 +14,23 @@ import { Actors } from './game/actors.js';
 import { Effects } from './game/effects.js';
 import { sfx } from './audio.js';
 import { t, applyDocumentLang, onLangChange } from './i18n.js';
+import { markTouchClass } from './touch.js';
+
+markTouchClass(); // tag <html class="touch"> before any UI renders
+
+// Track the VISIBLE viewport height (excludes the mobile soft keyboard / URL
+// bar) as a CSS var so full-screen panels and modal sheets shrink with the
+// keyboard and keep their composer/actions on-screen. Harmless on desktop.
+function syncViewportVar() {
+  const vv = window.visualViewport;
+  const h = vv ? vv.height : window.innerHeight;
+  document.documentElement.style.setProperty('--app-vh', `${Math.round(h)}px`);
+}
+syncViewportVar();
+window.visualViewport?.addEventListener('resize', syncViewportVar);
+window.visualViewport?.addEventListener('scroll', syncViewportVar);
+window.addEventListener('resize', syncViewportVar);
+window.addEventListener('orientationchange', syncViewportVar);
 
 const app = document.getElementById('app')!;
 const { renderer, scene, camera } = createScene(app);

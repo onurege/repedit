@@ -1,11 +1,17 @@
 import * as THREE from 'three';
 
+// Touch/coarse-pointer devices are usually weaker GPUs; cap render cost
+// conservatively there without touching desktop visual quality.
+const IS_TOUCH = typeof window !== 'undefined' &&
+  (('ontouchstart' in window) || (navigator.maxTouchPoints ?? 0) > 0);
+
 export function createScene(container: HTMLElement) {
-  const renderer = new THREE.WebGLRenderer({ antialias: true });
+  const renderer = new THREE.WebGLRenderer({ antialias: !IS_TOUCH });
   renderer.setSize(window.innerWidth, window.innerHeight);
-  renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+  // Cap DPR lower on touch (retina phones report 3) so fill-rate stays sane.
+  renderer.setPixelRatio(Math.min(window.devicePixelRatio, IS_TOUCH ? 1.5 : 2));
   renderer.shadowMap.enabled = true;
-  renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+  renderer.shadowMap.type = IS_TOUCH ? THREE.PCFShadowMap : THREE.PCFSoftShadowMap;
   renderer.outputColorSpace = THREE.SRGBColorSpace;
   container.appendChild(renderer.domElement);
 
@@ -28,7 +34,7 @@ export function createScene(container: HTMLElement) {
   const sun = new THREE.DirectionalLight(0xfff3d6, 1.6);
   sun.position.set(70, 110, 40);
   sun.castShadow = true;
-  sun.shadow.mapSize.set(2048, 2048);
+  sun.shadow.mapSize.set(IS_TOUCH ? 1024 : 2048, IS_TOUCH ? 1024 : 2048);
   sun.shadow.camera.left = -100;
   sun.shadow.camera.right = 100;
   sun.shadow.camera.top = 100;

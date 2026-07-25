@@ -470,6 +470,7 @@ button { font-family: inherit; }
 }
 #langbar button:hover { background: #eef2f7; color: #334155; }
 #langbar button.active { background: #2563eb; color: #fff; }
+#langbar .lflag { margin-right: 5px; }
 
 /* ---- V2.6: district selector & grouped business chips ---- */
 .district-bar {
@@ -636,3 +637,180 @@ button { font-family: inherit; }
 .offer-err.warn { color: #b45309; }
 .offer-actions { display: flex; gap: 10px; padding: 14px 28px 22px; border-top: 1px solid #eef2f7; }
 .offer-actions .btn { flex: 1; }
+
+/* ============================================================
+   V2.7 Mobile Web Compatibility Hotfix — responsive + touch.
+   Desktop layout is unchanged; these rules only add mobile/touch
+   behaviour (safe areas, full-screen sheets, larger touch targets).
+   ============================================================ */
+
+/* The permanent WASD/mouse hint is meaningless on touch. */
+html.touch .controls-hint { display: none; }
+
+/* Safe-area aware anchors (env insets are 0 on desktop, so no visual change). */
+.topbar { top: calc(12px + env(safe-area-inset-top)); }
+.company-bar { top: calc(70px + env(safe-area-inset-top)); }
+.nav { bottom: calc(16px + env(safe-area-inset-bottom)); }
+
+/* First-time mobile gesture hint (shown once on touch, then dismissed). */
+.mobile-hint {
+  position: fixed; inset: 0; z-index: 90; pointer-events: auto;
+  display: flex; align-items: flex-end; justify-content: center;
+  padding: 0 12px calc(96px + env(safe-area-inset-bottom));
+  background: rgba(15, 23, 42, 0.28);
+}
+.mobile-hint .mh-card {
+  background: rgba(255, 255, 255, 0.98); border-radius: 16px; padding: 18px 20px;
+  width: min(360px, 92vw); box-shadow: 0 16px 40px rgba(15, 23, 42, 0.3);
+}
+.mh-title { font-weight: 800; font-size: 17px; margin-bottom: 12px; color: #0f172a; }
+.mh-row { display: flex; align-items: center; gap: 12px; font-size: 14.5px; color: #334155; padding: 5px 0; }
+.mh-ic { font-size: 22px; width: 28px; text-align: center; }
+.mobile-hint .btn { margin-top: 14px; width: 100%; }
+
+/* ---------- Phone portrait / small screens ---------- */
+@media (max-width: 640px) {
+  /* Language switcher: flag-only, tucked into the TOP-LEFT corner so it never
+     covers the centred HUD stats or a panel's top-right close button. */
+  #langbar { top: calc(8px + env(safe-area-inset-top)); left: 8px; right: auto; padding: 3px; gap: 2px; }
+  #langbar button { padding: 7px 8px; min-height: 40px; }
+  #langbar .llabel { display: none; }
+  #langbar .lflag { margin-right: 0; }
+
+  /* Compact top HUD, shifted right of the language switcher; scrolls if needed. */
+  .topbar {
+    left: 62px; right: 8px; transform: none; justify-content: flex-start;
+    gap: 3px; padding: 6px 8px; border-radius: 12px;
+    max-width: none; width: auto; overflow-x: auto; -webkit-overflow-scrolling: touch;
+    scrollbar-width: none;
+  }
+  .topbar::-webkit-scrollbar { display: none; }
+  .stat { min-width: 0; padding: 0 3px; }
+  .stat .v { font-size: 13.5px; }
+  .stat .k { font-size: 8.5px; letter-spacing: 0.4px; }
+  .sep { height: 22px; }
+  .xpbar { width: 48px; }
+  .account-btn { padding: 4px; }
+  .account-btn .acc-name { max-width: 52px; font-size: 12px; }
+
+  .company-bar { top: calc(58px + env(safe-area-inset-top)); left: 62px; right: 8px; transform: none; justify-content: flex-start; padding: 5px 8px; gap: 6px; max-width: none; width: auto; }
+  .company-name { max-width: 120px; font-size: 12px; }
+  .company-meta { font-size: 11px; }
+
+  /* Persistent bottom navigation: horizontally scrollable, full-width, big
+     touch targets, and always ABOVE the panel so sections stay switchable. */
+  .nav {
+    left: 0; right: 0; bottom: 0; transform: none; max-width: 100%; border-radius: 0; z-index: 30;
+    justify-content: flex-start; flex-wrap: nowrap; overflow-x: auto; -webkit-overflow-scrolling: touch;
+    gap: 4px; padding: 6px 8px calc(6px + env(safe-area-inset-bottom)); scrollbar-width: none;
+  }
+  .nav::-webkit-scrollbar { display: none; }
+  .nav button { flex: 0 0 auto; padding: 10px 14px; min-height: 44px; font-size: 13px; white-space: nowrap; }
+
+  /* Side panels fill the width and the height ABOVE the nav, shrinking with the
+     soft keyboard (via --app-vh) so composers/actions stay on-screen. */
+  .panel {
+    top: env(safe-area-inset-top); left: 0; right: 0; bottom: auto;
+    width: 100%; max-width: 100%; border-radius: 0; z-index: 12;
+  }
+  .panel.visible { height: calc(var(--app-vh, 100dvh) - env(safe-area-inset-top) - 56px); }
+  /* A full-width panel would otherwise sit under the top-anchored banners /
+     language switcher; hide those while a panel is open on phones. */
+  .panel.visible ~ .urgent-banner,
+  .panel.visible ~ .announce-banner,
+  .panel.visible ~ .event-banner,
+  .panel.visible ~ .objectives { display: none !important; }
+  /* district-bar precedes .panel in the DOM, so target it via :has on #hud. */
+  body:has(.panel.visible) #langbar,
+  #hud:has(.panel.visible) .district-bar { display: none !important; }
+  .panel-head { padding: 12px 16px 8px; }
+  .panel-head h2 { font-size: 16px; max-width: 72vw; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .panel-head .close { width: 40px; height: 40px; font-size: 18px; }
+  .panel-tabs { overflow-x: auto; flex-wrap: nowrap; -webkit-overflow-scrolling: touch; scrollbar-width: none; }
+  .panel-tabs::-webkit-scrollbar { display: none; }
+  .panel-tabs button { flex: 0 0 auto; min-height: 40px; padding: 9px 12px; white-space: nowrap; }
+  .panel-body { padding: 12px 14px calc(16px + env(safe-area-inset-bottom)); }
+
+  /* Onboarding objectives: narrow, left-anchored, hidden when a panel is open. */
+  .objectives { left: 8px; right: auto; width: min(210px, 58vw); top: calc(96px + env(safe-area-inset-top)); font-size: 12px; max-height: 34vh; overflow-y: auto; }
+  .panel.visible ~ .objectives { display: none !important; }
+
+  /* Top notifications stack vertically below the HUD without overlapping. */
+  .announce-banner {
+    top: calc(96px + env(safe-area-inset-top)); left: auto; right: 8px; transform: none;
+    max-width: 60vw; font-size: 12px; padding: 6px 10px;
+  }
+  .announce-banner .ab-msg { max-width: 34vw; }
+  .urgent-banner {
+    top: calc(140px + env(safe-area-inset-top)); left: 50%; transform: translateX(-50%); font-size: 12px;
+    max-width: calc(100vw - 16px); flex-wrap: wrap; gap: 6px 8px; padding: 6px 10px;
+  }
+  .event-banner { top: calc(190px + env(safe-area-inset-top)); font-size: 12px; }
+
+  /* Toasts sit below the compact top HUD. */
+  #toasts { top: calc(92px + env(safe-area-inset-top)); width: calc(100vw - 24px); }
+  .toast { max-width: 100%; }
+
+  /* District selector: keep clear of the persistent bottom nav. */
+  .district-bar { bottom: calc(62px + env(safe-area-inset-bottom)); max-width: calc(100vw - 16px); overflow-x: auto; -webkit-overflow-scrolling: touch; scrollbar-width: none; }
+  .district-bar::-webkit-scrollbar { display: none; }
+
+  /* Mira tutorial sits above the nav, full-width, and clears an open panel. */
+  .mira { right: 8px; left: 8px; width: auto; bottom: calc(110px + env(safe-area-inset-bottom)); }
+  .panel.visible ~ .mira, .panel.visible ~ .mira-note { right: 8px; display: none; }
+
+  /* Modals rise as bottom sheets and fit the visible viewport. */
+  .overlay.modal { align-items: flex-end; }
+  .card {
+    width: 100%; max-width: 100vw; border-radius: 16px 16px 0 0;
+    padding: 20px 18px calc(20px + env(safe-area-inset-bottom));
+    max-height: var(--app-vh, 94dvh); overflow-y: auto;
+  }
+  .offer-modal { width: 100%; max-width: 100vw; max-height: var(--app-vh, 94dvh); border-radius: 16px 16px 0 0; padding: 0; overflow: hidden; }
+  .offer-sides { flex-direction: column; }
+  .offer-two { flex-direction: column; gap: 10px; }
+  .offer-scroll { padding: 4px 18px 8px; }
+  .offer-actions { padding: 12px 18px calc(16px + env(safe-area-inset-bottom)); }
+
+  /* Chat / DM: history flexes to fill; composer stays above the keyboard. */
+  .dm-log { max-height: none; flex: 1 1 auto; }
+  .chat-log { max-height: none; flex: 1 1 auto; }
+  .chat-panel, .dm-panel { display: flex; flex-direction: column; height: 100%; }
+
+  /* Larger, thumb-friendly touch targets on common controls. */
+  .btn.small { padding: 9px 14px; min-height: 40px; }
+  .qs-btn { width: 46px; min-height: 44px; }
+  .qtyrow input, .order input, .mkt-form input, .mkt-form select, .field input { min-height: 40px; }
+  .chat-composer input, #dm-input { min-height: 42px; }
+  .chat-composer .btn, .prod-chip, .expiry-chip, .side-card { min-height: 42px; }
+  .biz-chip { width: 40px; height: 40px; }
+
+  /* Market form: stack controls so nothing runs off-screen. */
+  .mkt-form select, .mkt-form input { flex: 1 1 auto; min-width: 0; }
+  .order input { width: 68px; }
+
+  /* Morning brief / cards read top-to-bottom on a phone. */
+  .brief-scroll { max-height: none; }
+}
+
+/* Small tablets / large phones landscape: keep a docked panel but narrower. */
+@media (min-width: 641px) and (max-width: 900px) {
+  .panel { width: 360px; }
+  .nav button { padding: 9px 14px; min-height: 44px; }
+}
+
+/* ---------- Tablet portrait & narrow windows (phone rules already cover ≤640) ---------- */
+@media (min-width: 641px) and (max-width: 1024px) {
+  /* A docked panel is large relative to the screen here, so the centred top
+     banners / district selector would overlap it — hide them while it's open. */
+  #hud:has(.panel.visible) .urgent-banner,
+  #hud:has(.panel.visible) .announce-banner,
+  #hud:has(.panel.visible) .event-banner,
+  #hud:has(.panel.visible) .objectives,
+  #hud:has(.panel.visible) .district-bar { display: none !important; }
+
+  /* Keep the notification banners compact and single-purpose (no odd wrapping). */
+  .urgent-banner { max-width: 70vw; }
+  .announce-banner { max-width: 70vw; }
+  .announce-banner .ab-msg { max-width: 40vw; }
+}
