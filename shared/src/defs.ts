@@ -3,9 +3,14 @@
 // Extend by adding entries — no engine changes needed.
 // ============================================================
 
-// `latte` is the V2.8 Phase-1 foundation product (licensable + recipe-previewable;
-// its manual production lands in Phase 2). All other ids are pre-existing.
-export type ProductId = 'milk' | 'beans' | 'coffee' | 'wheat' | 'bread' | 'latte';
+// V2.8 Phase 3 — 14-product catalog: raw materials, bakery goods, coffee drinks.
+// `latte` was the Phase-1 foundation product. Everything else new here (eggs,
+// strawberry, croissant, cookie, cake, strawberry_cake, cappuccino,
+// strawberry_latte) is additive; existing ids/values are preserved.
+export type ProductId =
+  | 'milk' | 'beans' | 'wheat' | 'eggs' | 'strawberry'          // raw materials
+  | 'bread' | 'croissant' | 'cookie' | 'cake' | 'strawberry_cake' // bakery goods
+  | 'coffee' | 'latte' | 'cappuccino' | 'strawberry_latte';       // coffee drinks
 
 export interface ProductDef {
   id: ProductId;
@@ -15,26 +20,45 @@ export interface ProductDef {
 }
 
 export const PRODUCTS: Record<ProductId, ProductDef> = {
+  // Raw materials
   milk: { id: 'milk', name: 'Milk', basePrice: 12, emoji: '🥛' },
   beans: { id: 'beans', name: 'Coffee Beans', basePrice: 8, emoji: '🫘' },
-  coffee: { id: 'coffee', name: 'Coffee', basePrice: 30, emoji: '☕' },
   wheat: { id: 'wheat', name: 'Wheat', basePrice: 8, emoji: '🌾' },
+  eggs: { id: 'eggs', name: 'Eggs', basePrice: 14, emoji: '🥚' },
+  strawberry: { id: 'strawberry', name: 'Strawberry', basePrice: 20, emoji: '🍓' },
+  // Bakery finished goods
   bread: { id: 'bread', name: 'Bread', basePrice: 20, emoji: '🍞' },
+  croissant: { id: 'croissant', name: 'Croissant', basePrice: 26, emoji: '🥐' },
+  cookie: { id: 'cookie', name: 'Cookie', basePrice: 18, emoji: '🍪' },
+  cake: { id: 'cake', name: 'Cake', basePrice: 70, emoji: '🍰' },
+  strawberry_cake: { id: 'strawberry_cake', name: 'Strawberry Cake', basePrice: 110, emoji: '🎂' },
+  // Coffee shop finished goods
+  coffee: { id: 'coffee', name: 'Coffee', basePrice: 30, emoji: '☕' },
   latte: { id: 'latte', name: 'Latte', basePrice: 42, emoji: '🥤' },
+  cappuccino: { id: 'cappuccino', name: 'Cappuccino', basePrice: 50, emoji: '☕' },
+  strawberry_latte: { id: 'strawberry_latte', name: 'Strawberry Latte', basePrice: 66, emoji: '🥤' },
 };
 
-// Reference retail prices used for demand/fairness of retail sales.
+// Reference NPC retail prices — chosen against healthy player input cost so no
+// finished product dominates (see DECISIONS.md V2.8 Phase 3 balancing). Volume
+// (demandWeight) and event sensitivity carry the archetype differences.
 export const RETAIL_BASE: Partial<Record<ProductId, number>> = {
-  coffee: 30,
-  bread: 20,
   milk: 18,
-  latte: 46, // V2.8 Phase 2: NPC retail reference for the license-gated latte
+  bread: 20,
+  croissant: 30,
+  cookie: 20,
+  cake: 110,
+  strawberry_cake: 180,
+  coffee: 30,
+  latte: 46,
+  cappuccino: 58,
+  strawberry_latte: 98,
 };
 
 export type BusinessType = 'farm' | 'coffee_shop' | 'bakery' | 'mini_market';
 
 // What the farm can produce (owner-selectable).
-export type FarmProduct = 'milk' | 'wheat';
+export type FarmProduct = 'milk' | 'wheat' | 'eggs' | 'strawberry';
 
 export interface FarmLevelDef {
   milkPerSec: number;
@@ -91,11 +115,16 @@ export const COFFEE_RECIPE: { product: ProductId; qty: number }[] = [
 
 // ---- Economy constants ----
 export const STARTING_CASH = 10000;
+// V2.8 Phase 3: Central Wholesale is a RAW-MATERIAL safety net ONLY — it never
+// sells processed/finished goods (those belong to the player economy). Core raw
+// (wheat/milk/beans) stays reasonably available; advanced raw (eggs/strawberry)
+// is priced to strongly favor player sourcing while preventing a hard deadlock.
 export const NPC_WHOLESALE_PRICES: Partial<Record<ProductId, number>> = {
   milk: 15,
   beans: 8,
-  wheat: 10, // player farms can profitably undercut (~$6-9)
-  bread: 16, // player bakeries can profitably undercut (~$12-15)
+  wheat: 10,          // player farms can profitably undercut (~$6-9)
+  eggs: 26,           // strong player dependency (healthy player price ~$14-18)
+  strawberry: 40,     // strong player dependency (healthy player price ~$20-26)
 };
 export const DEFAULT_COFFEE_PRICE = 30;
 export const DEFAULT_BREAD_PRICE = 20;
@@ -152,9 +181,17 @@ export const BIZ_XP = {
 // at level 1, and a level-50 business is up to 2x faster (see productionSpeedMult).
 export interface ProductionTiming { batchSize: number; batchSecs: number; }
 export const PRODUCTION_TIMING: Partial<Record<ProductId, ProductionTiming>> = {
-  bread: { batchSize: 25, batchSecs: 20 },   // 25 bread / 20s  -> 100 = 80s @ L1
-  coffee: { batchSize: 20, batchSecs: 25 },  // 20 coffee / 25s -> 100 = 125s @ L1
-  latte: { batchSize: 12, batchSecs: 30 },   // 12 latte / 30s  -> 96  = 240s @ L1
+  // Bakery — volume goods are fast/cheap; premium goods are slow/scarce.
+  bread: { batchSize: 25, batchSecs: 20 },            // 100 = 80s @ L1
+  croissant: { batchSize: 20, batchSecs: 25 },        // 100 = 125s
+  cookie: { batchSize: 30, batchSecs: 22 },           // 120 = 88s
+  cake: { batchSize: 8, batchSecs: 40 },              // 40  = 200s
+  strawberry_cake: { batchSize: 5, batchSecs: 50 },   // 25  = 250s
+  // Coffee shop.
+  coffee: { batchSize: 20, batchSecs: 25 },           // 100 = 125s
+  latte: { batchSize: 12, batchSecs: 30 },            // 96  = 240s
+  cappuccino: { batchSize: 12, batchSecs: 32 },       // 96  = 256s
+  strawberry_latte: { batchSize: 8, batchSecs: 40 },  // 40  = 200s
 };
 
 // ---- Reputation ----
@@ -183,16 +220,20 @@ export const MARKET_MAX_QTY = 10000;
 // A business can SUPPLY these tradable products (things it produces),
 // and can CONSUME these as recurring inputs. A contract for `product`
 // is valid iff the seller supplies it and the buyer consumes it.
+// V2.8 Phase 3 — what each business can SUPPLY to others (marketplace/contracts).
+// Farms supply raw; processors supply their finished goods to Mini Markets.
 export const SELLER_SUPPLIES: Record<BusinessType, ProductId[]> = {
-  farm: ['milk', 'wheat'],
-  bakery: ['bread'],
-  coffee_shop: [],
+  farm: ['milk', 'wheat', 'eggs', 'strawberry'],
+  bakery: ['bread', 'croissant', 'cookie', 'cake', 'strawberry_cake'],
+  coffee_shop: ['coffee', 'latte', 'cappuccino', 'strawberry_latte'],
   mini_market: [],
 };
+// What each business recurrently CONSUMES (recipe inputs for producers; retail
+// assortment for the Mini Market, which buys finished goods to resell to NPCs).
 export const BUYER_CONSUMES: Record<BusinessType, ProductId[]> = {
-  coffee_shop: ['milk'],
-  bakery: ['wheat'],
-  mini_market: ['bread', 'milk'],
+  coffee_shop: ['milk', 'beans', 'strawberry'],
+  bakery: ['wheat', 'milk', 'eggs', 'strawberry'],
+  mini_market: ['milk', 'bread', 'coffee', 'croissant', 'latte', 'cookie', 'cappuccino', 'cake', 'strawberry_cake', 'strawberry_latte'],
   farm: [],
 };
 
@@ -226,9 +267,9 @@ export function isImportDependent(product: ProductId): boolean {
 // Single source of truth for supply-chain reasoning and low-stock alerts.
 export const BUSINESS_INPUTS: Record<BusinessType, ProductId[]> = {
   farm: [],
-  coffee_shop: ['milk', 'beans'],
-  bakery: ['wheat'],
-  mini_market: ['bread', 'milk'],
+  coffee_shop: ['milk', 'beans', 'strawberry'],
+  bakery: ['wheat', 'milk', 'eggs', 'strawberry'],
+  mini_market: ['bread', 'milk'], // retailer: primary stock; full assortment via BUYER_CONSUMES
 };
 
 /** True if a product can be obtained at all: a player producer or the NPC. */
@@ -408,7 +449,11 @@ export const RANKING_CATEGORIES: RankingCategory[] = [
 // City demand is server-authoritative shared state, one multiplier per final
 // consumer product. It is DERIVED from currently-active events every tick
 // (never accumulated), so restarts and double ticks can't corrupt it.
-export const DEMAND_PRODUCTS: ProductId[] = ['bread', 'coffee', 'milk'];
+// Every NPC-retailed finished good (plus milk) carries a city-demand multiplier.
+export const DEMAND_PRODUCTS: ProductId[] = [
+  'milk', 'bread', 'croissant', 'cookie', 'cake', 'strawberry_cake',
+  'coffee', 'latte', 'cappuccino', 'strawberry_latte',
+];
 
 // Effective demand is clamped to a safe band. Normal events stay well inside
 // 0.70–1.50; the hard clamp only guards against pathological stacking.
@@ -432,7 +477,9 @@ export type CityEventType =
   | 'university_week'
   | 'heat_wave'
   | 'supply_disruption'
-  | 'local_market_day';
+  | 'local_market_day'
+  | 'morning_rush'
+  | 'family_weekend';
 
 export type CityEventStatus = 'upcoming' | 'active' | 'ended';
 
@@ -453,30 +500,42 @@ export interface CityEventDef {
 
 // Deliberately small, understandable set. Effects are additive percentage
 // deltas applied while the event is ACTIVE.
+// V2.8 Phase 3: product-specific demand so players can prepare for the catalog.
+// Additive % deltas while ACTIVE; announce lead time gives preparation runway.
 export const CITY_EVENTS: Record<CityEventType, CityEventDef> = {
   city_festival: {
     type: 'city_festival', major: true,
-    effects: { demand: { bread: 0.40, coffee: 0.50, milk: 0.15 } },
+    effects: { demand: { cake: 0.70, strawberry_cake: 1.00, cookie: 0.35, coffee: 0.20 } },
     announceSecs: 120, durationSecs: 240, weight: 2,
   },
   university_week: {
     type: 'university_week', major: true,
-    effects: { demand: { coffee: 0.35, bread: 0.10, milk: 0.05 } },
+    effects: { demand: { coffee: 0.50, latte: 0.50, cookie: 0.30, croissant: 0.20 } },
     announceSecs: 120, durationSecs: 240, weight: 2,
   },
-  heat_wave: {
+  heat_wave: { // "Summer Heat"
     type: 'heat_wave', major: true,
-    effects: { demand: { milk: 0.25, coffee: -0.10 } },
+    effects: { demand: { strawberry_latte: 0.60, milk: 0.20, coffee: -0.10 } },
     announceSecs: 90, durationSecs: 200, weight: 2,
   },
   supply_disruption: {
     type: 'supply_disruption', major: true,
-    effects: { wholesale: { wheat: 0.30, milk: 0.20 } },
+    effects: { wholesale: { wheat: 0.30, milk: 0.20, eggs: 0.25 } },
+    announceSecs: 120, durationSecs: 240, weight: 2,
+  },
+  morning_rush: {
+    type: 'morning_rush', major: false,
+    effects: { demand: { coffee: 0.60, latte: 0.40, cappuccino: 0.35, croissant: 0.25 } },
+    announceSecs: 60, durationSecs: 150, weight: 4,
+  },
+  family_weekend: {
+    type: 'family_weekend', major: true,
+    effects: { demand: { cake: 0.60, strawberry_cake: 0.80, milk: 0.20, cookie: 0.25 } },
     announceSecs: 120, durationSecs: 240, weight: 2,
   },
   local_market_day: {
     type: 'local_market_day', major: false,
-    effects: { demand: { bread: 0.20, milk: 0.20 } },
+    effects: { demand: { bread: 0.20, milk: 0.20, croissant: 0.15 } },
     announceSecs: 45, durationSecs: 90, weight: 5,
   },
 };
@@ -492,12 +551,15 @@ export const EVENT_TYPE_COOLDOWN_SECS = 600;
 // ============================================================
 // V2.5 — Central Wholesale daily supply & market integrity
 // ============================================================
-// The Central Wholesale is a finite daily institution, not an infinite shop.
-export const WHOLESALE_PRODUCTS: ProductId[] = ['wheat', 'milk', 'beans'];
+// The Central Wholesale is a finite daily institution, not an infinite shop, and
+// (V2.8 Phase 3) a RAW-material safety net only — never processed/finished goods.
+// Advanced raw (eggs/strawberry) has thin daily stock so player farms are the
+// real source; it only prevents a hard deadlock at a premium.
+export const WHOLESALE_PRODUCTS: ProductId[] = ['wheat', 'milk', 'beans', 'eggs', 'strawberry'];
 // Modest daily supply so a few aggressive buyers create real scarcity (which
 // pushes players toward the marketplace) rather than an infinite shop.
 export const WHOLESALE_DAILY_STOCK: Partial<Record<ProductId, number>> = {
-  wheat: 800, milk: 700, beans: 900,
+  wheat: 800, milk: 700, beans: 900, eggs: 250, strawberry: 150,
 };
 // A "wholesale day" in real seconds. Long for live play; tests use dev resets.
 export const WHOLESALE_DAY_SECONDS = 24 * 3600;

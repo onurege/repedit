@@ -5,7 +5,7 @@ import {
   MAX_BUSINESS_LEVEL, businessTier, slotsForLevel, activeSlotLimit, storageMultForLevel,
   xpToNextBizLevel, xpForBizLevel, bizLevelForXp, levelReward,
   PRODUCT_LICENSES, licenseDef, recipeFor, licensableProducts, starterLicenses,
-  productCapability, productCompatible,
+  productCapability, productCompatible, ruleFor,
 } from '@district/shared';
 
 describe('business levels 1–50', () => {
@@ -89,19 +89,20 @@ describe('product licenses & recipes', () => {
   });
 
   it('single-input, multi-input and null (raw) recipes exist', () => {
-    expect(recipeFor('bread')).toEqual({ output: 'bread', outputQty: 1, inputs: [{ product: 'wheat', qty: 1 }] });
+    expect(recipeFor('bread')).toEqual({ output: 'bread', outputQty: 1, inputs: [{ product: 'wheat', qty: 2 }] });
     expect(recipeFor('coffee')!.inputs).toHaveLength(2);
     expect(recipeFor('milk')).toBeNull(); // raw farm good
   });
 
   it('latte is the license-gated foundation product (level + prereq + fee + multi-input)', () => {
     const l = licenseDef('latte')!;
-    expect(l.requiredLevel).toBe(5);
-    expect(l.prereqLicense).toBe('coffee');
-    expect(l.fee).toBeGreaterThan(0);
+    const rule = ruleFor('coffee_shop', 'latte')!;
+    expect(rule.requiredLevel).toBe(5);
+    expect(rule.prereqLicense).toBe('coffee');
+    expect(rule.fee).toBeGreaterThan(0);
     expect(l.recipe!.inputs).toHaveLength(2);
-    expect(l.businesses.coffee_shop).toBe('produce');
-    expect(l.starter).toEqual([]); // not free
+    expect(rule.capability).toBe('produce');
+    expect(rule.starter).toBe(false); // not free
     expect(licensableProducts('coffee_shop').map((x) => x.product)).toContain('latte');
   });
 

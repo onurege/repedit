@@ -8,7 +8,10 @@ import { describe, it, expect, beforeEach, afterAll } from 'vitest';
 import { resetDb, newPlayer, loadedWorld } from './helpers.js';
 import { closeDb } from '../src/db.js';
 import { GameError, type World, type BizRec } from '../src/game/world.js';
-import { SHOP_LEVELS, FARM_LEVELS } from '@district/shared';
+import { SHOP_LEVELS, FARM_LEVELS, storageMultForLevel } from '@district/shared';
+
+// V2.8 Phase 3: real capacity = base facility store x business-level storage bonus.
+const realFarmCap = (biz: any) => Math.round(FARM_LEVELS[biz.level].milkCapacity * storageMultForLevel(biz.bizLevel));
 
 let world: World;
 
@@ -204,19 +207,18 @@ describe('storage capacity invariant', () => {
   it('production cannot overflow storage', async () => {
     const { biz } = await farm('prod', 'milk');
     biz.inv.get('milk')!.qty = 0;
-    const cap = FARM_LEVELS[biz.level].milkCapacity;
-    // Many hours of production must never push stock past capacity.
+    // Many hours of production must never push stock past the current capacity
+    // (which grows as production XP raises the business level — evaluate at the end).
     for (let i = 0; i < 50; i++) world.simulate(biz, 3600, true);
-    expect(biz.inv.get('milk')!.qty).toBeLessThanOrEqual(cap);
+    expect(biz.inv.get('milk')!.qty).toBeLessThanOrEqual(realFarmCap(biz));
   });
 
   it('offline progression cannot overflow storage', async () => {
     const { biz } = await farm('offline', 'milk');
     biz.inv.get('milk')!.qty = 0;
-    const cap = FARM_LEVELS[biz.level].milkCapacity;
     // A single 8-hour offline catch-up step must still cap at storage.
     world.simulate(biz, 8 * 3600, true);
-    expect(biz.inv.get('milk')!.qty).toBeLessThanOrEqual(cap);
+    expect(biz.inv.get('milk')!.qty).toBeLessThanOrEqual(realFarmCap(biz));
   });
 
   it('legacy overflow: cannot receive more goods, but can decrease via sales/consumption', async () => {

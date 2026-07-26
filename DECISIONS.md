@@ -721,3 +721,96 @@ never fabricates output) — all requireAdmin + audited.
 
 Not in Phase 2 (STOP): large catalog, new business types, cancellation/refunds,
 parallel lines, auto-buy/auto-refill automation, Phase 3.
+
+## V2.8 Phase 3 — Product Catalog, Supply Chains, Demand & Profitability
+
+Goal: make the city NEED other players. A 14-product catalog turns the four
+businesses into an interdependent supply chain — farmers produce raw materials,
+bakeries/coffee shops transform them, mini markets aggregate and retail — with
+demand, events and real cost-basis profitability driving decisions.
+
+**Catalog (14).** Raw: milk, beans, wheat, **eggs, strawberry**. Bakery: bread,
+**croissant, cookie, cake, strawberry_cake**. Coffee: coffee, latte,
+**cappuccino, strawberry_latte**. One canonical `PRODUCT_LICENSES` (shared/
+economy.ts) now carries a **per-business-type rule** (capability + level + prereq
++ fee + starter), because the same product is licensable by several types with
+different terms (a bakery PRODUCES cake at L18 with a prereq; a mini market
+RETAILS it at L18 with none). A catalog-integrity unit test fails fast on any
+invalid id/recipe/prereq reference.
+
+**Recipes (canonical, Phase-2 engine).** bread 2 wheat→1 (changed from 1→1);
+croissant 2 wheat+1 milk→2; cookie 2 wheat+1 egg→3; cake 3 wheat+2 milk+2 eggs→1;
+strawberry_cake +2 strawberry→1; coffee unchanged (1 milk+1 beans→1); latte
+2 beans+1 milk→1; cappuccino 2 beans+2 milk→1; strawberry_latte 2 beans+1 milk+2
+strawberry→1. All go through the single Phase-2 production/queue/storage engine.
+
+**Farm role.** Keeps its automatic single-stream raw production, but now
+auto-produces the raw it has LICENSED + ACTIVATED (milk/wheat starters; eggs L5;
+strawberry L12). Specialization = which raw to license/activate/produce. Storage
+generalized from the shared catalog role (finished→finished store, inputs→
+ingredient store, mini-market assortment→shelf), so adding a product needs no
+capacity edit.
+
+**Generalized NPC retail.** simulate() now runs one customer stream per ACTIVE
+retail product per business, weighted by a per-product `RETAIL_DEMAND_WEIGHT`
+(volume archetype). Legacy player-set prices stay for coffee/bread/milk; new
+products use their `RETAIL_BASE`. Active slots therefore genuinely matter — a
+business chooses its assortment (§37).
+
+**Central Wholesale = raw-only safety net (§14).** Never sells finished goods
+(removed bread). Adds eggs/strawberry at a premium far above healthy player price
+with thin daily stock, so player sourcing is strongly preferred but a city with
+no farmer still can't hard-lock (an audit proves every recipe input has a
+wholesale/emergency path; emergency = ×2.5).
+
+**Cost basis (weighted average).** New `inventories.cost_basis` (migration 018).
+Every acquisition path (NPC/marketplace/contract/offer) threads the REAL unit
+price through the delivery; unloading blends it into the product's WAC. Farm raw
+is $0 (produced from land). Production captures committed ingredient cost at
+start (`production_jobs.input_cost`) and the finished output inherits it at
+completion. Unknown cost (never a tracked purchase) stays 0 and surfaces as
+"cost unavailable" — the Central price is NEVER substituted as a fake cost (§24).
+The Production Planner shows ESTIMATED cost/revenue/gross-margin; the inventory/
+assortment view shows avg cost, est retail and margin/unit.
+
+**Balancing (healthy player input prices: wheat 7, milk 13, beans 8, eggs 16,
+strawberry 24). margin = NPC − input cost; wMargin = margin × demand weight
+(demand-capped throughput proxy):**
+
+| product          | cost | NPC | margin | weight | wMargin | $/min@L1 |
+|------------------|-----:|----:|-------:|-------:|--------:|---------:|
+| bread            | 14.0 |  20 |    6.0 |  1.40  |    8.4  |    450   |
+| croissant        | 13.5 |  30 |   16.5 |  0.60  |    9.9  |    792   |
+| cookie           | 10.0 |  20 |   10.0 |  0.70  |    7.0  |    818   |
+| cake             | 79.0 | 110 |   31.0 |  0.18  |    5.6  |    372   |
+| strawberry_cake  |127.0 | 180 |   53.0 |  0.10  |    5.3  |    318   |
+| coffee           | 21.0 |  30 |    9.0 |  1.00  |    9.0  |    432   |
+| latte            | 29.0 |  46 |   17.0 |  0.60  |   10.2  |    408   |
+| cappuccino       | 42.0 |  58 |   16.0 |  0.45  |    7.2  |    360   |
+| strawberry_latte | 77.0 |  98 |   21.0 |  0.30  |    6.3  |    252   |
+
+Dominant-strategy review (§45): wMargin spread 5.3–10.2 (ratio 1.9×, < 2.5) — no
+product dominates. Staples (bread/coffee) move volume at thin margin; premiums
+(cake/strawberry_*) move little volume at fat margin/unit and are the biggest
+event beneficiaries (City Festival cake +70%, strawberry_cake +100%). Bread stays
+a legitimate high-volume strategy (asserted by economy-sim). Values are starting
+points for live tuning; a deterministic `economy-sim.test.ts` guards the goals.
+
+**Events (§25).** 7 types; effects retargeted to the catalog + two new events
+(morning_rush, family_weekend). Existing upcoming-event UI already surfaces
+affected products via effect deltas, giving preparation runway (announce lead
+time preserved).
+
+**Integration.** Whole catalog is TRADABLE (marketplace) and wired into
+SELLER_SUPPLIES/BUYER_CONSUMES (contracts + direct offers) so farm→processor and
+processor→mini-market chains work. Market share / rankings / city news / urgent
+orders operate on the expanded set unchanged (share still only from committed
+final_sale).
+
+**Supply-chain deadlock (§46).** With no egg/strawberry farmer the city falls
+back to the (expensive) wholesale, never a hard lock. With farmers, player price
+undercuts wholesale by design so player sourcing wins.
+
+Not in Phase 3 (STOP): new business types, Cocoa/Mocha, 30+ products, seasons,
+achievements, parallel lines, cancellation/refunds, auto-buy/auto-supplier,
+infinite auto-production, removing Central Wholesale, Phase 4.

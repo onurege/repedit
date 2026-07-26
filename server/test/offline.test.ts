@@ -2,7 +2,10 @@ import { describe, it, expect, beforeEach, afterAll } from 'vitest';
 import { resetDb, newPlayer, loadedWorld } from './helpers.js';
 import { closeDb, query } from '../src/db.js';
 import type { World } from '../src/game/world.js';
-import { OFFLINE_CAP_SECONDS, FARM_LEVELS } from '@district/shared';
+import { OFFLINE_CAP_SECONDS, FARM_LEVELS, storageMultForLevel } from '@district/shared';
+
+// V2.8 Phase 3: farm fills the real capacity (base x business-level storage bonus).
+const realFarmCap = (biz: any) => Math.round(FARM_LEVELS[biz.level].milkCapacity * storageMultForLevel(biz.bizLevel));
 
 let world: World;
 
@@ -42,8 +45,8 @@ describe('offline progression & away report', () => {
     const world2 = await loadedWorld();
     const biz2 = world2.bizByOwner(pid)!;
     // ~1800s * 0.5/s = 900 wanted, clamped by L1 storage capacity (200)
-    expect(biz2.milkProduced).toBe(FARM_LEVELS[1].milkCapacity);
-    expect(biz2.inv.get('milk')!.qty).toBe(FARM_LEVELS[1].milkCapacity);
+    expect(biz2.milkProduced).toBe(realFarmCap(biz2));
+    expect(biz2.inv.get('milk')!.qty).toBe(realFarmCap(biz2));
     expect(biz2.status).toBe('storage_full');
   });
 

@@ -1,7 +1,11 @@
 import { describe, it, expect, beforeEach, afterAll } from 'vitest';
 import { resetDb, newPlayer, loadedWorld } from './helpers.js';
 import { closeDb } from '../src/db.js';
-import { FARM_LEVELS, SHOP_LEVELS, OFFLINE_CAP_SECONDS } from '@district/shared';
+import { FARM_LEVELS, SHOP_LEVELS, OFFLINE_CAP_SECONDS, storageMultForLevel } from '@district/shared';
+
+// V2.8 Phase 3: farm production fills the REAL capacity (base facility store x
+// the business-level storage bonus, which production XP raises over time).
+const farmCap = (biz: any) => Math.round(FARM_LEVELS[biz.level].milkCapacity * storageMultForLevel(biz.bizLevel));
 import type { World } from '../src/game/world.js';
 
 let world: World;
@@ -29,7 +33,10 @@ describe('farm production', () => {
     const pid = await newPlayer(world, 'farmer2');
     const biz = await world.chooseBusiness(pid, 'farm');
     world.simulate(biz, 100000, true);
-    expect(biz.inv.get('milk')!.qty).toBe(FARM_LEVELS[1].milkCapacity);
+    // Filled to capacity (production XP raises the level/cap as it fills, so the
+    // final fill lags the new cap by up to a step — never overflows it).
+    expect(biz.inv.get('milk')!.qty).toBeGreaterThanOrEqual(FARM_LEVELS[1].milkCapacity);
+    expect(biz.inv.get('milk')!.qty).toBeLessThanOrEqual(farmCap(biz));
     expect(biz.status).toBe('storage_full');
     // full storage must not bank production for later
     world.simulate(biz, 1, true);
@@ -102,6 +109,6 @@ describe('offline catch-up', () => {
     world.catchUp(biz, OFFLINE_CAP_SECONDS * 10); // absurd downtime
     // capped: at most cap * rate (and clamped by storage anyway)
     expect(biz.milkProduced).toBeLessThanOrEqual(OFFLINE_CAP_SECONDS * FARM_LEVELS[1].milkPerSec + 1);
-    expect(biz.inv.get('milk')!.qty).toBeLessThanOrEqual(FARM_LEVELS[1].milkCapacity);
+    expect(biz.inv.get("milk")!.qty).toBeLessThanOrEqual(farmCap(biz));
   });
 });

@@ -107,11 +107,12 @@ describe('opportunity (deterministic)', () => {
   it('recommends stocking up before an announced event that raises a sold product', async () => {
     const pid = await newPlayer(world, 'bakerA');
     await world.chooseBusiness(pid, 'bakery');
+    // V2.8 Phase 3: City Festival raises cake demand; the bakery sells cake.
     await world.createEvent('city_festival', { announceSecs: 60, durationSecs: 120 });
     await world.processEvents();
-    const opp = world.computeOpportunity(pid, new Set(['bread']), []);
+    const opp = world.computeOpportunity(pid, new Set(['cake']), []);
     expect(opp!.kind).toBe('event_stock_up');
-    expect(opp!.product).toBe('bread');
+    expect(opp!.product).toBe('cake');
   });
 
   it('recommends supplier action to a farm during a supply disruption', async () => {

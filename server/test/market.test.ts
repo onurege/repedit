@@ -45,7 +45,9 @@ describe('order creation', () => {
     await expect(world.createOrder(shopId, 'buy', 'milk', 0, 12)).rejects.toThrow(GameError);
     await expect(world.createOrder(shopId, 'buy', 'milk', -5, 12)).rejects.toThrow(GameError);
     await expect(world.createOrder(shopId, 'buy', 'milk', 10, 0)).rejects.toThrow(GameError);
-    await expect(world.createOrder(shopId, 'buy', 'coffee' as any, 10, 10)).rejects.toThrow(GameError);
+    // A coffee shop cannot STORE a bakery good, so it cannot buy one (V2.8 Phase 3
+    // made the whole catalog tradable, but storage compatibility still gates buys).
+    await expect(world.createOrder(shopId, 'buy', 'cake' as any, 10, 10)).rejects.toThrow(GameError);
   });
 
   it('cancelling refunds escrow exactly once', async () => {

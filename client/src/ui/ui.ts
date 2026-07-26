@@ -19,7 +19,7 @@ import {
   type RivalAlert, type CityNewsItem, type UrgentOrderPub,
   MARKET_MIN_PRICE, MARKET_MAX_PRICE, MARKET_MAX_QTY,
   MAX_BUSINESS_LEVEL, levelReward, businessTier, slotsForLevel,
-  productionDurationSecs,
+  productionDurationSecs, RETAIL_BASE,
   type BizPriv, type RecipePub, type OwnedLicensePub, type AvailableLicensePub, type SupplyEconomy,
 } from '@district/shared';
 import { IS_TOUCH } from '../touch.js';
@@ -36,7 +36,11 @@ type PanelKind = 'none' | 'business' | 'market' | 'wholesale' | 'dev' | 'info' |
 const EVENT_ICON: Record<string, string> = {
   city_festival: '🎉', university_week: '🎓', heat_wave: '☀️',
   supply_disruption: '⛔', local_market_day: '🧺',
+  morning_rush: '🌅', family_weekend: '👨‍👩‍👧',
 };
+
+// V2.8 Phase 3: raw products a farm may specialize in producing.
+const FARM_RAW: ProductId[] = ['milk', 'wheat', 'eggs', 'strawberry'];
 
 /** mm:ss (or h:mm:ss) countdown from a future epoch-ms timestamp. */
 function countdown(toMs: number): string {
@@ -1156,6 +1160,12 @@ export class UI {
           const pct = e.capacity > 0 ? Math.min(100, (used / e.capacity) * 100) : 0;
           const waiting = waitingByProduct.get(pid) ?? 0;
           const free = Math.max(0, e.capacity - used);
+          // V2.8 Phase 3 assortment economics: avg acquisition cost, est retail,
+          // margin/unit — the Mini Market's "assortment" view, useful everywhere.
+          const retail = RETAIL_BASE[pid as ProductId];
+          const econ = (e.costBasis > 0 || retail != null)
+            ? `<br/><span class="cap econ">${e.costBasis > 0 ? t('inv.avg_cost', { v: fmt(Math.round(e.costBasis)) }) : t('inv.cost_unknown')}${retail != null ? ` · ${t('inv.est_retail', { v: fmt(retail) })}${e.costBasis > 0 ? ` · <b class="${retail - e.costBasis >= 0 ? 'pos' : 'neg'}">${t('inv.margin', { v: fmt(Math.round(retail - e.costBasis)) })}</b>` : ''}` : ''}</span>`
+            : '';
           return `<div class="invrow${over ? ' over' : ''}">
             <span class="emoji">${p.emoji}</span>
             <span class="name">${pName(pid as ProductId)}
@@ -1166,6 +1176,7 @@ export class UI {
               <span class="cap">/ ${e.capacity}</span><br/>
               <span class="cap">${e.reserved ? `${t('inv.on_market', { qty: e.reserved })} · ` : ''}${e.incoming ? t('inv.incoming', { qty: e.incoming }) : ''}</span>
               ${waiting ? `<br/><span class="cap wait">⏳ ${t('inv.delivery_waiting', { qty: waiting, free })}</span>` : ''}
+              ${econ}
             </span>
           </div>`;
         })
@@ -1173,18 +1184,21 @@ export class UI {
         `<div class="hint">${t('inv.hint')}</div>`);
     } else if (tab === 'production' && isFarm) {
       const lv = FARM_LEVELS[biz.level];
-      const producing = biz.production === 'wheat' ? 'wheat' : 'milk';
+      const producing = biz.production as ProductId;
+      // V2.8 Phase 3: a farm auto-produces its selected raw among its ACTIVE
+      // licensed raw products (specialization). Activate more in the Products tab.
+      const active = biz.progression.owned.filter((o) => o.active && FARM_RAW.includes(o.product as any));
+      const buttons = active.map((o) =>
+        `<button class="btn small ${producing === o.product ? 'primary' : 'ghost'}" data-prod="${o.product}">${PRODUCTS[o.product].emoji} ${pName(o.product)}</button>`
+      ).join('');
       this.setBody(body, `
         <div class="bigstatus ${statusIsBad(biz.status) ? 'bad' : 'ok'}">${statusText(biz.status)}</div>
-        <div class="kv"><span class="k">${t('biz.producing')}</span><span class="v">${producing === 'wheat' ? `🌾 ${pName('wheat')}` : `🥛 ${pName('milk')}`}</span></div>
-        <div class="qtyrow">
-          <button class="btn small ${producing === 'milk' ? 'primary' : 'ghost'}" data-prod="milk">🥛 ${pName('milk')}</button>
-          <button class="btn small ${producing === 'wheat' ? 'primary' : 'ghost'}" data-prod="wheat">🌾 ${pName('wheat')}</button>
-        </div>
+        <div class="kv"><span class="k">${t('biz.producing')}</span><span class="v">${PRODUCTS[producing]?.emoji ?? ''} ${pName(producing)}</span></div>
+        <div class="qtyrow" style="flex-wrap:wrap">${buttons}</div>
         <div class="kv"><span class="k">${t('prod.rate')}</span><span class="v">${t('prod.rate.generic', { n: (lv.milkPerSec * 60).toFixed(0) })}</span></div>
         <div class="kv"><span class="k">${t('prod.capacity.per_product')}</span><span class="v">${lv.milkCapacity}</span></div>
         <div class="kv"><span class="k">${t('prod.units_lifetime')}</span><span class="v">${biz.milkProduced}</span></div>
-        <div class="hint">${t('prod.hint2')}</div>`, (b) => {
+        <div class="hint">${t('farm.role_hint')}</div>`, (b) => {
         b.querySelectorAll('[data-prod]').forEach((btn) =>
           btn.addEventListener('click', () => {
             client.send({ t: 'set_production', product: (btn as HTMLElement).dataset.prod as ProductId });
@@ -1367,6 +1381,7 @@ export class UI {
           <div class="orv-kv"><span>${t('prod.est_time')}</span><span>${this.fmtDuration(est)}</span></div>
           <div class="orv-kv"><span>${t('prod.queue_pos')}</span><span>${queueFull ? t('prod.queue_full', { n: line.queueLimit }) : `${line.jobCount + 1} / ${line.queueLimit}`}</span></div>
         </div>
+        ${this.profitabilityHtml(sel, qty)}
         ${missingList}
         <button class="btn success pp-start" id="pp-start" ${canProduce && !queueFull ? '' : 'disabled'}>${t('prod.start')}</button>
         <div class="hint">${t('prod.mfg_hint', { mult: line.speedMult })}</div>
@@ -1421,6 +1436,23 @@ export class UI {
           `<div class="pq-row"><span class="pq-i">${i + 1}</span><span>${PRODUCTS[j.product].emoji} ${j.outputQty} ${pName(j.product)}</span></div>`).join('')}`
       : '';
     return `<div class="pq">${nowHtml}${restHtml}<div class="pq-note">${t('prod.committed_note')}</div></div>`;
+  }
+
+  /** Estimated cost / revenue / gross margin for a planned batch (labelled ESTIMATED). */
+  private profitabilityHtml(sel: import('@district/shared').ProducibleProductPub, qty: number): string {
+    if (sel.unitInputCost < 0) {
+      return `<div class="pp-profit unknown">${t('prod.cost_unavailable')}</div>`;
+    }
+    const cost = Math.round(sel.unitInputCost * qty);
+    const revenue = Math.round(sel.retailPrice * qty);
+    const margin = revenue - cost;
+    return `<div class="pp-profit">
+      <div class="pp-profit-h">${t('prod.est_label')}</div>
+      <div class="orv-kv"><span>${t('prod.est_cost')}</span><span>${fmt(cost)}</span></div>
+      <div class="orv-kv"><span>${t('prod.est_revenue')}</span><span>${fmt(revenue)}</span></div>
+      <div class="orv-kv"><span>${t('prod.est_margin')}</span><span class="${margin >= 0 ? 'pos' : 'neg'}"><b>${fmt(margin)}</b></span></div>
+      <div class="pp-profit-note">${t('prod.est_note')}</div>
+    </div>`;
   }
 
   // ---- V2.8 Phase 1: Business Level & progression roadmap ----

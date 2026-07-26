@@ -17,31 +17,55 @@ export interface RecipeInput { product: ProductId; qty: number; }
 export interface Recipe { output: ProductId; outputQty: number; inputs: RecipeInput[]; }
 
 // ---------- Product license & capability catalog ----------
-// A LICENSE is a business's permanent right to sell a product. Capability
-// distinguishes MANUFACTURE (produce, has a recipe) from RETAIL (stock & sell
-// a finished good bought from others) — important for the Mini Market role.
+// A LICENSE is a business's permanent right to make/sell a product. Capability
+// distinguishes MANUFACTURE (produce, has a recipe) from RETAIL (stock & resell
+// a finished good bought from others) — the Mini Market role.
+//
+// V2.8 Phase 3: the SAME product may be licensable by several business types
+// with DIFFERENT requirements (e.g. a bakery PRODUCES cake at L18 with a
+// prerequisite, while a mini market RETAILS it at L18 with no prereq). So the
+// level/prereq/fee/starter/capability all live in a per-business-type RULE.
 export type ProductCapability = 'produce' | 'retail';
+
+export interface ProductBizRule {
+  capability: ProductCapability;
+  requiredLevel: number;             // min BUSINESS level to license it here
+  prereqLicense: ProductId | null;   // another product license required first
+  fee: number;                       // license purchase fee ($)
+  starter: boolean;                  // granted free at creation/migration
+}
 
 export interface ProductLicenseDef {
   product: ProductId;
-  businesses: Partial<Record<BusinessType, ProductCapability>>; // who may license + how
-  requiredLevel: number;              // min BUSINESS level to buy it
-  prereqLicense: ProductId | null;    // another product license required first
-  fee: number;                        // license purchase fee ($)
-  recipe: Recipe | null;              // production recipe (null = pure retail good)
-  starter: BusinessType[];            // types that receive it free (creation/migration)
+  recipe: Recipe | null;             // production recipe (null = raw/retail good)
+  rules: Partial<Record<BusinessType, ProductBizRule>>;
 }
 
-// Existing products keep exactly their current behaviour via starter licenses.
-// `latte` is the Phase-1 foundation product: licensable, activatable and
-// recipe-previewable now; its manual production lands in Phase 2.
+// Recipe shorthands (canonical; the Phase-2 engine scales/batches these).
+const R = (output: ProductId, outputQty: number, inputs: [ProductId, number][]): Recipe =>
+  ({ output, outputQty, inputs: inputs.map(([product, qty]) => ({ product, qty })) });
+const produce = (requiredLevel: number, fee: number, prereqLicense: ProductId | null = null, starter = false): ProductBizRule =>
+  ({ capability: 'produce', requiredLevel, prereqLicense, fee, starter });
+const retail = (requiredLevel: number, fee: number, starter = false): ProductBizRule =>
+  ({ capability: 'retail', requiredLevel, prereqLicense: null, fee, starter });
+
 export const PRODUCT_LICENSES: ProductLicenseDef[] = [
-  { product: 'milk', businesses: { farm: 'produce', mini_market: 'retail' }, requiredLevel: 1, prereqLicense: null, fee: 0, recipe: null, starter: ['farm', 'mini_market'] },
-  { product: 'wheat', businesses: { farm: 'produce' }, requiredLevel: 1, prereqLicense: null, fee: 0, recipe: null, starter: ['farm'] },
-  { product: 'bread', businesses: { bakery: 'produce', mini_market: 'retail' }, requiredLevel: 1, prereqLicense: null, fee: 0, recipe: { output: 'bread', outputQty: 1, inputs: [{ product: 'wheat', qty: 1 }] }, starter: ['bakery', 'mini_market'] },
-  { product: 'coffee', businesses: { coffee_shop: 'produce' }, requiredLevel: 1, prereqLicense: null, fee: 0, recipe: { output: 'coffee', outputQty: 1, inputs: [{ product: 'milk', qty: 1 }, { product: 'beans', qty: 1 }] }, starter: ['coffee_shop'] },
-  // Foundation product — license-gated, multi-input recipe, produced in Phase 2.
-  { product: 'latte', businesses: { coffee_shop: 'produce' }, requiredLevel: 5, prereqLicense: 'coffee', fee: 4000, recipe: { output: 'latte', outputQty: 1, inputs: [{ product: 'beans', qty: 2 }, { product: 'milk', qty: 1 }] }, starter: [] },
+  // ---- Raw materials (farm produces; mini market may retail milk) ----
+  { product: 'milk', recipe: null, rules: { farm: produce(1, 0, null, true), mini_market: retail(1, 0, true) } },
+  { product: 'wheat', recipe: null, rules: { farm: produce(1, 0, null, true) } },
+  { product: 'eggs', recipe: null, rules: { farm: produce(5, 2500) } },
+  { product: 'strawberry', recipe: null, rules: { farm: produce(12, 6000) } },
+  // ---- Bakery goods (bakery produces; mini market retails) ----
+  { product: 'bread', recipe: R('bread', 1, [['wheat', 2]]), rules: { bakery: produce(1, 0, null, true), mini_market: retail(1, 0, true) } },
+  { product: 'croissant', recipe: R('croissant', 2, [['wheat', 2], ['milk', 1]]), rules: { bakery: produce(5, 4000, 'bread'), mini_market: retail(5, 2000) } },
+  { product: 'cookie', recipe: R('cookie', 3, [['wheat', 2], ['eggs', 1]]), rules: { bakery: produce(10, 7500, 'bread'), mini_market: retail(10, 4000) } },
+  { product: 'cake', recipe: R('cake', 1, [['wheat', 3], ['milk', 2], ['eggs', 2]]), rules: { bakery: produce(18, 15000, 'croissant'), mini_market: retail(18, 8000) } },
+  { product: 'strawberry_cake', recipe: R('strawberry_cake', 1, [['wheat', 3], ['milk', 2], ['eggs', 2], ['strawberry', 2]]), rules: { bakery: produce(28, 30000, 'cake'), mini_market: retail(28, 15000) } },
+  // ---- Coffee shop drinks (coffee shop produces; mini market retails) ----
+  { product: 'coffee', recipe: R('coffee', 1, [['milk', 1], ['beans', 1]]), rules: { coffee_shop: produce(1, 0, null, true), mini_market: retail(5, 2000) } },
+  { product: 'latte', recipe: R('latte', 1, [['beans', 2], ['milk', 1]]), rules: { coffee_shop: produce(5, 4000, 'coffee'), mini_market: retail(10, 4000) } },
+  { product: 'cappuccino', recipe: R('cappuccino', 1, [['beans', 2], ['milk', 2]]), rules: { coffee_shop: produce(10, 7500, 'latte'), mini_market: retail(18, 8000) } },
+  { product: 'strawberry_latte', recipe: R('strawberry_latte', 1, [['beans', 2], ['milk', 1], ['strawberry', 2]]), rules: { coffee_shop: produce(28, 30000, 'latte'), mini_market: retail(28, 15000) } },
 ];
 
 const LICENSE_BY_PRODUCT = new Map<ProductId, ProductLicenseDef>(PRODUCT_LICENSES.map((l) => [l.product, l]));
@@ -52,19 +76,49 @@ export function licenseDef(product: ProductId): ProductLicenseDef | undefined {
 export function recipeFor(product: ProductId): Recipe | null {
   return LICENSE_BY_PRODUCT.get(product)?.recipe ?? null;
 }
-/** Products a business type may ever license, with the capability it would get. */
-export function licensableProducts(type: BusinessType): { product: ProductId; capability: ProductCapability; def: ProductLicenseDef }[] {
-  return PRODUCT_LICENSES.filter((l) => l.businesses[type]).map((l) => ({ product: l.product, capability: l.businesses[type]!, def: l }));
+/** The per-business-type rule for licensing `product`, or null if incompatible. */
+export function ruleFor(type: BusinessType, product: ProductId): ProductBizRule | null {
+  return LICENSE_BY_PRODUCT.get(product)?.rules[type] ?? null;
+}
+/** Products a business type may ever license, with its rule + capability. */
+export function licensableProducts(type: BusinessType): { product: ProductId; capability: ProductCapability; rule: ProductBizRule; recipe: Recipe | null }[] {
+  return PRODUCT_LICENSES
+    .filter((l) => l.rules[type])
+    .map((l) => ({ product: l.product, capability: l.rules[type]!.capability, rule: l.rules[type]!, recipe: l.recipe }));
 }
 export function starterLicenses(type: BusinessType): ProductId[] {
-  return PRODUCT_LICENSES.filter((l) => l.starter.includes(type)).map((l) => l.product);
+  return PRODUCT_LICENSES.filter((l) => l.rules[type]?.starter).map((l) => l.product);
 }
 export function productCapability(type: BusinessType, product: ProductId): ProductCapability | null {
-  return LICENSE_BY_PRODUCT.get(product)?.businesses[type] ?? null;
+  return LICENSE_BY_PRODUCT.get(product)?.rules[type]?.capability ?? null;
 }
 /** A product is compatible with a business iff that type can license it. */
 export function productCompatible(type: BusinessType, product: ProductId): boolean {
-  return !!LICENSE_BY_PRODUCT.get(product)?.businesses[type];
+  return !!LICENSE_BY_PRODUCT.get(product)?.rules[type];
+}
+
+// ---------- Product category & NPC retail archetype ----------
+export const RAW_PRODUCTS: ProductId[] = ['milk', 'beans', 'wheat', 'eggs', 'strawberry'];
+export function isRawProduct(product: ProductId): boolean { return RAW_PRODUCTS.includes(product); }
+export function productCategory(product: ProductId): 'raw' | 'finished' { return isRawProduct(product) ? 'raw' : 'finished'; }
+
+// Central Wholesale is a RAW-material safety net only (Phase 3 policy §14): it
+// never sells processed/finished goods.
+export function wholesaleEligible(product: ProductId): boolean { return isRawProduct(product); }
+
+// Relative NPC customer VOLUME per product (multiplies a business's base
+// customers/sec). Archetypes: staples move volume at thin margin; premium goods
+// move little volume at fat margin. See DECISIONS.md V2.8 Phase 3 balancing.
+export const RETAIL_DEMAND_WEIGHT: Partial<Record<ProductId, number>> = {
+  milk: 1.10, bread: 1.40, croissant: 0.60, cookie: 0.70, cake: 0.18, strawberry_cake: 0.10,
+  coffee: 1.00, latte: 0.60, cappuccino: 0.45, strawberry_latte: 0.30,
+};
+export function retailDemandWeight(product: ProductId): number { return RETAIL_DEMAND_WEIGHT[product] ?? 0; }
+/** Products this business type sells to NPC customers (its active ones only, at runtime). */
+export function npcRetailProducts(type: BusinessType): ProductId[] {
+  return licensableProducts(type)
+    .filter((l) => retailDemandWeight(l.product) > 0)
+    .map((l) => l.product);
 }
 
 // ---------- Business level 1–50 ----------
