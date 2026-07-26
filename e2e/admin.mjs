@@ -97,6 +97,78 @@ await send(ADMIN.page, { t: 'admin_unmute', playerId: targetId });
 await TARGET.page.waitForFunction(() => window.__bd.client.chatMuted === false, null, { timeout: 8000 });
 check('admin unmute restores the player', !(await TARGET.page.evaluate(() => window.__bd.client.chatMuted)));
 
+// 6.5) V2.8.2 — LIVE PLAYER PRESENCE (real authenticated connection lifecycle).
+// The admin sees presence change in realtime, with no admin refresh, driven only
+// by real WebSocket connect/disconnect (no fake presence fixtures).
+async function loginReturning(name) {
+  const ctx = await browser.newContext({ viewport: { width: 1100, height: 800 } });
+  const page = await ctx.newPage();
+  page.on('pageerror', (e) => console.log(`[${name}] PAGEERROR: ${e.message}`));
+  await page.goto(CLIENT_URL);
+  await page.waitForSelector('#auth-user', { timeout: 15000 });
+  await page.click('.tabs button[data-mode="login"]'); // returning player -> Log in tab
+  await page.fill('#auth-user', name);
+  await page.fill('#auth-pass', 'e2e-pass-1234');
+  await page.click('#auth-go');
+  await page.waitForFunction(() => window.__bd?.client?.company != null, { timeout: 15000 });
+  return { ctx, page };
+}
+const adminPres = (id) => ADMIN.page.evaluate((i) => window.__bd.client.adminPresence.get(i) ?? null, id);
+const adminOnlineCount = () => ADMIN.page.evaluate(() => window.__bd.client.adminOnline);
+
+// Seed the admin presence map (opening the console pushes a snapshot).
+await rpc(ADMIN.page, { t: 'admin_dashboard' }, () => window.__bd.client.adminPresence.size > 0);
+
+// Baseline BEFORE Player A connects.
+const onlineBefore = await adminOnlineCount();
+
+// Player A logs in from a fresh browser session.
+const PA = await player(`pres_${run}`, 'coffee_shop');
+const paId = await PA.page.evaluate(() => window.__bd.client.you.id);
+
+// Without any admin refresh, A shows Online and the online count reflects it.
+await ADMIN.page.waitForFunction((id) => window.__bd.client.adminPresence.get(id)?.online === true, paId, { timeout: 8000 });
+check('presence: new login shows Online in the admin console (no refresh)', (await adminPres(paId))?.online === true);
+check('presence: online count reflects the new login', (await adminOnlineCount()) >= onlineBefore + 1, `${onlineBefore} -> ${await adminOnlineCount()}`);
+
+// A opens a SECOND authenticated connection (multi-device).
+const PA2 = await loginReturning(`pres_${run}`);
+await ADMIN.page.waitForFunction((id) => window.__bd.client.adminPresence.get(id)?.connections === 2, paId, { timeout: 8000 });
+check('presence: two connections tracked (multi-device)', (await adminPres(paId))?.connections === 2);
+
+// Close ONE connection — A stays Online (mobile still connected).
+await PA2.ctx.close();
+await ADMIN.page.waitForFunction((id) => window.__bd.client.adminPresence.get(id)?.connections === 1, paId, { timeout: 8000 });
+check('presence: closing one of two connections keeps A Online', (await adminPres(paId))?.online === true && (await adminPres(paId))?.connections === 1);
+
+// Close the FINAL connection — A goes Offline, count decrements, last-seen set.
+const onlinePeak = await adminOnlineCount();
+await PA.page.context().close();
+await ADMIN.page.waitForFunction((id) => window.__bd.client.adminPresence.get(id)?.online === false, paId, { timeout: 8000 });
+check('presence: closing the final connection makes A Offline', (await adminPres(paId))?.online === false);
+check('presence: online count decrements on final disconnect', (await adminOnlineCount()) === onlinePeak - 1, `${onlinePeak} -> ${await adminOnlineCount()}`);
+check('presence: last-seen is recorded for the now-offline player', (await adminPres(paId))?.lastSeenMs > 0);
+
+// Reconnect → Online again.
+const PA3 = await loginReturning(`pres_${run}`);
+await ADMIN.page.waitForFunction((id) => window.__bd.client.adminPresence.get(id)?.online === true, paId, { timeout: 8000 });
+check('presence: reconnect returns A to Online', (await adminPres(paId))?.online === true);
+
+// Force logout → Offline in realtime.
+await send(ADMIN.page, { t: 'admin_force_logout', playerId: paId, reason: 'presence e2e' });
+await ADMIN.page.waitForFunction((id) => window.__bd.client.adminPresence.get(id)?.online === false, paId, { timeout: 8000 });
+check('presence: force logout drops A to Offline in realtime', (await adminPres(paId))?.online === false);
+await PA3.ctx.close();
+
+// Suspend an online player → Offline (suspended is a separate axis).
+const PA4 = await loginReturning(`pres_${run}`);
+await ADMIN.page.waitForFunction((id) => window.__bd.client.adminPresence.get(id)?.online === true, paId, { timeout: 8000 });
+await send(ADMIN.page, { t: 'admin_suspend', playerId: paId, suspend: true, reason: 'presence e2e' });
+await ADMIN.page.waitForFunction((id) => window.__bd.client.adminPresence.get(id)?.online === false, paId, { timeout: 10000 });
+check('presence: suspending an online player forces them Offline', (await adminPres(paId))?.online === false);
+await send(ADMIN.page, { t: 'admin_suspend', playerId: paId, suspend: false, reason: 'restore' });
+await PA4.ctx.close();
+
 // 7) Hard delete the disposable player.
 const delId = await ADMIN.page.evaluate((n) => window.__bd.client.players.find((p) => p.name === n)?.id, `del_${run}`);
 const delBizId = await DISPOSABLE.page.evaluate(() => window.__bd.client.myBiz.id);

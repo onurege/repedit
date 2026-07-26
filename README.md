@@ -15,16 +15,24 @@ For production deployment on a small VPS, see [DEPLOYMENT.md](DEPLOYMENT.md).
 ## The core loop
 
 ```
-FARM ──produces──▶ MILK ──marketplace──▶ COFFEE SHOP ──sells──▶ COFFEE ──▶ NPC CUSTOMERS ──▶ MONEY ──▶ UPGRADES
+FARM ─produces─▶ MILK/WHEAT ─marketplace─▶ COFFEE SHOP / BAKERY ─manufacture─▶ COFFEE / BREAD ─▶ NPC CUSTOMERS ─▶ MONEY ─▶ LEVEL UP
 ```
 
 - The server is **authoritative** for all money, inventory, production, trades
   and deliveries. The client only sends intent.
 - Everything persists in PostgreSQL — restart the server and the city carries on.
+- **Player-first economy:** finished goods (coffee, bread, cakes, lattes…) come
+  only from players manufacturing them. The city genuinely needs other players.
+- Farms auto-produce their chosen **raw** good; every **finished** good is made
+  by the player through a manual **production queue** (start a batch, ingredients
+  are committed up front, it completes on a timer).
 - Businesses keep working while you're offline (capped at 8 h); you get a
   "While you were away" report on login.
-- An NPC wholesaler ("Central Wholesale") guarantees supply so nobody is ever
-  blocked by another player being offline — but player milk is cheaper.
+- **Central Wholesale** is an NPC supplier of **raw materials only** (milk,
+  beans, wheat, eggs, strawberries). It guarantees nobody is ever hard-blocked
+  by another player being offline, but player-supplied raw goods are cheaper; it
+  never sells finished goods and its **emergency** (out-of-stock) price is a
+  deliberately expensive backstop, not the normal rate.
 
 ## The city
 
@@ -85,11 +93,45 @@ disable in-game dev tools).
 | Manage your business | Click your building or the **Business** nav button |
 | Buy from the NPC wholesaler | Click the blue **Central Wholesale** depot |
 | Trade with players | **Market** nav button — create/fulfill buy & sell orders |
-| Upgrade | Business panel → Upgrade tab (3 levels, visible in the city) |
+| Manufacture goods | Business panel → **Produce** tab (start/queue a batch) |
+| Move stock inside your company | Inventory tab → **internal transfer** (10% fee) |
+| Upgrade the facility | Business panel → Upgrade tab (**Facility Tier** 1–3, visible in the city) |
 
-Coffee Shop: buy beans + milk → coffee brews automatically → NPC customers
-walk up and buy it at your price. Farm: milk produces automatically → sell it
-on the marketplace (undercut the NPC's $15 and coffee shops will come to you).
+Coffee Shop: buy beans + milk → start a **coffee** batch on the Produce tab →
+NPC customers walk up and buy it at your price. Farm: pick milk or wheat → it
+produces automatically → sell it on the marketplace (undercut Central Wholesale
+and coffee shops & bakeries will come to you).
+
+## Progression & economy (V2.8)
+
+- **Company** — you own one company; it holds cash and a management-capacity pool
+  and levels up as your businesses do. It can own many businesses across districts.
+- **Business Level (1–50)** — each business earns **Business XP** (from
+  manufacturing and from NPC retail sales) and levels independently. Higher
+  Business Level = more product **license slots**, faster production, a deeper
+  production queue, and (from Lv 20) a permanent **specialization**.
+- **Facility Tier (1–3)** — the physical upgrade you buy on the Upgrade tab
+  (bigger storage / throughput). Distinct from Business Level, and visible in the
+  city. *("Business Level" and "Facility Tier" are two different things.)*
+- **Product licenses & active slots** — a business licenses the products it may
+  handle; only a bounded number can be **active** at once (the slot count grows
+  with Business Level), so you specialize your line-up.
+- **Production queue** — finished goods are made in manual batches: ingredients
+  are committed the moment you start, batches run on a wall-clock timer, and you
+  can stop the line (the in-progress batch finishes; queued batches are cancelled
+  and refunded).
+- **Specialization** — a permanent Lv 20 choice (two disjoint paths per type)
+  giving modest, family-scoped bonuses, with mastery tiers at Lv 30/40/50.
+- **Customer Satisfaction (0–100)** — a per-business score driven **only** by NPC
+  retail outcomes (fair sales raise it, gouging and stockouts lower it), smoothed
+  and always recoverable. Its **only** effect is a bounded multiplier on the
+  Business XP from NPC sales. It is **separate from Reputation** (the ★ score that
+  reflects fair pricing) — the two never feed each other.
+- **Internal company transfers** — move stock between your own businesses. This
+  is a physical delivery plus a **10% logistics fee** paid to the city (reference
+  price is the normal Central Wholesale base, never the emergency price). A
+  transfer creates **no** revenue, XP, market activity or trade count; the
+  receiving cost basis is the source's cost basis plus the per-unit fee.
 
 ## Tests
 
@@ -124,7 +166,16 @@ npm run e2e:negotiation # V2.7: direct messaging, offers & counter-offers
 npm run e2e:urgent     # V2.7 Phase 4: urgent city order race (exactly one winner)
 npm run e2e:citynews   # V2.7 Phase 4: rival alerts & city news from committed data
 npm run e2e:mobile     # V2.7 mobile: touch camera (drag/pinch/rotate), tap-vs-drag, responsive UI
+npm run e2e:economy    # V2.8 Phase 1: product licenses, business levels, recipes
+npm run e2e:production  # V2.8 Phase 2: manual production queue, batches, exactly-once
+npm run e2e:supply-economy # V2.8 Phase 3: supply chains, demand & player-sourced ratio
+npm run e2e:specialization # V2.8 Phase 4: specialization, mastery & controlled automation
+npm run e2e:customer-experience # V2.8.2: satisfaction, Business XP visibility, stockout/recovery
+npm run e2e:internal-transfer   # V2.8.2: internal transfer, 10% fee, cost basis, no XP/market
 ```
+
+`e2e:admin` also covers **live player presence** (online/offline, multi-device,
+force-logout/suspend updating the admin console in realtime).
 
 ## Mobile / touch
 
@@ -169,6 +220,16 @@ player search/management, cash/inventory adjustments, full Central Wholesale
 control, announcements, an audit viewer, and hard delete. Routine live
 administration no longer requires direct database access. Every consequential
 action is recorded in `admin_audit_log`.
+
+**Live player presence** (admin-only): the console shows who is connected in
+realtime — an online/offline indicator on every player, an online count on the
+dashboard, All/Online/Offline/Suspended filters, and a detail view with the live
+connection count, last-seen and session-start. Presence is server-authoritative
+(derived from the actual WebSocket connections, player-based not socket-based, so
+multi-device stays online until the last connection closes) and updates without a
+refresh on connect/disconnect/force-logout/suspend/delete. Admins can also **set
+Customer Satisfaction** on a business (0–100, reason required, audited). None of
+this is exposed to normal players.
 
 ## Storage over-capacity report
 

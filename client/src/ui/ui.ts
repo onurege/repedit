@@ -21,6 +21,7 @@ import {
   MAX_BUSINESS_LEVEL, levelReward, businessTier, slotsForLevel,
   productionDurationSecs, RETAIL_BASE, TRADABLE_PRODUCTS, isTradable, WHOLESALE_PRODUCTS,
   satisfactionXpBand, satisfactionStatus, getInternalTransferReferencePrice, INTERNAL_TRANSFER_FEE_RATE, BIZ_XP,
+  SELLER_SUPPLIES, BUSINESS_INPUTS,
   type BizPriv, type RecipePub, type OwnedLicensePub, type AvailableLicensePub, type SupplyEconomy,
 } from '@district/shared';
 import { IS_TOUCH } from '../touch.js';
@@ -40,8 +41,9 @@ const EVENT_ICON: Record<string, string> = {
   morning_rush: '🌅', family_weekend: '👨‍👩‍👧',
 };
 
-// V2.8 Phase 3: raw products a farm may specialize in producing.
-const FARM_RAW: ProductId[] = ['milk', 'wheat', 'eggs', 'strawberry'];
+// V2.8 Phase 3: raw products a farm may specialize in producing (canonical
+// source: what a farm supplies — avoids a drifting client-local duplicate).
+const FARM_RAW: ProductId[] = SELLER_SUPPLIES.farm;
 
 /** mm:ss (or h:mm:ss) countdown from a future epoch-ms timestamp. */
 function countdown(toMs: number): string {
@@ -2340,11 +2342,12 @@ export class UI {
   private opportunitiesHtml(p: CompanyProfile): string {
     const m = client.cityMarket;
     if (!m) return '';
-    const SELLS: Record<string, ProductId[]> = {
-      bakery: ['bread'], coffee_shop: ['coffee'], mini_market: ['bread', 'milk'], farm: [],
-    };
+    // What each business sells to NPC customers (canonical, not a stale literal):
+    // producers sell their finished goods; the Mini Market sells its retail set.
+    const sellsTo = (type: BusinessType): ProductId[] =>
+      type === 'mini_market' ? BUSINESS_INPUTS.mini_market : SELLER_SUPPLIES[type];
     const mine = new Set<ProductId>();
-    for (const b of p.businesses) for (const pr of SELLS[b.type] ?? []) mine.add(pr);
+    for (const b of p.businesses) for (const pr of sellsTo(b.type)) mine.add(pr);
     const hot = m.demand.filter((d) => mine.has(d.product) && (d.category === 'high' || d.category === 'very_high'));
     if (!hot.length) return '';
     const rows = hot.map((d) =>
@@ -2638,6 +2641,7 @@ export class UI {
   private chatUnread = 0;
   private adminTab = 'dashboard';
   private adminDetailId: number | null = null;
+  private adminFilter: import('@district/shared').PresenceFilter = 'all';  // V2.8.2 presence filter
   private msgOtherId: number | null = null;
 
   // ================= V2.7 Phase 3: Direct messages & offers =================
@@ -3113,40 +3117,83 @@ export class UI {
     const ws = d.wholesale.map((w) => `<div class="kv"><span class="k">${pName(w.product)}</span><span class="v">${w.remaining}/${w.dailyStock} · $${w.basePrice}</span></div>`).join('');
     const audit = d.recentAudit.map((e) => `<div class="trade-row"><b>${escapeHtml(e.adminName)}</b> ${escapeHtml(e.action)}${e.targetId ? ` → ${escapeHtml(e.targetType ?? '')}:${escapeHtml(e.targetId)}` : ''}</div>`).join('') || `<p class="hint">${t('admin.no_audit')}</p>`;
     const reports = d.recentReports.map((r) => `<div class="trade-row">⚑ ${escapeHtml(r.reason)} — ${r.body ? escapeHtml(r.body.slice(0, 40)) : t('admin.deleted_msg')}</div>`).join('') || `<p class="hint">${t('admin.no_reports')}</p>`;
+    // Realtime online count (presence pushes update this without a refresh).
+    const online = client.adminPresence.size ? client.adminOnline : d.online;
     this.setBody(body, `
       <div class="admin-grid">
-        ${stat(t('admin.online'), d.online)}${stat(t('admin.players'), d.players)}
+        ${stat('🟢 ' + t('admin.online'), online)}${stat(t('admin.players'), d.players)}
         ${stat(t('admin.companies'), d.companies)}${stat(t('admin.businesses'), d.businesses)}
         ${stat(t('admin.deliveries'), d.deliveries)}${stat(t('admin.waiting'), d.waitingDeliveries)}
         ${stat(t('admin.contracts'), d.contracts)}${stat(t('admin.orders'), d.orders)}
         ${stat(t('admin.events'), d.cityEvents)}
       </div>
+      <button class="btn small primary" id="admin-view-online" style="margin:8px 0">${t('admin.presence.view_online')}</button>
       <h4 class="admin-h">${t('admin.wholesale_stock')}</h4>${ws}
       <h4 class="admin-h">${t('admin.recent_audit')}</h4>${audit}
       <h4 class="admin-h">${t('admin.recent_reports')}</h4>${reports}
       <button class="btn small ghost" id="admin-refresh" style="margin-top:10px">${t('admin.refresh')}</button>`, (b) => {
       b.querySelector('#admin-refresh')!.addEventListener('click', () => client.send({ t: 'admin_dashboard' }));
+      b.querySelector('#admin-view-online')!.addEventListener('click', () => {
+        // Quick action: jump to the existing player list, pre-filtered to Online.
+        sfx.click();
+        this.adminFilter = 'online';
+        this.adminDetailId = null;
+        client.adminPlayerDetail = null;
+        this.panelTab = 'players';
+        client.send({ t: 'admin_search_players', q: '', filter: 'online' });
+        this.lastBodyHTML = '';
+        this.lastTabsHTML = '';
+        this.renderPanel();
+      });
     });
+  }
+
+  /** Short relative "last seen" label ("just now", "5m", "2h", "3d"). */
+  private relTime(ms: number): string {
+    if (!ms) return '—';
+    const s = Math.max(0, Math.floor((Date.now() - ms) / 1000));
+    if (s < 45) return t('admin.presence.just_now');
+    if (s < 3600) return `${Math.floor(s / 60)}m`;
+    if (s < 86400) return `${Math.floor(s / 3600)}h`;
+    return `${Math.floor(s / 86400)}d`;
   }
 
   private renderAdminPlayers(body: HTMLElement): void {
     const detail = this.adminDetailId != null ? client.adminPlayerDetail : null;
     if (detail && detail.id === this.adminDetailId) { this.renderAdminPlayerDetail(body, detail); return; }
-    const rows = client.adminPlayers.map((p) => `
+    const q = () => (document.getElementById('admin-search') as HTMLInputElement | null)?.value.trim() ?? '';
+    const filters: import('@district/shared').PresenceFilter[] = ['all', 'online', 'offline', 'suspended'];
+    const chips = filters.map((f) =>
+      `<button class="btn small ${this.adminFilter === f ? 'primary' : 'ghost'}" data-pfilter="${f}">${t('admin.presence.filter.' + f)}</button>`
+    ).join('');
+    // Live presence overlays the row snapshot so indicators stay current between searches.
+    const rows = client.adminPlayers.map((p) => {
+      const live = client.adminPresence.get(p.id);
+      const online = live ? live.online : p.online;
+      const lastSeen = live ? live.lastSeenMs : p.lastSeenMs;
+      const seen = online ? '' : `<span class="cap"> · ${t('admin.presence.last_seen')}: ${this.relTime(lastSeen)}</span>`;
+      return `
       <div class="order">
-        <span class="grow"><b>${escapeHtml(p.username)}</b> ${p.online ? '🟢' : '⚪'} ${p.suspended ? '⛔' : ''}<br/>
-          <span class="who">#${p.id} · ${p.companyName ? escapeHtml(p.companyName) : '—'} · ${p.businesses} biz</span></span>
+        <span class="grow"><b>${online ? '🟢' : '⚪'} ${escapeHtml(p.username)}</b> ${p.suspended ? '⛔' : ''}<br/>
+          <span class="who">#${p.id} · ${p.companyName ? escapeHtml(p.companyName) : '—'} · ${p.businesses} biz${seen}</span></span>
         <button class="btn small primary" data-admin-detail="${p.id}">${t('admin.view')}</button>
-      </div>`).join('') || `<p class="hint">${t('admin.search_hint')}</p>`;
+      </div>`;
+    }).join('') || `<p class="hint">${t('admin.search_hint')}</p>`;
     this.setBody(body, `
       <div class="mkt-row">
-        <input id="admin-search" placeholder="${t('admin.search_placeholder')}" style="flex:1;padding:8px;border:1.5px solid #dbe3ee;border-radius:8px" />
+        <input id="admin-search" placeholder="${t('admin.search_placeholder')}" value="${escapeHtml(q())}" style="flex:1;padding:8px;border:1.5px solid #dbe3ee;border-radius:8px" />
         <button class="btn small primary" id="admin-search-go">${t('admin.search')}</button>
       </div>
+      <div class="mkt-row admin-pfilters" style="flex-wrap:wrap;gap:6px;margin:8px 0">${chips}</div>
       ${rows}`, (b) => {
-      const go = () => { const q = (b.querySelector('#admin-search') as HTMLInputElement).value.trim(); if (q) client.send({ t: 'admin_search_players', q }); };
-      b.querySelector('#admin-search-go')!.addEventListener('click', go);
-      b.querySelector('#admin-search')!.addEventListener('keydown', (e) => { if ((e as KeyboardEvent).key === 'Enter') go(); });
+      const search = (filter = this.adminFilter) => client.send({ t: 'admin_search_players', q: q(), filter });
+      b.querySelector('#admin-search-go')!.addEventListener('click', () => search());
+      b.querySelector('#admin-search')!.addEventListener('keydown', (e) => { if ((e as KeyboardEvent).key === 'Enter') search(); });
+      b.querySelectorAll('[data-pfilter]').forEach((el) => el.addEventListener('click', () => {
+        sfx.click();
+        this.adminFilter = (el as HTMLElement).dataset.pfilter as import('@district/shared').PresenceFilter;
+        search(this.adminFilter);
+      }));
       b.querySelectorAll('[data-admin-detail]').forEach((el) => el.addEventListener('click', () => {
         this.adminDetailId = parseInt((el as HTMLElement).dataset.adminDetail!, 10);
         client.send({ t: 'admin_player_detail', playerId: this.adminDetailId });
@@ -3162,11 +3209,34 @@ export class UI {
         <button class="btn small ghost" data-inv="${s.bizId}:${s.product}:remove">−</button>
         <button class="btn small ghost" data-inv="${s.bizId}:${s.product}:set">=</button>
       </span></div>`).join('');
+    // Live presence overlays the detail snapshot (updates on realtime pushes).
+    const live = client.adminPresence.get(d.id);
+    const online = live ? live.online : d.online;
+    const connections = live ? live.connections : d.connections;
+    const lastSeen = live ? live.lastSeenMs : d.lastSeenMs;
+    const presenceRow = `
+      <div class="kv"><span class="k">${t('admin.presence.status')}</span>
+        <span class="v" id="admin-presence-status">${online ? '🟢 ' + t('admin.presence.online') : '⚪ ' + t('admin.presence.offline')}
+          <span class="cap">· ${t('admin.presence.connections')}: ${connections}</span></span></div>
+      <div class="kv"><span class="k">${t('admin.presence.last_seen')}</span><span class="v">${online ? t('admin.presence.now') : this.relTime(lastSeen) + ' · ' + new Date(lastSeen).toLocaleString()}</span></div>
+      ${online && d.sessionStartedMs ? `<div class="kv"><span class="k">${t('admin.presence.session')}</span><span class="v">${new Date(d.sessionStartedMs).toLocaleTimeString()}</span></div>` : ''}`;
+    const bizRow = (b: import('@district/shared').AdminPlayerDetail['businesses'][number]) => {
+      const sat = b.satisfaction == null ? '' :
+        `<div class="kv"><span class="k cap">${t('biz.satisfaction')}</span><span class="v">${b.satisfaction} / 100
+          <button class="btn small warn" data-set-sat="${b.id}">${t('admin.sat.set')}</button></span></div>`;
+      return `<div class="admin-biz-card">
+        <div class="kv"><span class="k">${BIZ_ICON[b.type] ?? '🏪'} ${bizName(b.type)} <span class="cap">${t(`district.${b.district}.name`)}</span></span>
+          <span class="v"><button class="btn small ghost" data-rename-biz="${b.id}">✎ ${t('admin.rename')}</button></span></div>
+        <div class="kv"><span class="k cap">${t('admin.biz.level')}</span><span class="v">${b.bizLevel} · ${b.bizXp} XP · ${t('admin.biz.tier')} ${b.level}</span></div>
+        ${sat}
+      </div>`;
+    };
     this.setBody(body, `
       <button class="btn small ghost" id="admin-back">← ${t('admin.back')}</button>
-      <div class="kv"><span class="k">${t('admin.username')}</span><span class="v">${escapeHtml(d.username)} ${d.online ? '🟢' : '⚪'} ${d.suspended ? '⛔' : ''}</span></div>
+      <div class="kv"><span class="k">${t('admin.username')}</span><span class="v">${escapeHtml(d.username)} ${online ? '🟢' : '⚪'} ${d.suspended ? '⛔' : ''}</span></div>
+      ${presenceRow}
       <div class="kv"><span class="k">${t('admin.company')}</span><span class="v">${d.company ? escapeHtml(d.company.name) + ' · Lv ' + d.company.level : '—'}${d.company ? ` <button class="btn small ghost" id="admin-rename-co">✎</button>` : ''}</span></div>
-      ${d.businesses.length ? `<h4 class="admin-h">${t('admin.businesses')}</h4>` + d.businesses.map((b) => `<div class="kv"><span class="k">${BIZ_ICON[b.type] ?? '🏪'} ${bizName(b.type)} <span class="cap">${t(`district.${b.district}.name`)} · Lv ${b.level}</span></span><span class="v"><button class="btn small ghost" data-rename-biz="${b.id}">✎ ${t('admin.rename')}</button></span></div>`).join('') : ''}
+      ${d.businesses.length ? `<h4 class="admin-h">${t('admin.businesses')}</h4>` + d.businesses.map(bizRow).join('') : ''}
       <div class="kv"><span class="k">${t('admin.cash')}</span><span class="v">${fmt(d.cash)}
         <button class="btn small ghost" data-cash="add">＋</button>
         <button class="btn small ghost" data-cash="remove">−</button>
@@ -3211,6 +3281,56 @@ export class UI {
         const name = prompt(t('admin.rename_business_prompt')) ?? '';
         client.send({ t: 'admin_rename_business', bizId, name: name.trim() });
       }));
+      b.querySelectorAll('[data-set-sat]').forEach((el) => el.addEventListener('click', () => {
+        const bizId = parseInt((el as HTMLElement).dataset.setSat!, 10);
+        const biz = d.businesses.find((x) => x.id === bizId);
+        if (biz) this.adminSatisfactionModal(bizId, biz.satisfaction ?? 70, `${bizName(biz.type)} · Lv ${biz.bizLevel}`);
+      }));
+    });
+  }
+
+  /** V2.8.2 — game-native admin control to SET a business's Customer Satisfaction.
+   *  Range 0–100, reason required, explicit confirmation. Server enforces
+   *  requireAdmin + writes a SET_SATISFACTION audit entry. */
+  private adminSatisfactionModal(bizId: number, current: number, label: string): void {
+    if (document.getElementById('sat-overlay')) return;
+    const overlay = document.createElement('div');
+    overlay.className = 'overlay modal';
+    overlay.id = 'sat-overlay';
+    overlay.innerHTML = `
+      <div class="card spec-confirm">
+        <h1>${t('admin.sat.title')}</h1>
+        <div class="hint">${escapeHtml(label)}</div>
+        <div class="lic-rows">
+          <div class="orv-kv"><span>${t('admin.sat.current')}</span><span><b>${current} / 100</b></span></div>
+          <div class="field"><label>${t('admin.sat.new')}: <b id="sat-val">${current}</b></label>
+            <input id="sat-range" type="range" min="0" max="100" step="1" value="${current}" style="width:100%" /></div>
+          <div class="field"><label>${t('admin.sat.reason')}</label>
+            <input id="sat-reason" maxlength="200" placeholder="${t('admin.reason_prompt')}" /></div>
+        </div>
+        <div class="offer-actions">
+          <button class="btn ghost" id="sat-cancel">${t('offer.cancel_btn')}</button>
+          <button class="btn primary" id="sat-apply" disabled>${t('admin.sat.apply')}</button>
+        </div>
+      </div>`;
+    document.body.appendChild(overlay);
+    const close = () => overlay.remove();
+    const range = overlay.querySelector('#sat-range') as HTMLInputElement;
+    const valLabel = overlay.querySelector('#sat-val') as HTMLElement;
+    const reason = overlay.querySelector('#sat-reason') as HTMLInputElement;
+    const apply = overlay.querySelector('#sat-apply') as HTMLButtonElement;
+    const sync = () => { valLabel.textContent = range.value; apply.disabled = reason.value.trim().length === 0; };
+    range.addEventListener('input', sync);
+    reason.addEventListener('input', sync);
+    overlay.addEventListener('click', (e) => { if (e.target === overlay) close(); });
+    overlay.querySelector('#sat-cancel')!.addEventListener('click', () => { sfx.click(); close(); });
+    apply.addEventListener('click', () => {
+      const value = parseInt(range.value, 10);
+      const why = reason.value.trim();
+      if (!why) return; // reason required
+      sfx.click();
+      client.send({ t: 'admin_set_satisfaction', bizId, value, reason: why });
+      close();
     });
   }
 

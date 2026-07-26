@@ -78,6 +78,9 @@ export class GameClient {
   adminPlayers: AdminPlayerRow[] = [];
   adminPlayerDetail: AdminPlayerDetail | null = null;
   adminAudit: AdminAuditEntry[] = [];
+  // V2.8.2: realtime presence map pushed to admins only (id -> live presence).
+  adminPresence = new Map<number, import('@district/shared').AdminPresenceRow>();
+  adminOnline = 0;
   conversations: ConversationSummary[] = [];
   activeConv: { otherId: number; messages: DirectMessagePub[]; offers: OfferPub[] } | null = null;
   offers = new Map<number, OfferPub>();
@@ -394,6 +397,13 @@ export class GameClient {
         break;
       case 'admin_player_detail':
         this.adminPlayerDetail = msg.detail;
+        this.emit('admin');
+        break;
+      case 'admin_presence':
+        this.adminPresence.clear();
+        for (const row of msg.players) this.adminPresence.set(row.id, row);
+        this.adminOnline = msg.online;
+        this.emit('admin_presence');
         this.emit('admin');
         break;
       case 'admin_audit':
