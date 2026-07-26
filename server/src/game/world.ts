@@ -3131,6 +3131,12 @@ export class World extends EventEmitter {
         biz.dirty = true;
         return `+${added} ${PRODUCTS[product].name}${added < want ? ' (storage full)' : ''}`;
       }
+      case 'biz_xp': {
+        // V2.8 dev: grant business XP to the selected business (testing only).
+        const biz = this.requireOwnedBiz(playerId, bizId);
+        this.addBizXp(biz, v > 0 ? v : 1000);
+        return `business xp +${v > 0 ? v : 1000} (lvl ${biz.bizLevel})`;
+      }
       case 'company_xp': {
         const company = await this.ensureCompany(playerId);
         this.addCompanyXp(company, v > 0 ? v : 1000);
