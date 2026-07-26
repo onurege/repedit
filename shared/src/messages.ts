@@ -66,6 +66,19 @@ export interface AdminPlayerRow {
   suspended: boolean;
   cash: number;
   businesses: number;
+  connections: number;   // V2.8.2: live authenticated socket count (0 = offline)
+  lastSeenMs: number;    // V2.8.2: last authenticated presence (server-authoritative)
+}
+
+/** V2.8.2 — admin-only player-presence filter for the player list. */
+export type PresenceFilter = 'all' | 'online' | 'offline' | 'suspended';
+
+/** V2.8.2 — one player's live presence, pushed realtime to admins only. */
+export interface AdminPresenceRow {
+  id: number;
+  online: boolean;
+  connections: number;
+  lastSeenMs: number;
 }
 
 export interface AdminInventorySlot {
@@ -83,6 +96,9 @@ export interface AdminPlayerDetail {
   id: number;
   username: string;
   online: boolean;
+  connections: number;              // V2.8.2: live authenticated socket count
+  lastSeenMs: number;               // V2.8.2: last authenticated presence
+  sessionStartedMs: number | null;  // V2.8.2: when the current session began (null if offline)
   suspended: boolean;
   suspendedReason: string | null;
   muted: boolean;
@@ -92,7 +108,10 @@ export interface AdminPlayerDetail {
   level: number;
   reputation: number;
   company: { id: number; name: string; level: number; xp: number } | null;
-  businesses: { id: number; type: BusinessType; district: DistrictId; level: number; lotId: string }[];
+  // `level` is the FACILITY tier (1–3). `bizLevel` is the Business Level (1–50).
+  // `satisfaction` is null for businesses with no NPC retail (e.g. farms).
+  businesses: { id: number; type: BusinessType; district: DistrictId; level: number; lotId: string;
+                bizLevel: number; bizXp: number; satisfaction: number | null }[];
   inventory: AdminInventorySlot[];
   activeOrders: number;
   activeContracts: number;
@@ -208,7 +227,7 @@ export type ClientMsg =
   | { t: 'admin_unmute'; playerId: number }
   // ---- V2.7 Phase 2: Admin & Live Ops ----
   | { t: 'admin_dashboard' }
-  | { t: 'admin_search_players'; q: string }
+  | { t: 'admin_search_players'; q: string; filter?: PresenceFilter }
   | { t: 'admin_player_detail'; playerId: number }
   | { t: 'admin_suspend'; playerId: number; suspend: boolean; reason?: string }
   | { t: 'admin_force_logout'; playerId: number; reason?: string }
@@ -799,6 +818,7 @@ export type ServerMsg =
   | { t: 'admin_dashboard'; dashboard: AdminDashboard }
   | { t: 'admin_players'; results: AdminPlayerRow[] }
   | { t: 'admin_player_detail'; detail: AdminPlayerDetail }
+  | { t: 'admin_presence'; online: number; players: AdminPresenceRow[] }   // V2.8.2: realtime presence (admins only)
   | { t: 'admin_audit'; entries: AdminAuditEntry[] }
   | { t: 'force_logout'; reason: string | null }
   // ---- V2.7 Phase 3: direct messaging & offers ----

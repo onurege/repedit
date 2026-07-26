@@ -48,6 +48,19 @@ export class Net {
     });
   }
 
+  /** V2.8.2 — realtime presence fan-out to ADMIN connections only (privacy:
+   *  connection counts / last-seen are never sent to normal players). Server-
+   *  authoritative: derived from live WebSocket connection state, never polled. */
+  private pushAdminPresence(): void {
+    let snapshot: import('@district/shared').AdminPresenceRow[] | null = null;
+    const online = this.world.onlineCount();
+    for (const c of this.conns) {
+      if (c.ws.readyState !== WebSocket.OPEN || !this.world.isAdmin(c.playerId)) continue;
+      if (!snapshot) snapshot = this.world.presenceSnapshot(); // build once, only if an admin is connected
+      this.send(c.ws, { t: 'admin_presence', online, players: snapshot });
+    }
+  }
+
   private pushOwnState(playerId: number): void {
     const p = this.world.players.get(playerId);
     if (!p) return;
@@ -71,8 +84,10 @@ export class Net {
         }
       }
     });
-    w.on('sale', (e: { bizId: number; lotId: string; amount: number }) => {
-      this.broadcast({ t: 'sale', bizId: e.bizId, lotId: e.lotId, amount: e.amount });
+    w.on('sale', (e: { bizId: number; lotId: string; amount: number; xp?: number }) => {
+      // Forward the Business XP so the owner's on-shop popup can show "+$X +Y XP"
+      // (V2.8.2 XP visibility). The client only renders XP for the owner's own shop.
+      this.broadcast({ t: 'sale', bizId: e.bizId, lotId: e.lotId, amount: e.amount, xp: e.xp });
     });
     w.on('lost_customer', (e: { bizId: number; lotId: string }) => {
       this.broadcast({ t: 'lost_customer', bizId: e.bizId, lotId: e.lotId });
@@ -149,7 +164,7 @@ export class Net {
     w.on('wholesale', () => {
       this.broadcast({ t: 'wholesale', wholesale: w.toWholesaleState() });
     });
-    w.on('presence', () => this.broadcastPlayers());
+    w.on('presence', () => { this.broadcastPlayers(); this.pushAdminPresence(); });
     // V2.7 Phase 1: City Chat realtime fan-out.
     w.on('chat', (m: any) => {
       // Send each client its own `self` flag so the sender's line renders as theirs.
@@ -206,6 +221,8 @@ export class Net {
           try { c.ws.close(4004, 'deleted'); } catch { /* ignore */ }
         }
       }
+      // A hard-deleted player leaves the roster entirely — refresh admins' presence.
+      this.pushAdminPresence();
     });
     w.on('player_muted', ({ playerId, until, reason }: { playerId: number; until: number | null; reason: string | null }) => {
       // until:0 is the "unmuted" signal; otherwise the player is now muted.
@@ -488,9 +505,11 @@ export class Net {
         // ---- V2.7 Phase 2: Admin & Live Ops (all authorized inside world.*) ----
         case 'admin_dashboard':
           this.send(conn.ws, { t: 'admin_dashboard', dashboard: await world.adminDashboard(pid) });
+          // Seed the realtime presence map so already-open rows update live.
+          if (world.isAdmin(pid)) this.send(conn.ws, { t: 'admin_presence', online: world.onlineCount(), players: world.presenceSnapshot() });
           break;
         case 'admin_search_players':
-          this.send(conn.ws, { t: 'admin_players', results: await world.adminSearchPlayers(pid, msg.q) });
+          this.send(conn.ws, { t: 'admin_players', results: await world.adminSearchPlayers(pid, msg.q, msg.filter) });
           break;
         case 'admin_player_detail':
           this.send(conn.ws, { t: 'admin_player_detail', detail: await world.adminPlayerDetail(pid, msg.playerId) });
@@ -682,9 +701,11 @@ export class Net {
           break;
         }
         case 'admin_set_satisfaction': {
-          const biz = await world.adminSetSatisfaction(pid, msg.bizId, msg.value);
+          const biz = await world.adminSetSatisfaction(pid, msg.bizId, msg.value, msg.reason);
           this.send(conn.ws, { t: 'toast', code: 'toast.admin_done', kind: 'success' });
           this.sendToPlayer(biz.ownerId, { t: 'my_biz', biz: world.toBizPriv(biz) });
+          // Reflect the change back to the admin's open detail view immediately.
+          this.send(conn.ws, { t: 'admin_player_detail', detail: await world.adminPlayerDetail(pid, biz.ownerId) });
           break;
         }
         case 'get_production': {

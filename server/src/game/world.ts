@@ -265,6 +265,8 @@ import {
   type AdminDashboard,
   type AdminPlayerRow,
   type AdminPlayerDetail,
+  type AdminPresenceRow,
+  type PresenceFilter,
   type AdminAuditEntry,
   type AdminReportEntry,
   type AdminCashOp,
@@ -310,6 +312,7 @@ export interface PlayerRec {
   level: number;
   lastSeenMs: number;
   connections: number;
+  sessionStartMs: number | null;   // V2.8.2: set when the first connection opens, cleared on final disconnect
   isAdmin: boolean;
   suspended: boolean;
   suspendedReason: string | null;
@@ -824,6 +827,7 @@ export class World extends EventEmitter {
         level: r.level,
         lastSeenMs: new Date(r.last_seen).getTime(),
         connections: 0,
+        sessionStartMs: null,
         isAdmin: r.is_admin ?? false,
         suspended: r.suspended ?? false,
         suspendedReason: r.suspended_reason ?? null,
@@ -1821,6 +1825,7 @@ export class World extends EventEmitter {
         level: r.level,
         lastSeenMs: new Date(r.last_seen).getTime(),
         connections: 0,
+        sessionStartMs: null,
         isAdmin: r.is_admin ?? false,
         suspended: r.suspended ?? false,
         suspendedReason: r.suspended_reason ?? null,
@@ -1836,6 +1841,9 @@ export class World extends EventEmitter {
     const p = this.player(playerId);
     p.connections++;
     const now = Date.now();
+    // V2.8.2: the session begins when the FIRST authenticated connection opens.
+    // Additional connections (multi-device) keep the same session start.
+    if (p.connections === 1) p.sessionStartMs = now;
     let report: AwayReport | null = null;
     const totals = this.bizTotals(playerId);
     if (p.awaySnapshot && this.bizesByOwner(playerId).length > 0 && p.connections === 1) {
@@ -1872,7 +1880,11 @@ export class World extends EventEmitter {
         milkProduced: totals.milkProduced,
         coffeeSold: totals.coffeeSold,
       };
+      // V2.8.2: final authenticated connection closed — persist last_seen (the
+      // periodic save flushes the dirty flag; no per-tick DB write) and end the
+      // session. This is the authoritative ONLINE → OFFLINE transition.
       p.lastSeenMs = Date.now();
+      p.sessionStartMs = null;
       p.dirty = true;
     }
     this.emit('presence');
@@ -2192,14 +2204,16 @@ export class World extends EventEmitter {
   }
 
   /** V2.8.2 — admin: set a business's Customer Satisfaction (recovery/testing). Audited. */
-  async adminSetSatisfaction(adminId: number, bizId: number, value: number): Promise<BizRec> {
+  async adminSetSatisfaction(adminId: number, bizId: number, value: number, reason?: string): Promise<BizRec> {
     this.requireAdmin(adminId);
     const biz = this.businesses.get(bizId);
     if (!biz) throw new GameError('err.unknown_business');
+    if (!Number.isFinite(value)) throw new GameError('err.invalid_amount');
+    const clean = (reason ?? '').replace(/[<>]/g, '').trim().slice(0, 200) || null;
     biz.satisfaction = Math.max(0, Math.min(100, Math.round(value)));
     biz.dirty = true;
     await query('UPDATE businesses SET customer_satisfaction=$1 WHERE id=$2', [biz.satisfaction, bizId]);
-    await this.logAdminAction(adminId, 'SET_SATISFACTION', 'business', String(bizId), { satisfaction: biz.satisfaction });
+    await this.logAdminAction(adminId, 'SET_SATISFACTION', 'business', String(bizId), { satisfaction: biz.satisfaction, reason: clean });
     this.emit('biz_pub', biz);
     this.emit('push_state', { playerId: biz.ownerId });
     return biz;
@@ -3113,7 +3127,10 @@ export class World extends EventEmitter {
       await c.query('UPDATE players SET cash=$1 WHERE id=$2', [p.cash, p.id]);
       await c.query(LEDGER_SQL, ledgerParams({ playerId, businessId: to.id, type: 'INTERNAL_TRANSFER_FEE', amount: -totalFee, refType: 'business', refId: from.id, before, after: p.cash }));
     });
-    await this.createDelivery(product, qty, from.lotId, to, q.recvCostBasis); // receiver basis = source WAC + fee
+    const delivery = await this.createDelivery(product, qty, from.lotId, to, q.recvCostBasis); // receiver basis = source WAC + fee
+    // Broadcast the van so the transfer is visible like every other delivery
+    // (wholesale/contract). The goods reach the destination only on arrival.
+    this.emit('delivery', delivery);
     console.log(`[econ] TRANSFER biz=${from.id}->${to.id} ${qty}x${product} ref=${q.ref} fee=${totalFee} recvBasis=${q.recvCostBasis}`);
     this.emit('biz_pub', from);
     this.emit('push_state', { playerId });
@@ -4856,22 +4873,49 @@ export class World extends EventEmitter {
     };
   }
 
-  async adminSearchPlayers(adminId: number, q: string): Promise<AdminPlayerRow[]> {
+  async adminSearchPlayers(adminId: number, q: string, filter: PresenceFilter = 'all'): Promise<AdminPlayerRow[]> {
     this.requireAdmin(adminId);
+    const trimmed = (q ?? '').trim();
     // Escape ILIKE wildcards (keep legitimate underscores in usernames).
-    const term = `%${(q ?? '').trim().slice(0, 40).replace(/[\\%_]/g, (m) => '\\' + m)}%`;
+    const term = `%${trimmed.slice(0, 40).replace(/[\\%_]/g, (m) => '\\' + m)}%`;
+    // With an empty query we still return the roster (needed for the presence
+    // filters); with a query we match username / company / id. A generous cap
+    // is refined below by presence, then trimmed to 30.
     const rows = await query(
       `SELECT p.id, p.username, p.suspended, p.cash, c.name AS company_name,
               (SELECT count(*)::int FROM businesses b WHERE b.player_id = p.id) AS biz
          FROM players p LEFT JOIN companies c ON c.player_id = p.id
-        WHERE p.username ILIKE $1 OR c.name ILIKE $1 OR CAST(p.id AS TEXT) = $2
-        ORDER BY p.id LIMIT 30`,
-      [term, (q ?? '').trim()]
+        WHERE $3 = '' OR p.username ILIKE $1 OR c.name ILIKE $1 OR CAST(p.id AS TEXT) = $2
+        LIMIT 200`,
+      [term, trimmed, trimmed]
     );
-    return rows.rows.map((r) => ({
-      id: r.id, username: r.username, companyName: r.company_name ?? null,
-      online: (this.players.get(r.id)?.connections ?? 0) > 0,
-      suspended: r.suspended, cash: r.cash, businesses: r.biz,
+    const mapped: AdminPlayerRow[] = rows.rows.map((r) => {
+      const mem = this.players.get(r.id);
+      const connections = mem?.connections ?? 0;
+      return {
+        id: r.id, username: r.username, companyName: r.company_name ?? null,
+        online: connections > 0, suspended: r.suspended, cash: r.cash, businesses: r.biz,
+        connections, lastSeenMs: mem?.lastSeenMs ?? 0,
+      };
+    });
+    const filtered = mapped.filter((r) =>
+      filter === 'online' ? r.online :
+      filter === 'offline' ? !r.online :
+      filter === 'suspended' ? r.suspended :
+      true
+    );
+    // Deterministic ordering: online first, then most recently seen, then id.
+    filtered.sort((a, b) =>
+      (Number(b.online) - Number(a.online)) || (b.lastSeenMs - a.lastSeenMs) || (a.id - b.id)
+    );
+    return filtered.slice(0, 30);
+  }
+
+  /** V2.8.2 — lightweight presence snapshot for realtime admin fan-out.
+   *  Server-authoritative: derived only from live WebSocket connection counts. */
+  presenceSnapshot(): AdminPresenceRow[] {
+    return [...this.players.values()].map((p) => ({
+      id: p.id, online: p.connections > 0, connections: p.connections, lastSeenMs: p.lastSeenMs,
     }));
   }
 
@@ -4899,6 +4943,9 @@ export class World extends EventEmitter {
     return {
       id: r.id, username: r.username,
       online: (mem?.connections ?? 0) > 0,
+      connections: mem?.connections ?? 0,
+      lastSeenMs: mem?.lastSeenMs ?? new Date(r.last_seen).getTime(),
+      sessionStartedMs: mem?.sessionStartMs ?? null,
       suspended: r.suspended, suspendedReason: r.suspended_reason ?? null,
       muted: this.isMuted(playerId),
       joinedAt: new Date(r.created_at).getTime(),
@@ -4907,6 +4954,9 @@ export class World extends EventEmitter {
       company: company ? { id: company.id, name: company.name, level: company.level, xp: company.xp } : null,
       businesses: bizes.map((b) => ({
         id: b.id, type: b.type, district: lotById(b.lotId)?.district ?? DEFAULT_DISTRICT, level: b.level, lotId: b.lotId,
+        bizLevel: b.bizLevel, bizXp: b.bizXp,
+        // Farms and other businesses with no NPC retail have no satisfaction signal.
+        satisfaction: FINAL_PRODUCTS_OF[b.type]?.length ? b.satisfaction : null,
       })),
       inventory,
       activeOrders: [...this.orders.values()].filter((o) => o.playerId === playerId && o.status === 'open').length,
@@ -5193,7 +5243,7 @@ export class World extends EventEmitter {
     const row = r.rows[0];
     return {
       id: row.id, name: row.username, cash: row.cash, xp: row.xp, level: row.level,
-      lastSeenMs: new Date(row.last_seen).getTime(), connections: 0, isAdmin: row.is_admin ?? false,
+      lastSeenMs: new Date(row.last_seen).getTime(), connections: 0, sessionStartMs: null, isAdmin: row.is_admin ?? false,
       suspended: row.suspended ?? false, suspendedReason: row.suspended_reason ?? null,
       awaySnapshot: row.away_snapshot ?? null, dirty: false,
     } as PlayerRec;
