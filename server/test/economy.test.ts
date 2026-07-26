@@ -45,26 +45,29 @@ describe('farm production', () => {
 });
 
 describe('coffee shop', () => {
-  it('brews and sells only with ingredients, and stops without them', async () => {
+  // V2.8 Phase 2: coffee is manufactured via the manual production line, not
+  // auto-brewed in the tick. Retail (NPC sales) now drains FINISHED coffee stock.
+  it('sells only from finished coffee stock and stops without it', async () => {
     const pid = await newPlayer(world, 'barista');
     const biz = await world.chooseBusiness(pid, 'coffee_shop');
     const p = world.players.get(pid)!;
     const cashBefore = p.cash;
 
-    // No ingredients: long simulation sells nothing.
+    // No finished coffee (even with ingredients): retail sells nothing.
+    biz.inv.get('milk')!.qty = 50;
+    biz.inv.get('beans')!.qty = 50;
     world.simulate(biz, 300, true);
     expect(biz.coffeeSold).toBe(0);
     expect(p.cash).toBe(cashBefore);
     expect(biz.status).toBe('out_of_stock');
 
-    // Give ingredients: sales happen and inputs are consumed 1:1.
-    biz.inv.get('milk')!.qty = 50;
-    biz.inv.get('beans')!.qty = 50;
+    // Give finished coffee: sales happen and drain the stock (ingredients untouched).
+    biz.inv.get('coffee')!.qty = 50;
     world.simulate(biz, 300, true);
     expect(biz.coffeeSold).toBeGreaterThan(0);
-    const consumed = 50 - biz.inv.get('milk')!.qty;
-    expect(50 - biz.inv.get('beans')!.qty).toBe(consumed);
-    expect(biz.coffeeSold + biz.inv.get('coffee')!.qty).toBe(consumed);
+    expect(biz.inv.get('milk')!.qty).toBe(50);   // retail no longer consumes inputs
+    expect(biz.inv.get('beans')!.qty).toBe(50);
+    expect(biz.coffeeSold + biz.inv.get('coffee')!.qty).toBe(50);
     expect(p.cash).toBe(cashBefore + biz.coffeeSold * biz.price);
     expect(biz.revenue).toBe(biz.coffeeSold * biz.price);
   });
@@ -72,14 +75,12 @@ describe('coffee shop', () => {
   it('sells faster at higher levels', async () => {
     const pid = await newPlayer(world, 'barista2');
     const biz = await world.chooseBusiness(pid, 'coffee_shop');
-    biz.inv.get('milk')!.qty = 1000;
-    biz.inv.get('beans')!.qty = 1000;
+    biz.inv.get('coffee')!.qty = 1000;
     world.simulate(biz, 600, true);
     const soldL1 = biz.coffeeSold;
     biz.level = 3;
     biz.coffeeSold = 0;
-    biz.inv.get('milk')!.qty = 1000;
-    biz.inv.get('beans')!.qty = 1000;
+    biz.inv.get('coffee')!.qty = 1000;
     world.simulate(biz, 600, true);
     expect(biz.coffeeSold).toBeGreaterThan(soldL1 * 2);
     expect(SHOP_LEVELS[3].customersPerSec).toBeGreaterThan(SHOP_LEVELS[1].customersPerSec);

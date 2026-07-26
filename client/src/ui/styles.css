@@ -928,7 +928,59 @@ html.touch .controls-hint { display: none; }
 .supply-bar > div { height: 100%; background: linear-gradient(90deg,#4ade80,#16a34a); }
 .supply-row .sr-pct { font-weight: 800; width: 44px; text-align: right; font-size: 13px; }
 
-@media (max-width: 640px) {
+/* ============================================================
+   V2.8 Phase 2 — manual production planner & queue.
+   ============================================================ */
+/* Queue */
+.pq { margin-bottom: 12px; }
+.pq.empty { padding: 10px 12px; border-radius: 10px; background: #f1f5f9; color: #64748b; font-size: 13px; text-align: center; }
+.pq-now { border: 1.5px solid #c7dbff; border-radius: 12px; padding: 10px 12px; background: #f8fbff; margin-bottom: 8px; }
+.pq-now.blocked { border-color: #fca5a5; background: #fef2f2; }
+.pq-now-h { font-size: 11px; font-weight: 800; letter-spacing: 0.6px; color: #2563eb; text-transform: uppercase; }
+.pq-now.blocked .pq-now-h { color: #dc2626; }
+.pq-job { font-size: 15px; margin: 3px 0; }
+.pq-bar { height: 10px; border-radius: 6px; background: #dbeafe; overflow: hidden; margin: 6px 0 4px; }
+.pq-bar > div { height: 100%; background: linear-gradient(90deg,#60a5fa,#2563eb); transition: width 0.6s linear; }
+.pq-sub { font-size: 12px; color: #64748b; }
+.pq-next-h { font-size: 11px; font-weight: 800; letter-spacing: 0.5px; color: #94a3b8; text-transform: uppercase; margin: 6px 0 4px; }
+.pq-row { display: flex; align-items: center; gap: 10px; padding: 6px 10px; border-radius: 8px; background: #f8fafc; margin-bottom: 4px; font-size: 13px; }
+.pq-row .pq-i { font-weight: 800; color: #94a3b8; width: 18px; }
+.pq-note { font-size: 11px; color: #94a3b8; margin-top: 8px; line-height: 1.4; }
+/* Planner */
+.pp-tabs { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 10px; }
+.pp-tab { border: 1.5px solid #dbe3ee; border-radius: 999px; background: #fff; padding: 6px 12px; font-weight: 700; font-size: 13px; cursor: pointer; }
+.pp-tab.active { border-color: #2563eb; background: #eff5ff; color: #1d4ed8; }
+.pp-recipe { margin-bottom: 10px; }
+.pp-qhead { display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 6px; }
+.pp-qhead span:first-child { font-weight: 800; }
+.pp-max-lbl { font-size: 11px; font-weight: 800; letter-spacing: 0.4px; color: #16a34a; }
+.pp-qrow { display: flex; align-items: center; gap: 6px; margin-bottom: 10px; }
+.pp-qrow input { flex: 1; min-width: 60px; text-align: center; font-weight: 800; font-size: 16px; padding: 8px; border: 1.5px solid #dbe3ee; border-radius: 10px; }
+.pp-qrow .btn.small { min-width: 42px; }
+.pp-reqs { border: 1px solid #eef2f7; border-radius: 10px; overflow: hidden; margin-bottom: 10px; }
+.pp-req { display: grid; grid-template-columns: 1fr auto auto; gap: 8px; align-items: center; padding: 8px 10px; border-bottom: 1px solid #f1f5f9; font-size: 13px; }
+.pp-req:last-child { border-bottom: none; }
+.pp-req.short { background: #fef2f2; }
+.pp-req .pp-name { font-weight: 700; }
+.pp-req .pp-flow { font-variant-numeric: tabular-nums; color: #475569; }
+.pp-req .pp-need { font-size: 11px; color: #64748b; text-align: right; }
+.pp-out { border-radius: 10px; background: #f8fafc; padding: 8px 12px; margin-bottom: 10px; }
+.pp-missing { border: 1.5px solid #fca5a5; border-radius: 10px; padding: 10px; background: #fef2f2; margin-bottom: 10px; }
+.pp-missing-h { font-size: 11px; font-weight: 800; letter-spacing: 0.5px; color: #dc2626; text-transform: uppercase; margin-bottom: 6px; }
+.pp-mrow { display: flex; justify-content: space-between; font-size: 13px; padding: 3px 0; }
+.pp-missing .btn { margin-top: 8px; width: 100%; }
+.pp-start { width: 100%; margin-top: 4px; }
+/* Admin production */
+.admin-prod-row { border: 1px solid #e2e8f0; border-radius: 10px; padding: 8px 10px; margin-bottom: 6px; }
+.admin-prod-row .apr-main { font-size: 13px; }
+.admin-prod-row .apr-sub { font-size: 12px; color: #64748b; margin: 2px 0 6px; }
+.admin-prod-row .apr-acts { display: flex; gap: 6px; }
+.admin-prod-row .apr-acts .btn { flex: 1; }
+
+@media (max-width: 640px), (max-height: 500px) {
   .prod-card .btn.small, .license-card .offer-actions .btn { min-height: 44px; }
   .road-row { min-height: 34px; }
+  .pp-qrow .btn.small, .pp-qrow input, .pp-start, .pp-tab { min-height: 44px; }
+  .pp-req { grid-template-columns: 1fr auto; }
+  .pp-req .pp-need { grid-column: 1 / -1; text-align: left; }
 }

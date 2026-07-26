@@ -19,6 +19,7 @@ import {
   type RivalAlert, type CityNewsItem, type UrgentOrderPub,
   MARKET_MIN_PRICE, MARKET_MAX_PRICE, MARKET_MAX_QTY,
   MAX_BUSINESS_LEVEL, levelReward, businessTier, slotsForLevel,
+  productionDurationSecs,
   type BizPriv, type RecipePub, type OwnedLicensePub, type AvailableLicensePub, type SupplyEconomy,
 } from '@district/shared';
 import { IS_TOUCH } from '../touch.js';
@@ -196,6 +197,9 @@ export class UI {
     });
     client.on('supply_economy', () => {
       if (this.panelKind === 'admin' && this.adminTab === 'supply') { this.lastBodyHTML = ''; this.renderPanel(); }
+    });
+    client.on('admin_production', () => {
+      if (this.panelKind === 'admin' && this.adminTab === 'production') { this.lastBodyHTML = ''; this.renderPanel(); }
     });
     client.on('level_up', (level: number) => {
       sfx.levelUp();
@@ -560,6 +564,8 @@ export class UI {
     if (this.urgentTimer) clearInterval(this.urgentTimer);
     this.urgentTimer = setInterval(() => {
       if (this.hud.classList.contains('visible')) this.renderUrgentBanner();
+      // V2.8 Phase 2: keep the production progress bar/countdown live.
+      if (this.panelKind === 'business' && this.panelTab === 'produce') { this.lastBodyHTML = ''; this.renderPanel(); }
     }, 1000);
   }
 
@@ -1101,6 +1107,8 @@ export class UI {
       { id: 'overview', label: t('tab.overview') },
       { id: 'level', label: t('tab.level') },
       { id: 'products', label: t('tab.products') },
+      // V2.8 Phase 2: manual production line (producer businesses only).
+      ...(biz.productionLine ? [{ id: 'produce', label: t('tab.produce') }] : []),
       { id: 'inventory', label: t('tab.inventory') },
       isFarm
         ? { id: 'production', label: t('tab.production') }
@@ -1269,7 +1277,150 @@ export class UI {
       this.renderBizLevel(body, biz);
     } else if (tab === 'products') {
       this.renderBizProducts(body, biz);
+    } else if (tab === 'produce' && biz.productionLine) {
+      this.renderBizProduction(body, biz);
     }
+  }
+
+  // ---- V2.8 Phase 2: manual production planner + queue ----
+  // Which product's planner is open, and the desired output quantity in it.
+  private prodSel: ProductId | null = null;
+  private prodQty = 0;
+
+  private fmtDuration(secs: number): string {
+    if (secs <= 0) return '0s';
+    const m = Math.floor(secs / 60);
+    const s = Math.round(secs % 60);
+    return m > 0 ? `${m}m ${s.toString().padStart(2, '0')}s` : `${s}s`;
+  }
+
+  private renderBizProduction(body: HTMLElement, biz: import('@district/shared').BizPriv): void {
+    const line = biz.productionLine!;
+    // Keep the selected planner valid; default to the first producible product.
+    const producible = line.producible;
+    if (this.prodSel && !producible.some((p) => p.product === this.prodSel)) this.prodSel = null;
+    if (!this.prodSel && producible.length) { this.prodSel = producible[0].product; this.prodQty = 0; }
+
+    const now = Date.now();
+    const queueHtml = this.productionQueueHtml(line, now);
+
+    if (!producible.length) {
+      this.setBody(body, `${queueHtml}<p class="hint">${t('prod.none_active')}</p>`);
+      return;
+    }
+
+    const sel = producible.find((p) => p.product === this.prodSel)!;
+    const outQty = sel.recipe.outputQty;
+    // Normalise the working quantity to a whole number of batches (>=1 batch).
+    if (!(this.prodQty > 0)) this.prodQty = Math.min(sel.maxOutput || outQty, Math.max(outQty, sel.batchSize));
+    let qty = Math.max(outQty, Math.floor(this.prodQty / outQty) * outQty);
+
+    const per = (p: ProductId) => sel.recipe.inputs.find((i) => i.product === p)!;
+    const batches = Math.floor(qty / outQty);
+    const reqRows = sel.recipe.inputs.map((inp) => {
+      const need = inp.qty * batches;
+      const have = sel.onHand.find((o) => o.product === inp.product)?.qty ?? 0;
+      const short = have < need;
+      return `<div class="pp-req ${short ? 'short' : ''}">
+        <span class="pp-name">${PRODUCTS[inp.product].emoji} ${pName(inp.product)}</span>
+        <span class="pp-flow">${have} → <b>${have - need}</b></span>
+        <span class="pp-need">${t('prod.required', { n: need })}${short ? ` · <span class="neg">${t('prod.missing', { n: need - have })}</span>` : ''}</span>
+      </div>`;
+    }).join('');
+
+    const canProduce = sel.recipe.inputs.every((inp) => (sel.onHand.find((o) => o.product === inp.product)?.qty ?? 0) >= per(inp.product).qty * batches) && batches >= 1;
+    const queueFull = line.jobCount >= line.queueLimit;
+    const est = productionDurationSecs(sel.product, qty, biz.progression.bizLevel);
+
+    const tabsHtml = producible.map((p) =>
+      `<button class="pp-tab ${p.product === sel.product ? 'active' : ''}" data-psel="${p.product}">${PRODUCTS[p.product].emoji} ${pName(p.product)}</button>`
+    ).join('');
+
+    const missingList = !canProduce
+      ? `<div class="pp-missing"><div class="pp-missing-h">${t('prod.missing_title')}</div>${sel.recipe.inputs.filter((inp) => (sel.onHand.find((o) => o.product === inp.product)?.qty ?? 0) < per(inp.product).qty * batches).map((inp) => {
+          const have = sel.onHand.find((o) => o.product === inp.product)?.qty ?? 0;
+          const need = per(inp.product).qty * batches;
+          return `<div class="pp-mrow"><span>${PRODUCTS[inp.product].emoji} ${pName(inp.product)}</span><span>${t('prod.have_need', { have, need })}</span></div>`;
+        }).join('')}<button class="btn small ghost" id="pp-find">${t('prod.find_suppliers')}</button></div>`
+      : '';
+
+    this.setBody(body, `
+      ${queueHtml}
+      <div class="pp">
+        <div class="pp-tabs">${tabsHtml}</div>
+        <div class="pp-recipe">${this.recipePreview(sel.recipe, 'produce')}</div>
+        <div class="pp-qhead">
+          <span>${t('prod.quantity')}</span>
+          <span class="pp-max-lbl">${t('prod.max_available', { n: sel.maxOutput })}</span>
+        </div>
+        <div class="pp-qrow">
+          <button class="btn small ghost" data-qadd="${-10 * outQty}">-10</button>
+          <button class="btn small ghost" data-qadd="${-outQty}">-1</button>
+          <input id="pp-qty" type="number" min="${outQty}" step="${outQty}" value="${qty}" />
+          <button class="btn small ghost" data-qadd="${outQty}">+1</button>
+          <button class="btn small ghost" data-qadd="${10 * outQty}">+10</button>
+          <button class="btn small primary" id="pp-max" ${sel.maxOutput < outQty ? 'disabled' : ''}>${t('prod.max')}</button>
+        </div>
+        <div class="pp-reqs">${reqRows}</div>
+        <div class="pp-out">
+          <div class="orv-kv"><span>${t('prod.output')}</span><span><b>${qty} ${pName(sel.product)}</b></span></div>
+          <div class="orv-kv"><span>${t('prod.est_time')}</span><span>${this.fmtDuration(est)}</span></div>
+          <div class="orv-kv"><span>${t('prod.queue_pos')}</span><span>${queueFull ? t('prod.queue_full', { n: line.queueLimit }) : `${line.jobCount + 1} / ${line.queueLimit}`}</span></div>
+        </div>
+        ${missingList}
+        <button class="btn success pp-start" id="pp-start" ${canProduce && !queueFull ? '' : 'disabled'}>${t('prod.start')}</button>
+        <div class="hint">${t('prod.mfg_hint', { mult: line.speedMult })}</div>
+      </div>`, (b) => {
+      b.querySelectorAll('[data-psel]').forEach((el) => el.addEventListener('click', () => {
+        sfx.click(); this.prodSel = (el as HTMLElement).dataset.psel as ProductId; this.prodQty = 0; this.lastBodyHTML = ''; this.renderPanel();
+      }));
+      const applyQty = (v: number) => { this.prodQty = Math.max(outQty, v); this.lastBodyHTML = ''; this.renderPanel(); };
+      b.querySelectorAll('[data-qadd]').forEach((el) => el.addEventListener('click', () => {
+        sfx.click(); applyQty(qty + parseInt((el as HTMLElement).dataset.qadd!, 10));
+      }));
+      b.querySelector('#pp-qty')!.addEventListener('change', (e) => {
+        applyQty(parseInt((e.target as HTMLInputElement).value, 10) || outQty);
+      });
+      b.querySelector('#pp-max')?.addEventListener('click', () => { sfx.click(); applyQty(sel.maxOutput); });
+      b.querySelector('#pp-find')?.addEventListener('click', () => { sfx.click(); this.openPanel('market'); });
+      b.querySelector('#pp-start')?.addEventListener('click', () => {
+        sfx.click();
+        client.send({ t: 'start_production', bizId: biz.id, product: sel.product, qty });
+        this.prodQty = 0;
+      });
+    });
+  }
+
+  private productionQueueHtml(line: import('@district/shared').ProductionLinePub, now: number): string {
+    if (!line.jobs.length) return `<div class="pq empty">${t('prod.queue_empty')}</div>`;
+    const head = line.jobs[0];
+    const rest = line.jobs.slice(1);
+    let nowHtml = '';
+    if (head.status === 'waiting_storage') {
+      nowHtml = `<div class="pq-now blocked">
+        <div class="pq-now-h">⚠ ${t('prod.blocked_title')}</div>
+        <div class="pq-job">${PRODUCTS[head.product].emoji} <b>${head.outputQty} ${pName(head.product)}</b></div>
+        <div class="pq-sub">${t('prod.blocked_sub')}</div>
+      </div>`;
+    } else if (head.status === 'producing' && head.startedAt != null && head.completesAt != null) {
+      const total = Math.max(1, head.completesAt - head.startedAt);
+      const done = Math.min(total, Math.max(0, now - head.startedAt));
+      const pct = Math.min(100, Math.round((done / total) * 100));
+      const remain = Math.max(0, Math.round((head.completesAt - now) / 1000));
+      nowHtml = `<div class="pq-now">
+        <div class="pq-now-h">${t('prod.now_producing')}</div>
+        <div class="pq-job">${PRODUCTS[head.product].emoji} <b>${head.outputQty} ${pName(head.product)}</b></div>
+        <div class="pq-bar"><div style="width:${pct}%"></div></div>
+        <div class="pq-sub">${this.fmtDuration(remain)} ${t('prod.remaining')}</div>
+      </div>`;
+    } else {
+      nowHtml = `<div class="pq-now"><div class="pq-job">${PRODUCTS[head.product].emoji} <b>${head.outputQty} ${pName(head.product)}</b></div></div>`;
+    }
+    const restHtml = rest.length
+      ? `<div class="pq-next-h">${t('prod.up_next')}</div>${rest.map((j, i) =>
+          `<div class="pq-row"><span class="pq-i">${i + 1}</span><span>${PRODUCTS[j.product].emoji} ${j.outputQty} ${pName(j.product)}</span></div>`).join('')}`
+      : '';
+    return `<div class="pq">${nowHtml}${restHtml}<div class="pq-note">${t('prod.committed_note')}</div></div>`;
   }
 
   // ---- V2.8 Phase 1: Business Level & progression roadmap ----
@@ -2551,6 +2702,7 @@ export class UI {
       { id: 'players', label: t('admin.tab.players') },
       { id: 'wholesale', label: t('admin.tab.wholesale') },
       { id: 'supply', label: t('admin.tab.supply') },
+      { id: 'production', label: t('admin.tab.production') },
       { id: 'orders', label: t('admin.urgent.title') },
       { id: 'audit', label: t('admin.tab.audit') },
     ]);
@@ -2559,8 +2711,43 @@ export class UI {
     else if (tab === 'players') this.renderAdminPlayers(body);
     else if (tab === 'wholesale') this.renderAdminWholesale(body);
     else if (tab === 'supply') this.renderAdminSupply(body);
+    else if (tab === 'production') this.renderAdminProduction(body);
     else if (tab === 'orders') this.renderAdminUrgent(body);
     else this.renderAdminAudit(body);
+  }
+
+  /** Admin: inspect live production jobs; recovery tools (complete / remove). */
+  private renderAdminProduction(body: HTMLElement): void {
+    const jobs = client.adminProduction;
+    if (!jobs.length) { client.send({ t: 'admin_production' }); }
+    const now = Date.now();
+    const rows = jobs.map((j) => {
+      const remain = j.completesAt != null ? Math.max(0, Math.round((j.completesAt - now) / 1000)) : null;
+      const statusCls = j.status === 'waiting_storage' ? 'neg' : j.status === 'producing' ? 'pos' : '';
+      return `<div class="admin-prod-row">
+        <div class="apr-main">
+          <b>#${j.id}</b> ${PRODUCTS[j.product].emoji} ${j.outputQty} ${pName(j.product)}
+          <span class="cap">· ${j.ownerName} · biz ${j.businessId}</span>
+        </div>
+        <div class="apr-sub">
+          <span class="${statusCls}">${t('prod.status.' + j.status)}</span>
+          ${remain != null && j.status === 'producing' ? ` · ${this.fmtDuration(remain)}` : ''}
+        </div>
+        <div class="apr-acts">
+          <button class="btn small primary" data-apc="${j.id}">${t('admin.prod.complete')}</button>
+          <button class="btn small ghost" data-apr="${j.id}">${t('admin.prod.remove')}</button>
+        </div>
+      </div>`;
+    }).join('') || `<p class="hint">${t('admin.prod.none')}</p>`;
+    this.setBody(body, `${rows}<button class="btn small ghost" id="ap-refresh" style="margin-top:10px">${t('admin.refresh')}</button>`, (b) => {
+      b.querySelector('#ap-refresh')!.addEventListener('click', () => { sfx.click(); client.send({ t: 'admin_production' }); });
+      b.querySelectorAll('[data-apc]').forEach((el) => el.addEventListener('click', () => {
+        sfx.click(); client.send({ t: 'admin_production_complete', jobId: parseInt((el as HTMLElement).dataset.apc!, 10), reason: 'admin recovery' });
+      }));
+      b.querySelectorAll('[data-apr]').forEach((el) => el.addEventListener('click', () => {
+        sfx.click(); client.send({ t: 'admin_production_remove', jobId: parseInt((el as HTMLElement).dataset.apr!, 10), reason: 'admin recovery' });
+      }));
+    });
   }
 
   /** Admin: aggregate supply-economy health (Player-Sourced Input Ratio). */

@@ -38,19 +38,22 @@ describe('farm production choice', () => {
 });
 
 describe('bakery', () => {
-  it('bakes bread from wheat and sells it; stops without wheat', async () => {
+  // V2.8 Phase 2: bread is manufactured via the manual production line; retail
+  // now drains FINISHED bread stock (wheat is no longer auto-baked in the tick).
+  it('sells bread from finished stock; stops without it', async () => {
     const pid = await newPlayer(world, 'baker');
     const biz = await world.chooseBusiness(pid, 'bakery');
     const p = world.players.get(pid)!;
     const cash0 = p.cash;
+    biz.inv.get('wheat')!.qty = 60; // wheat alone no longer produces sales
     world.simulate(biz, 300, true);
-    expect(biz.coffeeSold).toBe(0); // no wheat -> nothing sold
+    expect(biz.coffeeSold).toBe(0);
     expect(biz.status).toBe('out_of_stock');
-    biz.inv.get('wheat')!.qty = 60;
+    biz.inv.get('bread')!.qty = 60;
     world.simulate(biz, 300, true);
     expect(biz.coffeeSold).toBeGreaterThan(0);
-    const consumed = 60 - biz.inv.get('wheat')!.qty;
-    expect(biz.coffeeSold + biz.inv.get('bread')!.qty).toBe(consumed);
+    expect(biz.inv.get('wheat')!.qty).toBe(60); // retail doesn't consume wheat
+    expect(biz.coffeeSold + biz.inv.get('bread')!.qty).toBe(60);
     expect(p.cash).toBe(cash0 + biz.coffeeSold * biz.price);
   });
 });
@@ -101,7 +104,10 @@ describe('wheat & bread marketplace', () => {
     await forceDeliveries(world);
     expect(bakery.inv.get('wheat')!.qty).toBeGreaterThan(0); // delivered (some may already be baked)
 
-    // B bakes and earns from customers
+    // B bakes a batch (manual production) then earns from customers
+    await world.startProduction(bId, bakery.id, 'bread', 30); // 30 wheat -> 30 bread (fits cap 40)
+    await world.devCommand(bId, 'finish_production', 0, bakery.id);
+    expect(bakery.inv.get('bread')!.qty).toBe(30);
     world.simulate(bakery, 400, true);
     expect(bakery.coffeeSold).toBeGreaterThan(0);
     const bCash = world.players.get(bId)!.cash;

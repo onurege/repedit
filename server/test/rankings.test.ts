@@ -28,9 +28,13 @@ function cid(w: World, pid: number): number {
   return w.companyByOwner(pid)!.id;
 }
 
-/** Run a bakery so it bakes wheat into bread and sells it to NPC customers. */
-function sellBread(w: World, biz: any, wheat: number, seconds: number): number {
-  biz.inv.get('wheat')!.qty = wheat;
+/**
+ * Stock a bakery with finished bread and let NPC customers buy it. V2.8 Phase 2:
+ * bread is manufactured on the production line, so retail draws from finished
+ * stock (the `stock` amount) rather than auto-baking wheat.
+ */
+function sellBread(w: World, biz: any, stock: number, seconds: number): number {
+  biz.inv.get('bread')!.qty = stock;
   const before = biz.coffeeSold;
   w.simulate(biz, seconds, true);
   return biz.coffeeSold - before;

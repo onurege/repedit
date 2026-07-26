@@ -10,6 +10,7 @@
 // The server is authoritative; clients treat everything here as presentation.
 // ============================================================
 import type { ProductId, BusinessType } from './defs.js';
+import { PRODUCTION_TIMING } from './defs.js';
 
 // ---------- Recipe engine (single canonical source) ----------
 export interface RecipeInput { product: ProductId; qty: number; }
@@ -171,4 +172,82 @@ export function supplyHealth(playerRatio: number): SupplyHealth {
   if (playerRatio >= SUPPLY_HEALTHY_MIN) return 'healthy';
   if (playerRatio >= SUPPLY_CENTRAL_DEPENDENT_MIN) return 'central_dependent';
   return 'critical';
+}
+
+// ============================================================
+// V2.8 Phase 2 — manual production planning (single canonical calculation).
+//
+// The client uses these ONLY for previews; the server recomputes everything
+// authoritatively at start_production. Recipes may output more than one unit
+// and take multiple inputs — never assume outputQty === 1.
+// ============================================================
+
+export interface ProductionPlan {
+  batches: number;                 // whole recipe executions
+  output: number;                  // finished units = batches * recipe.outputQty
+  inputs: RecipeInput[];           // total ingredient commitment for this plan
+}
+
+/**
+ * Plan production of `desiredOutput` finished units from `recipe`. Only whole
+ * recipe batches run — a request that isn't a multiple of outputQty is
+ * NORMALISED DOWN to the largest valid output (never fractional, never up).
+ * Returns null if not even one batch fits in the request.
+ */
+export function planProduction(recipe: Recipe, desiredOutput: number): ProductionPlan | null {
+  if (!Number.isFinite(desiredOutput) || desiredOutput <= 0) return null;
+  const outQty = recipe.outputQty > 0 ? recipe.outputQty : 1;
+  const batches = Math.floor(desiredOutput / outQty);
+  if (batches < 1) return null;
+  return {
+    batches,
+    output: batches * outQty,
+    inputs: recipe.inputs.map((i) => ({ product: i.product, qty: i.qty * batches })),
+  };
+}
+
+/** Max whole batches producible from an on-hand ingredient snapshot. */
+export function maxBatchesForInputs(recipe: Recipe, have: Map<ProductId, number> | Record<string, number>): number {
+  const get = (p: ProductId): number =>
+    have instanceof Map ? (have.get(p) ?? 0) : ((have as Record<string, number>)[p] ?? 0);
+  let max = Infinity;
+  for (const inp of recipe.inputs) {
+    if (inp.qty <= 0) continue;
+    max = Math.min(max, Math.floor(get(inp.product) / inp.qty));
+  }
+  return Number.isFinite(max) ? Math.max(0, max) : 0;
+}
+
+/** Max finished output producible from on-hand ingredients (MAX button truth). */
+export function maxOutputForInputs(recipe: Recipe, have: Map<ProductId, number> | Record<string, number>): number {
+  const outQty = recipe.outputQty > 0 ? recipe.outputQty : 1;
+  return maxBatchesForInputs(recipe, have) * outQty;
+}
+
+// A level-50 business produces up to 2x faster than a level-1 one — a material
+// edge, never magical, and it never lets high level dodge the planning decision.
+export function productionSpeedMult(level: number): number {
+  const clamped = Math.max(1, Math.min(MAX_BUSINESS_LEVEL, level));
+  return 1 - Math.min(0.5, (clamped - 1) * (0.5 / (MAX_BUSINESS_LEVEL - 1)));
+}
+
+/** Wall-clock seconds to produce `output` units of `product` at `bizLevel`. */
+export function productionDurationSecs(product: ProductId, output: number, bizLevel: number): number {
+  const t = PRODUCTION_TIMING[product];
+  if (!t || output <= 0) return 0;
+  const batches = Math.ceil(output / t.batchSize);
+  const raw = batches * t.batchSecs;
+  return Math.max(1, Math.round(raw * productionSpeedMult(bizLevel)));
+}
+
+export function isProducibleProduct(product: ProductId): boolean {
+  return !!PRODUCTION_TIMING[product] && !!recipeFor(product);
+}
+
+// Per-business production line depth (currently-producing job + queued). Small
+// early so new businesses plan modestly; more planning capacity late-game. This
+// is an ADDITIVE Phase-2 progression reward on top of Phase-1 levels/slots.
+export function productionQueueLimit(level: number): number {
+  const clamped = Math.max(1, Math.min(MAX_BUSINESS_LEVEL, level));
+  return 2 + Math.floor((clamped - 1) / 10) * 2; // L1–10:2, 11–20:4, 21–30:6, 31–40:8, 41–50:10
 }

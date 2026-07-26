@@ -245,6 +245,12 @@ export type ClientMsg =
   | { t: 'admin_grant_license'; bizId: number; product: ProductId; reason?: string }
   | { t: 'admin_revoke_license'; bizId: number; product: ProductId; reason?: string }
   | { t: 'get_supply_economy' }
+  // ---- V2.8 Phase 2: manual production ----
+  | { t: 'start_production'; bizId: number; product: ProductId; qty: number }
+  | { t: 'get_production'; bizId?: number }
+  | { t: 'admin_production' }
+  | { t: 'admin_production_complete'; jobId: number; reason?: string }
+  | { t: 'admin_production_remove'; jobId: number; reason?: string }
   | { t: 'ping' };
 
 // ---------- server -> client ----------
@@ -339,6 +345,41 @@ export interface BusinessProgression {
   nextRewardLevel: number | null;
   owned: OwnedLicensePub[];
   available: AvailableLicensePub[];
+}
+
+// ---------- V2.8 Phase 2: manual production ----------
+export type ProductionStatus = 'queued' | 'producing' | 'completed' | 'waiting_storage';
+
+/** One production job on a business's line (owner-private). */
+export interface ProductionJobPub {
+  id: number;
+  product: ProductId;
+  outputQty: number;                 // finished units this job yields
+  status: ProductionStatus;
+  startedAt: number | null;          // epoch ms (null while queued)
+  completesAt: number | null;        // epoch ms (null while queued)
+  recipe: RecipePub;                 // snapshot taken at start (survives rebalancing)
+  inputs: { product: ProductId; qty: number }[]; // ingredients already committed
+}
+
+/** A product this business can currently plan/produce, with a live input snapshot. */
+export interface ProducibleProductPub {
+  product: ProductId;
+  recipe: RecipePub;
+  onHand: { product: ProductId; qty: number }[]; // uncommitted stock of each input
+  maxOutput: number;                 // ingredient-limited max output (server truth)
+  batchSize: number;                 // output units per timing batch
+  batchSecs: number;                 // seconds per timing batch (before level speed)
+}
+
+/** Owner-private production state for one business. */
+export interface ProductionLinePub {
+  queueLimit: number;                // producing + queued cap for this level
+  jobCount: number;                  // producing + queued jobs currently on the line
+  speedMult: number;                 // duration multiplier from business level (<=1)
+  jobs: ProductionJobPub[];          // producing first, then queued in order
+  producible: ProducibleProductPub[];// active PRODUCE-licensed recipes
+  serverTime: number;                // authoritative clock for progress bars
 }
 
 // A player owns exactly one company; a company owns one or more businesses.
@@ -566,6 +607,7 @@ export interface BizPriv extends BizPub {
   customers: number;
   reputation: number;
   progression: BusinessProgression; // V2.8 Phase 1
+  productionLine: ProductionLinePub | null; // V2.8 Phase 2 (null for non-producers)
 }
 
 export interface OrderPub {
@@ -742,7 +784,23 @@ export type ServerMsg =
   | { t: 'city_news_item'; item: CityNewsItem }          // realtime append
   // ---- V2.8 Phase 1 ----
   | { t: 'supply_economy'; economy: SupplyEconomy }      // admin diagnostic
+  // ---- V2.8 Phase 2 ----
+  | { t: 'production_complete'; bizId: number; product: ProductId; qty: number; blocked: boolean }
+  | { t: 'admin_production'; jobs: AdminProductionJob[] }
   | { t: 'pong' };
+
+// V2.8 Phase 2 — admin view of a single job (operator inspection/recovery).
+export interface AdminProductionJob {
+  id: number;
+  businessId: number;
+  ownerName: string;
+  product: ProductId;
+  outputQty: number;
+  status: ProductionStatus;
+  startedAt: number | null;
+  completesAt: number | null;
+  serverTime: number;
+}
 
 // V2.8 — aggregate supply-economy health for the Admin Console (operator-only).
 export interface SupplyEconomy {

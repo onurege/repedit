@@ -28,6 +28,7 @@ export const RETAIL_BASE: Partial<Record<ProductId, number>> = {
   coffee: 30,
   bread: 20,
   milk: 18,
+  latte: 46, // V2.8 Phase 2: NPC retail reference for the license-gated latte
 };
 
 export type BusinessType = 'farm' | 'coffee_shop' | 'bakery' | 'mini_market';
@@ -141,6 +142,19 @@ export const BIZ_XP = {
   perContractUnit: 2,   // fulfilled supply-contract delivery
   perUrgentUnit: 2,     // urgent city-order contribution
   perPlayerSaleUnit: 1, // player marketplace/offer sale (cross-owner only)
+};
+
+// ---- V2.8 Phase 2: manual production timing ----
+// Batch-oriented, wall-clock durations. Small batch = quick decision; a
+// meaningful batch = a real wait/plan; a large batch = a commitment — WITHOUT
+// naive per-unit scaling (1 unit and 100 units do not differ by 100x). Tuned
+// for the accelerated tycoon pace: a meaningful batch stays under a few minutes
+// at level 1, and a level-50 business is up to 2x faster (see productionSpeedMult).
+export interface ProductionTiming { batchSize: number; batchSecs: number; }
+export const PRODUCTION_TIMING: Partial<Record<ProductId, ProductionTiming>> = {
+  bread: { batchSize: 25, batchSecs: 20 },   // 25 bread / 20s  -> 100 = 80s @ L1
+  coffee: { batchSize: 20, batchSecs: 25 },  // 20 coffee / 25s -> 100 = 125s @ L1
+  latte: { batchSize: 12, batchSecs: 30 },   // 12 latte / 30s  -> 96  = 240s @ L1
 };
 
 // ---- Reputation ----

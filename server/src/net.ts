@@ -175,6 +175,11 @@ export class Net {
     w.on('rival_alert', ({ playerId, alert }: { playerId: number; alert: any }) => {
       this.sendToPlayer(playerId, { t: 'rival_alert', alert });
     });
+    // V2.8 Phase 2: production completed (or storage-blocked) — non-blocking
+    // feedback to the owner; the fresh business state rides the push_state above.
+    w.on('production_complete', ({ ownerId, bizId, product, qty, blocked }: { ownerId: number; bizId: number; product: any; qty: number; blocked: boolean }) => {
+      this.sendToPlayer(ownerId, { t: 'production_complete', bizId, product, qty, blocked });
+    });
     // V2.7 Phase 2: admin realtime effects.
     w.on('push_state', ({ playerId }: { playerId: number }) => this.pushOwnState(playerId));
     w.on('admin_force_logout', ({ playerId, reason }: { playerId: number; reason: string | null }) => {
@@ -631,6 +636,32 @@ export class Net {
           this.send(conn.ws, { t: 'supply_economy', economy: await world.playerSourcedRatio() });
           break;
         }
+        // ---- V2.8 Phase 2: manual production ----
+        case 'start_production': {
+          const biz = await world.startProduction(pid, msg.bizId, msg.product, msg.qty);
+          this.send(conn.ws, { t: 'my_biz', biz: world.toBizPriv(biz) });
+          this.send(conn.ws, { t: 'toast', code: 'toast.production_started', params: { product: msg.product }, kind: 'success' });
+          break;
+        }
+        case 'get_production': {
+          const biz = msg.bizId != null ? world.businesses.get(msg.bizId) : world.bizByOwner(pid);
+          if (!biz || biz.ownerId !== pid) throw new GameError('err.unknown_business');
+          this.send(conn.ws, { t: 'my_biz', biz: world.toBizPriv(biz) });
+          break;
+        }
+        case 'admin_production':
+          this.send(conn.ws, { t: 'admin_production', jobs: await world.adminProductionJobs(pid) });
+          break;
+        case 'admin_production_complete':
+          await world.adminCompleteProduction(pid, msg.jobId, msg.reason);
+          this.send(conn.ws, { t: 'toast', code: 'toast.admin_done', kind: 'success' });
+          this.send(conn.ws, { t: 'admin_production', jobs: await world.adminProductionJobs(pid) });
+          break;
+        case 'admin_production_remove':
+          await world.adminRemoveProduction(pid, msg.jobId, msg.reason);
+          this.send(conn.ws, { t: 'toast', code: 'toast.admin_done', kind: 'success' });
+          this.send(conn.ws, { t: 'admin_production', jobs: await world.adminProductionJobs(pid) });
+          break;
         case 'dev': {
           if (!config.devTools) throw new GameError('err.dev_disabled');
           const result = await world.devCommand(pid, msg.cmd, msg.value, msg.bizId);

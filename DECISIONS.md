@@ -650,3 +650,74 @@ safely; a business at Business Level 1 behaves exactly as before.
 
 Not in Phase 1: manual production, production queue/timers/quantity selection,
 ingredient-consumption UI, large product catalog, new business types.
+
+## V2.8 Phase 2 — Manual Production, Batch Planning & Production Queue
+
+Production becomes an intentional decision. A producer business (coffee shop,
+bakery) plans a quantity of a licensed+active product; the server derives whole
+batches, commits ingredients, times the batch, and delivers finished goods
+safely. Additive on the Phase-1 foundation; the live economy stays intact.
+
+**One authoritative production path (§22).** The automatic tick brewing/baking of
+recipe goods (coffee, bread) is RETIRED in `simulate()`. Those goods are now made
+only via the manual production line — no double production. What stays automatic:
+raw farm output (milk/wheat have no recipe — primary gathering, not manufacturing)
+and NPC retail (sales still drain finished stock). Existing shops keep their
+inventory/cash/licenses; after deploy they simply queue production to make more.
+
+**Canonical calculation (shared/economy.ts).** `planProduction(recipe, desired)`
+scales by whole batches (multi-input, outputQty>1 supported; non-multiples
+normalise DOWN, never fractional/up). `maxOutputForInputs` is the MAX truth.
+Client uses these for previews ONLY; the server recomputes at start — a malicious
+client recipe/quantity is ignored.
+
+**Ingredient commitment = exactly-once (§6/§8).** Ingredients leave inventory the
+instant a job is accepted (queued), inside ONE transaction with the job insert.
+A per-business start lock + synchronous in-memory decrement means a double-click /
+duplicate / concurrent start can never consume ingredients or create a job twice
+(same pattern as offers/licenses). Committed ingredients are gone from inventory,
+so they can't be sold/contracted/offered or double-spent by a later queued job.
+
+**Production job model (§9).** Persistent `production_jobs` row carries a RECIPE
+SNAPSHOT + committed inputs, so a job always completes exactly as planned even
+after a rebalance. Statuses: queued → producing → completed, plus
+waiting_storage. Resolved by wall-clock timestamps (`resolveProduction`), so the
+line survives logout/refresh/restart and offline time; a queued backlog chains
+through elapsed time in order. No output lost or duplicated (DB status guard).
+
+**Timing (§10/§11/§49).** Batch-oriented, wall-clock, NOT naive per-unit:
+`ceil(output/batchSize)*batchSecs × speedMult(level)`.
+- Bread: 25/batch, 20s → 100 = 80s @ L1
+- Coffee: 20/batch, 25s → 100 = 125s @ L1
+- Latte: 12/batch, 30s → 96 = 240s @ L1
+Level speed: ×1.0 @ L1 → ×0.5 @ L50 (up to 2× faster — material, not magical).
+Chosen for the accelerated tycoon pace: a small batch is quick, a meaningful
+batch is a short plan, a large batch is a commitment. FLAG: durations are initial
+values; tune against live pacing.
+
+**Queue (§13/§14).** Per-business, sequential (no parallel lines). Bounded by an
+ADDITIVE Phase-2 progression reward `productionQueueLimit(level)`: L1–10:2,
+11–20:4, 21–30:6, 31–40:8, 41–50:10 (includes the producing job). Ingredients for
+every queued job commit at enqueue.
+
+**Storage at completion (§18/§19/§20).** V2.6.2 preserved. Output enters only if
+it fits capacity; otherwise the job holds its finished goods in WAITING_FOR_STORAGE
+(never destroyed/duplicated/overflowed) and completes exactly once when space
+frees. Legacy over-capacity businesses only ever block, never worsen. Inputs were
+already consumed at start, so completion never overflows via the ingredients.
+
+**XP (§34).** Awarded at COMPLETION by produced volume (`output × perUnitProduced`).
+Splitting into many tiny jobs yields identical XP to one big job (unit-tested) —
+no job-count farming. Retail/contract/urgent XP unchanged.
+
+**Latte outlet.** Latte gains its own finished-goods storage slot (coffee-shop
+finished-goods capacity) and a small premium NPC retail stream (fixed fair price,
+reusing the unused coffee-shop `prodAccum`) so the produce→sell→XP loop closes.
+No new schema, demand product, or player price control.
+
+**No cancel/refund (§21).** Committed = committed. Admin recovery only:
+inspect / force-complete (storage-safe) / remove (does NOT refund ingredients,
+never fabricates output) — all requireAdmin + audited.
+
+Not in Phase 2 (STOP): large catalog, new business types, cancellation/refunds,
+parallel lines, auto-buy/auto-refill automation, Phase 3.

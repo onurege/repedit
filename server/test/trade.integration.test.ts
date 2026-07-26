@@ -36,7 +36,10 @@ it('full Player A / Player B milk trade scenario', async () => {
   expect(shopBiz.inv.get('beans')!.qty).toBe(40);
   expect(shopBiz.inv.get('milk')!.qty).toBe(20);
 
-  // NPC customers buy coffee (simulated time).
+  // V2.8 Phase 2: brew a batch (manual production), then NPC customers buy it.
+  await world.startProduction(aId, shopBiz.id, 'coffee', 20); // 20 milk + 20 beans -> 20 coffee
+  await world.devCommand(aId, 'finish_production', 0, shopBiz.id);
+  expect(shopBiz.inv.get('coffee')!.qty).toBe(20);
   world.simulate(shopBiz, 240, true);
   expect(shopBiz.coffeeSold).toBeGreaterThan(0);
   const cashAfterSales = a.cash;
@@ -94,6 +97,9 @@ it('full Player A / Player B milk trade scenario', async () => {
   await world.buyNpc(aId, 'milk', 30);
   await forceDeliveries(world);
   expect(shopBiz.inv.get('milk')!.qty).toBe(30);
+  // Brew another batch so retail has finished coffee to sell (manual production).
+  await world.startProduction(aId, shopBiz.id, 'coffee', 15);
+  await world.devCommand(aId, 'finish_production', 0, shopBiz.id);
   const soldBefore = shopBiz.coffeeSold;
   world.simulate(shopBiz, 120, true);
   expect(shopBiz.coffeeSold).toBeGreaterThan(soldBefore);
