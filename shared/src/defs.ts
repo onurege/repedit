@@ -203,13 +203,56 @@ export const REP_SALE_GOUGING = -0.002;     // per sale above 1.2x base
 export const REP_LOST_CUSTOMER = -0.005;    // out of stock when customer arrives
 export const REP_TRADE_FULFILLED = 0.05;    // farm fulfils a marketplace trade
 
-// V2.8.1: Customer Satisfaction is the retail face of reputation (driven by
-// fair-price sales, gouging and lost customers). It SCALES the Business XP a
-// retail sale grants: happy customers = more XP, unhappy = less. 1.0 at the
-// neutral start (rep 3), up to ~1.4 for delighted, down to ~0.6 for unhappy.
-export function satisfactionXpMult(reputation: number): number {
-  const r = Math.max(REP_MIN, Math.min(REP_MAX, reputation));
-  return 0.6 + ((r - REP_MIN) / (REP_MAX - REP_MIN)) * 0.8;
+// ---- V2.8.2: Customer Satisfaction ----
+// A BUSINESS-level (not player, not company) NPC service-quality metric, 0–100,
+// SEPARATE from B2B reputation. New businesses start at 70. Driven only by real
+// committed NPC retail outcomes, eased smoothly toward per-outcome targets so it
+// evolves over many interactions and one customer can't swing it. Its only
+// gameplay effect is a bounded multiplier on Business XP from NPC sales.
+export const SATISFACTION_START = 70;
+export const SATISFACTION_MIN = 0;
+export const SATISFACTION_MAX = 100;
+export const SAT_TARGET_FAIR_SALE = 90;       // a served customer at a fair price
+export const SAT_TARGET_EXPENSIVE_SALE = 70;  // served, but above the fair price
+export const SAT_TARGET_STOCKOUT = 35;        // demand arrived, nothing in stock
+
+/** Smoothing weight for one retail tick — grows with volume but is capped so a
+ *  single tick moves the score gradually, never wildly. */
+export function satisfactionAlpha(customers: number): number {
+  return Math.min(0.25, 0.02 * Math.max(0, customers));
+}
+/** Ease the score toward `target` given how many customers this tick, clamped. */
+export function smoothSatisfaction(current: number, target: number, customers: number): number {
+  const next = current + satisfactionAlpha(customers) * (target - current);
+  return Math.max(SATISFACTION_MIN, Math.min(SATISFACTION_MAX, next));
+}
+/** Bounded Business-XP multiplier for NPC sales, by satisfaction band. */
+export function satisfactionXpBand(sat: number): number {
+  if (sat >= 90) return 1.20;
+  if (sat >= 75) return 1.10;
+  if (sat >= 60) return 1.00;
+  if (sat >= 40) return 0.90;
+  return 0.75;
+}
+export type SatisfactionStatus = 'excellent' | 'good' | 'normal' | 'poor' | 'critical';
+export function satisfactionStatus(sat: number): SatisfactionStatus {
+  if (sat >= 90) return 'excellent';
+  if (sat >= 75) return 'good';
+  if (sat >= 60) return 'normal';
+  if (sat >= 40) return 'poor';
+  return 'critical';
+}
+
+// ---- V2.8.2: Internal company transfer logistics ----
+// A transfer between two businesses of the same company is an internal inventory
+// move + a small LOGISTICS FEE paid by the company to the city — never a fake
+// sale. The fee is a fraction of a single authoritative reference value.
+export const INTERNAL_TRANSFER_FEE_RATE = 0.10;
+/** The ONE reference value for internal-transfer logistics: the NORMAL Central
+ *  Wholesale base price for raw goods (never emergency/scarcity/event-adjusted),
+ *  else the product's canonical retail/base reference for finished goods. */
+export function getInternalTransferReferencePrice(product: ProductId): number {
+  return NPC_WHOLESALE_PRICES[product] ?? RETAIL_BASE[product] ?? PRODUCTS[product].basePrice;
 }
 
 // ---- Offline / catch-up ----

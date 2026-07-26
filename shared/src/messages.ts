@@ -248,7 +248,9 @@ export type ClientMsg =
   // ---- V2.8 Phase 2: manual production ----
   | { t: 'start_production'; bizId: number; product: ProductId; qty: number; repeat?: number }
   | { t: 'cancel_production'; bizId: number; jobId: number }
+  | { t: 'stop_production'; bizId: number }
   | { t: 'transfer_internal'; fromBizId: number; toBizId: number; product: ProductId; qty: number }
+  | { t: 'admin_set_satisfaction'; bizId: number; value: number; reason?: string }
   | { t: 'get_production'; bizId?: number }
   | { t: 'admin_production' }
   | { t: 'admin_production_complete'; jobId: number; reason?: string }
@@ -633,6 +635,10 @@ export interface BizPriv extends BizPub {
   reputation: number;
   progression: BusinessProgression; // V2.8 Phase 1
   productionLine: ProductionLinePub | null; // V2.8 Phase 2 (null for non-producers)
+  // V2.8.2 — Customer Satisfaction (null for a business with no NPC customers, e.g. farm).
+  satisfaction: number | null;
+  satisfactionStatus: string;       // 'excellent'|'good'|'normal'|'poor'|'critical'
+  satRecent: { sales: number; stockouts: number; gouge: number };
 }
 
 export interface OrderPub {

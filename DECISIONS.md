@@ -964,3 +964,59 @@ spec. Recorded as a known limitation, not silently dropped.
 Migration: NONE required — all V2.8.1 changes reuse existing schema
 (specialization/production_jobs/cost_basis/deliveries columns already exist).
 Internal transfer + queue cancel operate on existing tables.
+
+## V2.8.2 — Economic Clarity & Customer Experience
+
+A small follow-up closing the semantics V2.8.1 left open. Two goals: give
+internal transfers a real but balanced cost, and make Business XP + NPC customer
+satisfaction understandable, visible and strategic. No catalog/business-type
+changes, no economy redesign.
+
+**Internal transfer — final model.** A transfer between two businesses of the
+same company is an internal inventory move + a small **logistics fee paid by the
+company to the city** — never a fake inter-business sale. ONE reference function
+`getInternalTransferReferencePrice(product)` = the NORMAL Central Wholesale base
+price for raw (never emergency/scarcity/event), else the product's canonical
+retail/base reference for finished goods. `INTERNAL_TRANSFER_FEE_RATE = 0.10`
+(centralized). Fee = 10% × reference × qty, charged once to company cash
+(rejected before any inventory moves if unaffordable: `err.not_enough_company_
+cash`), ledgered as `INTERNAL_TRANSFER_FEE`. **Receiver cost basis = source WAC +
+per-unit fee** (so $0-WAC farm raw becomes exactly the fee, not the full
+reference — truthful, and cost basis can never be laundered downward through
+repeated A→B→A transfers). Physical delivery / WAITING_FOR_STORAGE / exactly-once
+preserved. No revenue/XP/rankings/trade-count/reputation/satisfaction. The
+Inventory-tab form previews reference value, fee, total, and receiving cost
+basis, with a game-native confirm.
+
+**Customer Satisfaction (new, business-level).** Migration 020 adds
+`businesses.customer_satisfaction` (0–100, default **70**, additive), DISTINCT
+from B2B `reputation` (untouched). Driven ONLY by committed NPC retail outcomes,
+eased with a bounded smoothed model `new = old + α·(target − old)`, α =
+min(0.25, 0.02·customers) so one customer barely moves it and it evolves over
+many interactions; clamped 0–100 and recoverable (no death spiral). Targets:
+fair sale 90, gouged sale 70, stockout 35 — using the game's existing fair-price
+test (one pricing truth), aggregated per tick as a customer-weighted target.
+Farms (no NPC customers) show N/A (derived from `FINAL_PRODUCTS_OF`, not a
+hardcoded exception). Its ONLY gameplay effect: a bounded multiplier on NPC-sale
+Business XP — `satisfactionXpBand`: <40 ×0.75, 40–59 ×0.90, 60–74 ×1.00, 75–89
+×1.10, 90+ ×1.20. It does NOT modify production/contract/city-order/company XP,
+and does NOT rewrite demand (no runaway loop).
+
+**XP clarity.** NPC-sale popup shows "+$X  +Y XP" (own shop); the Business Level
+tab explains where Business XP comes from + the satisfaction note; the Overview
+shows Customer Satisfaction (value/100 + status band + recent sales/stockouts +
+current ×XP). XP is granted only on a committed sale (exactly one sale → one
+award).
+
+**Level terminology (final).** Company Level / Business Level (1–50) / Facility
+Tier (1–3) are distinct labels. The generic HUD "Level" (the player/account XP
+meter) is renamed **Account** — audited to have NO gameplay unlock, so it's kept
+only as a legacy account-progress indicator (DB column retained, not deleted).
+
+**Production Stop.** New `stopProduction`: the currently-producing batch finishes
+normally (committed ingredients not wasted), every QUEUED job is cancelled with a
+refund, and the producing job's remaining auto-repeats are cleared. (Individual
+queued jobs can still be cancelled one-by-one via the ✕.)
+
+Migration 020 (additive, idempotent, state-preserving). Full suite 350/351
+(1 shared-DB flaky, passes isolated). Not deployed to VPS.

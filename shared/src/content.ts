@@ -17,6 +17,14 @@ export interface UpdateDef {
 // Newest first. Adding an entry makes it pop for players who haven't seen it.
 export const UPDATES: UpdateDef[] = [
   {
+    // V2.8.2 — economic clarity & customer experience.
+    id: 'v2_8_2c',
+    version: 'V2.8.2',
+    titleKey: 'update.v2_8_2c.title',
+    taglineKey: 'update.v2_8_2c.tagline',
+    featureKeys: ['update.v2_8_2c.f1', 'update.v2_8_2c.f2', 'update.v2_8_2c.f3', 'update.v2_8_2c.f4'],
+  },
+  {
     // V2.8 Phase 4 — specialization, mastery, controlled automation & final balance.
     id: 'v2_8_4',
     version: 'V2.8',

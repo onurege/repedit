@@ -1012,6 +1012,10 @@ html.touch .controls-hint { display: none; }
 .xfer-h { margin: 0 0 8px; font-size: 13px; }
 .xfer-row { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
 .xfer-row select { flex: 1; min-width: 90px; }
+.xfer-preview { margin-top: 8px; font-size: 13px; }
+.xfer-preview:empty { display: none; }
+.pq-stop { width: 100%; margin-top: 8px; }
+.xp-help { border-left: 3px solid #c7b3ff; padding-left: 8px; }
 @media (max-width: 640px), (max-height: 500px) { .xfer-row select, .xfer-row input, .xfer-row .btn { min-height: 40px; } }
 @media (max-width: 640px), (max-height: 500px) {
   .spec-cards { grid-template-columns: 1fr; }

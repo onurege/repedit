@@ -668,11 +668,23 @@ export class Net {
           this.send(conn.ws, { t: 'toast', code: 'toast.production_cancelled', kind: 'info' });
           break;
         }
+        case 'stop_production': {
+          const biz = await world.stopProduction(pid, msg.bizId);
+          this.send(conn.ws, { t: 'my_biz', biz: world.toBizPriv(biz) });
+          this.send(conn.ws, { t: 'toast', code: 'toast.production_stopped', kind: 'info' });
+          break;
+        }
         case 'transfer_internal': {
           const { from, to } = await world.transferInternal(pid, msg.fromBizId, msg.toBizId, msg.product, msg.qty);
           this.send(conn.ws, { t: 'my_biz', biz: world.toBizPriv(from) });
           this.send(conn.ws, { t: 'my_biz', biz: world.toBizPriv(to) });
           this.send(conn.ws, { t: 'toast', code: 'toast.transfer_sent', params: { qty: msg.qty, product: msg.product }, kind: 'success' });
+          break;
+        }
+        case 'admin_set_satisfaction': {
+          const biz = await world.adminSetSatisfaction(pid, msg.bizId, msg.value);
+          this.send(conn.ws, { t: 'toast', code: 'toast.admin_done', kind: 'success' });
+          this.sendToPlayer(biz.ownerId, { t: 'my_biz', biz: world.toBizPriv(biz) });
           break;
         }
         case 'get_production': {
