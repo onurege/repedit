@@ -763,7 +763,7 @@ export type ServerMsg =
   | { t: 'order_removed'; orderId: number }
   | { t: 'delivery'; delivery: DeliveryPub }
   | { t: 'delivery_done'; deliveryId: number }
-  | { t: 'sale'; bizId: number; lotId: string; amount: number }
+  | { t: 'sale'; bizId: number; lotId: string; amount: number; xp?: number }
   | { t: 'lost_customer'; bizId: number; lotId: string }
   | { t: 'trade'; trade: TradeRow }
   | { t: 'trades'; trades: TradeRow[] }

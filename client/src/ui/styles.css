@@ -362,10 +362,13 @@ button { font-family: inherit; }
 }
 .panel-head h2 { font-size: 17px; color: #0f172a; }
 .panel-head .close { border: none; background: #eef2f7; border-radius: 8px; width: 28px; height: 28px; cursor: pointer; font-size: 14px; color: #475569; }
-.panel-tabs { display: flex; gap: 4px; padding: 8px 12px 0; }
+/* V2.8.1: scroll horizontally at every width so no tab (e.g. Upgrade, now the
+   7th tab on producer businesses) is ever clipped and unreachable. */
+.panel-tabs { display: flex; gap: 4px; padding: 8px 12px 0; overflow-x: auto; flex-wrap: nowrap; scrollbar-width: thin; }
 .panel-tabs button {
   border: none; background: transparent; padding: 7px 12px; font-size: 13px; font-weight: 700;
   color: #64748b; cursor: pointer; border-radius: 8px 8px 0 0; border-bottom: 2.5px solid transparent;
+  flex: 0 0 auto; white-space: nowrap;
 }
 .panel-tabs button.active { color: #1d4ed8; border-bottom-color: #1d4ed8; }
 .panel-body { padding: 14px 18px; overflow-y: auto; flex: 1; font-size: 14px; }

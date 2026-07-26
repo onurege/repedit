@@ -37,6 +37,7 @@ import {
   REP_START,
   REP_SALE_FAIR_PRICE,
   REP_SALE_GOUGING,
+  satisfactionXpMult,
   REP_LOST_CUSTOMER,
   REP_TRADE_FULFILLED,
   REP_CONTRACT_FULFILLED,
@@ -1739,7 +1740,10 @@ export class World extends EventEmitter {
       owner.dirty = true;
       biz.revenue += gross;
       biz.coffeeSold += sold; // total units sold at retail
-      this.addBizXp(biz, sold * BIZ_XP.perRetailSale); // V2.8 legit NPC demand XP
+      // V2.8.1: Business XP per retail sale SCALES with customer satisfaction
+      // (the business reputation) — happy customers grant more XP than unhappy.
+      const perUnitXp = BIZ_XP.perRetailSale * satisfactionXpMult(biz.reputation);
+      this.addBizXp(biz, Math.round(sold * perUnitXp));
       // V2.2: final-consumer sale -> market-share activity (units to NPCs).
       this.activityQueue.push({
         companyId: biz.companyId, businessId: biz.id,
@@ -1754,8 +1758,9 @@ export class World extends EventEmitter {
     biz.customers += arrivals;
     biz.dirty = true;
     if (!silent) {
+      const saleXp = sold > 0 ? Math.max(1, Math.round(BIZ_XP.perRetailSale * satisfactionXpMult(biz.reputation))) : 0;
       for (let i = 0; i < Math.min(sold, 3); i++) {
-        this.emit('sale', { bizId: biz.id, lotId: biz.lotId, amount: price });
+        this.emit('sale', { bizId: biz.id, lotId: biz.lotId, amount: price, xp: saleXp });
       }
       if (lost > 0) this.emit('lost_customer', { bizId: biz.id, lotId: biz.lotId });
     }
@@ -2983,15 +2988,24 @@ export class World extends EventEmitter {
     }
   }
 
+  /** Internal-transfer reference price: the Central Wholesale rate for raw, else
+   *  the product's retail/base reference. This is the PRICE FLOOR for a transfer. */
+  private transferUnitPrice(product: ProductId): number {
+    return NPC_WHOLESALE_PRICES[product] ?? RETAIL_BASE[product] ?? PRODUCTS[product].basePrice;
+  }
+
   /**
    * V2.8.1 Part 9 — Internal Company Transfer. Move inventory between two
-   * businesses of the SAME company via a REAL delivery (no teleport). No money,
-   * no XP, no revenue, no rankings/trade-count/supplier stats — it is not a
-   * trade. The receiving business inherits the correct cost basis (truthful
-   * accounting), so a mini market's assortment margin stays honest.
+   * businesses of the SAME company via a REAL delivery (no teleport). It is NOT a
+   * free move and NOT a trade: it is PRICED at the Central Wholesale reference
+   * (the floor), the cost is charged to the company (a real expense, so no
+   * cost-basis-laundering exploit), and the receiving business's cost basis is
+   * that reference price. No revenue, no XP, no rankings/trade-count/supplier
+   * stats — it never counts as a player trade.
    */
   async transferInternal(playerId: number, fromBizId: number, toBizId: number, product: ProductId, qty: number): Promise<{ from: BizRec; to: BizRec }> {
     if (fromBizId === toBizId) throw new GameError('err.transfer_same_business');
+    const p = this.player(playerId);
     const from = this.requireOwnedBiz(playerId, fromBizId);
     const to = this.businesses.get(toBizId);
     if (!to || to.ownerId !== playerId) throw new GameError('err.unknown_business'); // same company (1 player = 1 company)
@@ -3000,13 +3014,22 @@ export class World extends EventEmitter {
     const rec = inv(from, product);
     if (rec.qty < qty) throw new GameError('err.only_have', { qty: rec.qty, product });
     if (capacityFor(to, product) <= 0) throw new GameError('err.cannot_store_that');
-    const unitCost = from.costBasis.get(product) ?? 0;
-    // Remove from source synchronously (in transit), persist, then dispatch a van.
+    const unitPrice = this.transferUnitPrice(product);
+    const cost = unitPrice * qty;
+    if (p.cash < cost) throw new GameError('err.not_enough_cash', { cost });
+    // Charge the internal-transfer cost, remove stock from source (in transit),
+    // persist, then dispatch a van that unloads at the wholesale-reference cost basis.
+    const before = p.cash;
+    p.cash -= cost; p.dirty = true;
     rec.qty -= qty;
     from.dirty = true;
-    await query(`INSERT INTO inventories (business_id, product, qty, reserved) VALUES ($1,$2,$3,$4) ON CONFLICT (business_id, product) DO UPDATE SET qty=$3, reserved=$4`, [from.id, product, rec.qty, rec.reserved]);
-    await this.createDelivery(product, qty, from.lotId, to, unitCost); // unloads with cost basis
-    console.log(`[econ] TRANSFER biz=${from.id}->${to.id} ${qty}x${product} @cost=${unitCost}`);
+    await tx(async (c) => {
+      await c.query(`INSERT INTO inventories (business_id, product, qty, reserved) VALUES ($1,$2,$3,$4) ON CONFLICT (business_id, product) DO UPDATE SET qty=$3, reserved=$4`, [from.id, product, rec.qty, rec.reserved]);
+      await c.query('UPDATE players SET cash=$1 WHERE id=$2', [p.cash, p.id]);
+      await c.query(LEDGER_SQL, ledgerParams({ playerId, businessId: to.id, type: 'INTERNAL_TRANSFER', amount: -cost, refType: 'business', refId: from.id, before, after: p.cash }));
+    });
+    await this.createDelivery(product, qty, from.lotId, to, unitPrice); // unloads with the reference cost basis
+    console.log(`[econ] TRANSFER biz=${from.id}->${to.id} ${qty}x${product} @wholesale=${unitPrice} cost=${cost}`);
     this.emit('biz_pub', from);
     this.emit('push_state', { playerId });
     return { from, to };

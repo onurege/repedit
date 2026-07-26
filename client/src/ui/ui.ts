@@ -19,7 +19,7 @@ import {
   type RivalAlert, type CityNewsItem, type UrgentOrderPub,
   MARKET_MIN_PRICE, MARKET_MAX_PRICE, MARKET_MAX_QTY,
   MAX_BUSINESS_LEVEL, levelReward, businessTier, slotsForLevel,
-  productionDurationSecs, RETAIL_BASE, TRADABLE_PRODUCTS, isTradable, WHOLESALE_PRODUCTS,
+  productionDurationSecs, RETAIL_BASE, TRADABLE_PRODUCTS, isTradable, WHOLESALE_PRODUCTS, satisfactionXpMult,
   type BizPriv, type RecipePub, type OwnedLicensePub, type AvailableLicensePub, type SupplyEconomy,
 } from '@district/shared';
 import { IS_TOUCH } from '../touch.js';
@@ -1139,7 +1139,9 @@ export class UI {
           : `<div class="kv"><span class="k">${soldLabel}</span><span class="v">${biz.coffeeSold}</span></div>
              <div class="kv"><span class="k">${t('biz.customers')}</span><span class="v">${biz.customers}</span></div>`}
         <div class="kv"><span class="k">${t('biz.reputation')}</span><span class="v">★ ${biz.reputation.toFixed(2)}</span></div>
+        <div class="kv"><span class="k">${t('biz.satisfaction')}</span><span class="v">${satisfactionXpMult(biz.reputation) >= 1 ? '😊' : '😐'} ×${satisfactionXpMult(biz.reputation).toFixed(2)} XP</span></div>
         ${biz.specialization ? `<div class="kv"><span class="k">${t('spec.strategy')}</span><span class="v">${biz.master ? '★ ' : ''}${t('spec.name.' + biz.specialization)}</span></div>` : ''}
+        <div class="hint">${t('biz.satisfaction_hint')}</div>
         <div class="hint">${hint}</div>
       `);
     } else if (tab === 'inventory') {
