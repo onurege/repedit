@@ -1,4 +1,22 @@
-# CURRENT STATE — V2.8.1 (stabilization) · V2.8 COMPLETE
+# CURRENT STATE — V2.8.2 · V2.8 COMPLETE
+
+**Latest: V2.8.2 — Economic Clarity & Customer Experience.** (1) Internal company
+transfers now cost a small **logistics fee** = 10% of the normal Central
+Wholesale reference (never emergency price), charged once to company cash,
+ledgered `INTERNAL_TRANSFER_FEE`; the receiver's cost basis = source WAC + the
+per-unit fee (so $0 farm raw isn't launderable). (2) New **Customer
+Satisfaction** (business-level, 0–100, default 70, migration 020) — separate from
+B2B reputation, driven only by NPC retail outcomes via a bounded smoothed model,
+recoverable; its only effect is a bounded multiplier (×0.75–×1.20) on NPC-sale
+Business XP. (3) **XP clarity** — sales show "+$ +XP", the Progress tab explains
+XP sources. (4) **Level terminology** — Company Level / Business Level (1–50) /
+Facility Tier (1–3); the HUD account meter renamed "Account" (no gameplay
+unlock, legacy). (5) **Stop production** — finishes the current batch, cancels
+the rest of the queue. See DECISIONS.md "V2.8.2". **Not deployed to VPS.**
+
+---
+
+# V2.8.1 (stabilization)
 
 **Latest: V2.8.1 — Economy & System Consistency (stabilization).** No new
 gameplay systems; makes every V2.8 system operate on one coherent model. Fixes

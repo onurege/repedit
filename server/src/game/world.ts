@@ -37,7 +37,15 @@ import {
   REP_START,
   REP_SALE_FAIR_PRICE,
   REP_SALE_GOUGING,
-  satisfactionXpMult,
+  SATISFACTION_START,
+  SAT_TARGET_FAIR_SALE,
+  SAT_TARGET_EXPENSIVE_SALE,
+  SAT_TARGET_STOCKOUT,
+  smoothSatisfaction,
+  satisfactionXpBand,
+  satisfactionStatus,
+  INTERNAL_TRANSFER_FEE_RATE,
+  getInternalTransferReferencePrice,
   REP_LOST_CUSTOMER,
   REP_TRADE_FULFILLED,
   REP_CONTRACT_FULFILLED,
@@ -371,6 +379,10 @@ export interface BizRec {
   costBasis: Map<ProductId, number>;
   // V2.8 Phase 4 — permanent specialization path id (null = unspecialized).
   specialization: string | null;
+  // V2.8.2 — Customer Satisfaction (0–100, NPC service quality; separate from reputation).
+  satisfaction: number;
+  // V2.8.2 — bounded recent-outcome counters for the satisfaction explanation UI.
+  satSales: number; satStockouts: number; satGouge: number;
 }
 
 // V2.8 Phase 2 — a persistent production job. Ingredients are committed to the
@@ -871,6 +883,8 @@ export class World extends EventEmitter {
         retailAccum: new Map(Object.entries(accums.retail ?? {}) as [ProductId, number][]),
         costBasis: new Map(),
         specialization: r.specialization ?? null,
+        satisfaction: Number(r.customer_satisfaction ?? SATISFACTION_START),
+        satSales: 0, satStockouts: 0, satGouge: 0,
       };
       this.businesses.set(biz.id, biz);
       // Catch up simulation for downtime (capped).
@@ -1096,7 +1110,7 @@ export class World extends EventEmitter {
         await c.query(
           `UPDATE businesses SET level=$1, price=$2, reputation=$3, revenue=$4, expenses=$5,
              milk_produced=$6, coffee_sold=$7, customers=$8, accums=$9, sim_ts=now(),
-             price2=$11, production=$12, biz_xp=$13, biz_level=$14, specialization=$15 WHERE id=$10`,
+             price2=$11, production=$12, biz_xp=$13, biz_level=$14, specialization=$15, customer_satisfaction=$16 WHERE id=$10`,
           [
             b.level,
             b.price,
@@ -1113,6 +1127,7 @@ export class World extends EventEmitter {
             b.bizXp,
             b.bizLevel,
             b.specialization,
+            b.satisfaction,
           ]
         );
         for (const [product, rec] of b.inv) {
@@ -1730,6 +1745,11 @@ export class World extends EventEmitter {
     const lost = arrivals - sold;
     rec.qty -= sold;
     const gross = sold * price;
+    // V2.8.2: the authoritative fair-price test (one pricing truth) drives both
+    // reputation and customer satisfaction; no separate "expensive" definition.
+    const fair = Math.round((RETAIL_BASE[product] ?? PRODUCTS[product].basePrice) * 1.2);
+    const isFair = price <= fair;
+    let saleXp = 0;
     if (sold > 0) {
       this.ledgerQueue.push({
         playerId: owner.id, businessId: biz.id, type: 'CUSTOMER_SALE',
@@ -1740,9 +1760,10 @@ export class World extends EventEmitter {
       owner.dirty = true;
       biz.revenue += gross;
       biz.coffeeSold += sold; // total units sold at retail
-      // V2.8.1: Business XP per retail sale SCALES with customer satisfaction
-      // (the business reputation) — happy customers grant more XP than unhappy.
-      const perUnitXp = BIZ_XP.perRetailSale * satisfactionXpMult(biz.reputation);
+      // V2.8.2: Business XP from NPC sales scales with CUSTOMER SATISFACTION
+      // (bounded band, using the score BEFORE this tick's update).
+      const perUnitXp = BIZ_XP.perRetailSale * satisfactionXpBand(biz.satisfaction);
+      saleXp = Math.max(1, Math.round(perUnitXp));
       this.addBizXp(biz, Math.round(sold * perUnitXp));
       // V2.2: final-consumer sale -> market-share activity (units to NPCs).
       this.activityQueue.push({
@@ -1750,15 +1771,22 @@ export class World extends EventEmitter {
         kind: 'final_sale', product, units: sold, amount: gross,
       });
       this.addXp(owner, sold * XP.perSale, silent);
-      const fair = Math.round((RETAIL_BASE[product] ?? PRODUCTS[product].basePrice) * 1.2);
-      biz.reputation += sold * (price <= fair ? REP_SALE_FAIR_PRICE : REP_SALE_GOUGING);
+      biz.reputation += sold * (isFair ? REP_SALE_FAIR_PRICE : REP_SALE_GOUGING);
+      biz.satSales += sold; if (!isFair) biz.satGouge += sold;
     }
-    if (lost > 0) biz.reputation += lost * REP_LOST_CUSTOMER;
+    if (lost > 0) { biz.reputation += lost * REP_LOST_CUSTOMER; biz.satStockouts += lost; }
     biz.reputation = Math.min(REP_MAX, Math.max(REP_MIN, biz.reputation));
+    // V2.8.2: ease Customer Satisfaction toward this tick's weighted outcome
+    // target — served-fair aims high, gouged sales lower, stockouts lowest.
+    const customers = sold + lost;
+    if (customers > 0) {
+      const saleTarget = isFair ? SAT_TARGET_FAIR_SALE : SAT_TARGET_EXPENSIVE_SALE;
+      const target = (sold * saleTarget + lost * SAT_TARGET_STOCKOUT) / customers;
+      biz.satisfaction = smoothSatisfaction(biz.satisfaction, target, customers);
+    }
     biz.customers += arrivals;
     biz.dirty = true;
     if (!silent) {
-      const saleXp = sold > 0 ? Math.max(1, Math.round(BIZ_XP.perRetailSale * satisfactionXpMult(biz.reputation))) : 0;
       for (let i = 0; i < Math.min(sold, 3); i++) {
         this.emit('sale', { bizId: biz.id, lotId: biz.lotId, amount: price, xp: saleXp });
       }
@@ -1935,6 +1963,8 @@ export class World extends EventEmitter {
       retailAccum: new Map(),
       costBasis: new Map(),
       specialization: null,
+      satisfaction: SATISFACTION_START,
+      satSales: 0, satStockouts: 0, satGouge: 0,
     };
     for (const product of STARTING_PRODUCTS[type]) biz.inv.set(product, { qty: 0, reserved: 0 });
     return biz;
@@ -2156,6 +2186,20 @@ export class World extends EventEmitter {
     biz.dirty = true;
     await query('UPDATE businesses SET specialization=$1 WHERE id=$2', [biz.specialization, bizId]);
     await this.logAdminAction(adminId, 'SET_SPECIALIZATION', 'business', String(bizId), { specialization: biz.specialization });
+    this.emit('biz_pub', biz);
+    this.emit('push_state', { playerId: biz.ownerId });
+    return biz;
+  }
+
+  /** V2.8.2 — admin: set a business's Customer Satisfaction (recovery/testing). Audited. */
+  async adminSetSatisfaction(adminId: number, bizId: number, value: number): Promise<BizRec> {
+    this.requireAdmin(adminId);
+    const biz = this.businesses.get(bizId);
+    if (!biz) throw new GameError('err.unknown_business');
+    biz.satisfaction = Math.max(0, Math.min(100, Math.round(value)));
+    biz.dirty = true;
+    await query('UPDATE businesses SET customer_satisfaction=$1 WHERE id=$2', [biz.satisfaction, bizId]);
+    await this.logAdminAction(adminId, 'SET_SATISFACTION', 'business', String(bizId), { satisfaction: biz.satisfaction });
     this.emit('biz_pub', biz);
     this.emit('push_state', { playerId: biz.ownerId });
     return biz;
@@ -2553,6 +2597,44 @@ export class World extends EventEmitter {
       biz.dirty = true;
       console.log(`[econ] PRODUCTION_CANCEL biz=${biz.id} job=${jobId} refunded ${JSON.stringify(job.inputs)}`);
       await this.resolveProduction(biz, Date.now(), false);
+      this.emit('biz_pub', biz);
+      this.emit('push_state', { playerId });
+      return biz;
+    } finally {
+      this.productionLocks.delete(bizId);
+    }
+  }
+
+  /**
+   * V2.8.2 — Stop the production line: let the CURRENTLY-producing batch finish
+   * normally (so its committed ingredients aren't wasted), but cancel every
+   * QUEUED job (refunding their ingredients) and clear the producing job's
+   * remaining auto-repeats so nothing new starts on top.
+   */
+  async stopProduction(playerId: number, bizId: number): Promise<BizRec> {
+    const biz = this.requireOwnedBiz(playerId, bizId);
+    if (this.productionLocks.has(bizId)) throw new GameError('err.production_busy');
+    this.productionLocks.add(bizId);
+    try {
+      // Clear the head's repeats so it finishes then stops (don't touch its progress).
+      const head = biz.prodJobs[0];
+      if (head && (head.status === 'producing' || head.status === 'waiting_storage') && head.repeatRemaining > 0) {
+        head.repeatRemaining = 0;
+        await query(`UPDATE production_jobs SET repeat_remaining=0 WHERE id=$1`, [head.id]);
+      }
+      // Cancel every QUEUED job, refunding its committed ingredients.
+      for (const job of biz.prodJobs.filter((j) => j.status === 'queued')) {
+        const upd = await query(`UPDATE production_jobs SET status='cancelled' WHERE id=$1 AND status='queued' RETURNING id`, [job.id]);
+        if (!upd.rowCount) continue;
+        for (const inp of job.inputs) {
+          const rec = inv(biz, inp.product);
+          rec.qty += inp.qty;
+          await query(`INSERT INTO inventories (business_id, product, qty, reserved) VALUES ($1,$2,$3,$4) ON CONFLICT (business_id, product) DO UPDATE SET qty=$3, reserved=$4`, [biz.id, inp.product, rec.qty, rec.reserved]);
+        }
+      }
+      biz.prodJobs = biz.prodJobs.filter((j) => j.status !== 'queued');
+      biz.dirty = true;
+      console.log(`[econ] PRODUCTION_STOP biz=${biz.id} (current batch finishes; queue cleared)`);
       this.emit('biz_pub', biz);
       this.emit('push_state', { playerId });
       return biz;
@@ -2988,20 +3070,23 @@ export class World extends EventEmitter {
     }
   }
 
-  /** Internal-transfer reference price: the Central Wholesale rate for raw, else
-   *  the product's retail/base reference. This is the PRICE FLOOR for a transfer. */
-  private transferUnitPrice(product: ProductId): number {
-    return NPC_WHOLESALE_PRICES[product] ?? RETAIL_BASE[product] ?? PRODUCTS[product].basePrice;
+  /** V2.8.2 quote for an internal transfer: reference value, per-unit fee, total
+   *  logistics fee, and the receiver's projected cost basis (source WAC + fee). */
+  transferQuote(from: BizRec, product: ProductId, qty: number): { ref: number; feeRate: number; unitFee: number; totalFee: number; recvCostBasis: number } {
+    const ref = getInternalTransferReferencePrice(product);
+    const unitFee = ref * INTERNAL_TRANSFER_FEE_RATE;
+    const srcWac = from.costBasis.get(product) ?? 0;
+    return { ref, feeRate: INTERNAL_TRANSFER_FEE_RATE, unitFee, totalFee: Math.round(unitFee * qty * 100) / 100, recvCostBasis: srcWac + unitFee };
   }
 
   /**
-   * V2.8.1 Part 9 — Internal Company Transfer. Move inventory between two
-   * businesses of the SAME company via a REAL delivery (no teleport). It is NOT a
-   * free move and NOT a trade: it is PRICED at the Central Wholesale reference
-   * (the floor), the cost is charged to the company (a real expense, so no
-   * cost-basis-laundering exploit), and the receiving business's cost basis is
-   * that reference price. No revenue, no XP, no rankings/trade-count/supplier
-   * stats — it never counts as a player trade.
+   * V2.8.2 — Internal Company Transfer. Move inventory between two businesses of
+   * the SAME company via a REAL delivery (no teleport). NOT a trade and NOT free:
+   * the company pays a small INTERNAL LOGISTICS FEE (a fraction of the canonical
+   * reference value — never the emergency/scarcity price) to the city. The fee is
+   * a real expense so cost basis can't be laundered: the receiver's basis is the
+   * SOURCE WAC + the actual per-unit fee (so $0-cost farm raw becomes the fee, not
+   * the full reference). No revenue, XP, rankings, trade-count or supplier stats.
    */
   async transferInternal(playerId: number, fromBizId: number, toBizId: number, product: ProductId, qty: number): Promise<{ from: BizRec; to: BizRec }> {
     if (fromBizId === toBizId) throw new GameError('err.transfer_same_business');
@@ -3014,22 +3099,22 @@ export class World extends EventEmitter {
     const rec = inv(from, product);
     if (rec.qty < qty) throw new GameError('err.only_have', { qty: rec.qty, product });
     if (capacityFor(to, product) <= 0) throw new GameError('err.cannot_store_that');
-    const unitPrice = this.transferUnitPrice(product);
-    const cost = unitPrice * qty;
-    if (p.cash < cost) throw new GameError('err.not_enough_cash', { cost });
-    // Charge the internal-transfer cost, remove stock from source (in transit),
-    // persist, then dispatch a van that unloads at the wholesale-reference cost basis.
+    const q = this.transferQuote(from, product, qty);
+    const totalFee = q.totalFee;
+    if (p.cash < totalFee) throw new GameError('err.not_enough_company_cash', { cost: totalFee });
+    // Charge ONLY the logistics fee, remove stock from source (in transit),
+    // persist, then dispatch a van that unloads at WAC + per-unit fee.
     const before = p.cash;
-    p.cash -= cost; p.dirty = true;
+    p.cash -= totalFee; p.dirty = true;
     rec.qty -= qty;
     from.dirty = true;
     await tx(async (c) => {
       await c.query(`INSERT INTO inventories (business_id, product, qty, reserved) VALUES ($1,$2,$3,$4) ON CONFLICT (business_id, product) DO UPDATE SET qty=$3, reserved=$4`, [from.id, product, rec.qty, rec.reserved]);
       await c.query('UPDATE players SET cash=$1 WHERE id=$2', [p.cash, p.id]);
-      await c.query(LEDGER_SQL, ledgerParams({ playerId, businessId: to.id, type: 'INTERNAL_TRANSFER', amount: -cost, refType: 'business', refId: from.id, before, after: p.cash }));
+      await c.query(LEDGER_SQL, ledgerParams({ playerId, businessId: to.id, type: 'INTERNAL_TRANSFER_FEE', amount: -totalFee, refType: 'business', refId: from.id, before, after: p.cash }));
     });
-    await this.createDelivery(product, qty, from.lotId, to, unitPrice); // unloads with the reference cost basis
-    console.log(`[econ] TRANSFER biz=${from.id}->${to.id} ${qty}x${product} @wholesale=${unitPrice} cost=${cost}`);
+    await this.createDelivery(product, qty, from.lotId, to, q.recvCostBasis); // receiver basis = source WAC + fee
+    console.log(`[econ] TRANSFER biz=${from.id}->${to.id} ${qty}x${product} ref=${q.ref} fee=${totalFee} recvBasis=${q.recvCostBasis}`);
     this.emit('biz_pub', from);
     this.emit('push_state', { playerId });
     return { from, to };
@@ -5580,6 +5665,10 @@ export class World extends EventEmitter {
       reputation: Math.round(b.reputation * 100) / 100,
       progression: this.toBizProgression(b),
       productionLine: this.toProductionLine(b),
+      // V2.8.2: satisfaction only for businesses that actually serve NPC customers.
+      satisfaction: FINAL_PRODUCTS_OF[b.type].length > 0 ? Math.round(b.satisfaction) : null,
+      satisfactionStatus: satisfactionStatus(b.satisfaction),
+      satRecent: { sales: b.satSales, stockouts: b.satStockouts, gouge: b.satGouge },
     };
   }
 

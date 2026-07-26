@@ -19,7 +19,8 @@ import {
   type RivalAlert, type CityNewsItem, type UrgentOrderPub,
   MARKET_MIN_PRICE, MARKET_MAX_PRICE, MARKET_MAX_QTY,
   MAX_BUSINESS_LEVEL, levelReward, businessTier, slotsForLevel,
-  productionDurationSecs, RETAIL_BASE, TRADABLE_PRODUCTS, isTradable, WHOLESALE_PRODUCTS, satisfactionXpMult,
+  productionDurationSecs, RETAIL_BASE, TRADABLE_PRODUCTS, isTradable, WHOLESALE_PRODUCTS,
+  satisfactionXpBand, satisfactionStatus, getInternalTransferReferencePrice, INTERNAL_TRANSFER_FEE_RATE, BIZ_XP,
   type BizPriv, type RecipePub, type OwnedLicensePub, type AvailableLicensePub, type SupplyEconomy,
 } from '@district/shared';
 import { IS_TOUCH } from '../touch.js';
@@ -1139,9 +1140,8 @@ export class UI {
           : `<div class="kv"><span class="k">${soldLabel}</span><span class="v">${biz.coffeeSold}</span></div>
              <div class="kv"><span class="k">${t('biz.customers')}</span><span class="v">${biz.customers}</span></div>`}
         <div class="kv"><span class="k">${t('biz.reputation')}</span><span class="v">★ ${biz.reputation.toFixed(2)}</span></div>
-        <div class="kv"><span class="k">${t('biz.satisfaction')}</span><span class="v">${satisfactionXpMult(biz.reputation) >= 1 ? '😊' : '😐'} ×${satisfactionXpMult(biz.reputation).toFixed(2)} XP</span></div>
+        ${this.satisfactionRowHtml(biz)}
         ${biz.specialization ? `<div class="kv"><span class="k">${t('spec.strategy')}</span><span class="v">${biz.master ? '★ ' : ''}${t('spec.name.' + biz.specialization)}</span></div>` : ''}
-        <div class="hint">${t('biz.satisfaction_hint')}</div>
         <div class="hint">${hint}</div>
       `);
     } else if (tab === 'inventory') {
@@ -1325,7 +1325,12 @@ export class UI {
     const queueHtml = this.productionQueueHtml(line, now);
 
     if (!producible.length) {
-      this.setBody(body, `${queueHtml}<p class="hint">${t('prod.none_active')}</p>`);
+      this.setBody(body, `${queueHtml}<p class="hint">${t('prod.none_active')}</p>`, (b) => {
+        b.querySelector('[data-stop-line]')?.addEventListener('click', () => { sfx.click(); client.send({ t: 'stop_production', bizId: biz.id }); });
+        b.querySelectorAll('[data-cancel-job]').forEach((el) => el.addEventListener('click', () => {
+          sfx.click(); client.send({ t: 'cancel_production', bizId: biz.id, jobId: parseInt((el as HTMLElement).dataset.cancelJob!, 10) });
+        }));
+      });
       return;
     }
 
@@ -1396,6 +1401,9 @@ export class UI {
       b.querySelectorAll('[data-cancel-job]').forEach((el) => el.addEventListener('click', () => {
         sfx.click(); client.send({ t: 'cancel_production', bizId: biz.id, jobId: parseInt((el as HTMLElement).dataset.cancelJob!, 10) });
       }));
+      b.querySelector('[data-stop-line]')?.addEventListener('click', () => {
+        sfx.click(); client.send({ t: 'stop_production', bizId: biz.id });
+      });
       b.querySelectorAll('[data-psel]').forEach((el) => el.addEventListener('click', () => {
         sfx.click(); this.prodSel = (el as HTMLElement).dataset.psel as ProductId; this.prodQty = 0; this.lastBodyHTML = ''; this.renderPanel();
       }));
@@ -1463,7 +1471,21 @@ export class UI {
       ? `<div class="pq-next-h">${t('prod.up_next')}</div>${rest.map((j, i) =>
           `<div class="pq-row"><span class="pq-i">${i + 1}</span><span class="pq-rp">${PRODUCTS[j.product].emoji} ${j.outputQty} ${pName(j.product)}${j.repeatRemaining > 0 ? ` <span class="pq-repeat">↻${j.repeatRemaining}</span>` : ''}</span><button class="btn tiny warn" data-cancel-job="${j.id}" title="${t('prod.cancel')}">✕</button></div>`).join('')}`
       : '';
-    return `<div class="pq">${nowHtml}${restHtml}<div class="pq-note">${t('prod.committed_note')}</div></div>`;
+    // V2.8.2: "Stop" — let the current batch finish, cancel the rest of the line.
+    const stopBtn = (head.status === 'producing' || head.status === 'waiting_storage')
+      ? `<button class="btn small ghost pq-stop" data-stop-line="1">${t('prod.stop')}</button>` : '';
+    return `<div class="pq">${nowHtml}${restHtml}${stopBtn}<div class="pq-note">${t('prod.committed_note')}</div></div>`;
+  }
+
+  /** V2.8.2 — Customer Satisfaction row (own business), with status + XP band + recent summary. */
+  private satisfactionRowHtml(biz: import('@district/shared').BizPriv): string {
+    if (biz.satisfaction == null) return ''; // no NPC customers (e.g. farm) -> omit
+    const sat = biz.satisfaction;
+    const band = satisfactionXpBand(sat);
+    const status = t('sat.status.' + satisfactionStatus(sat));
+    const r = biz.satRecent;
+    return `<div class="kv"><span class="k">${t('biz.satisfaction')}</span><span class="v">${sat} / 100 · ${status} <span class="cap">(×${band.toFixed(2)} XP)</span></span></div>
+      <div class="hint">${t('sat.recent', { sales: r.sales, stockouts: r.stockouts })} — ${t('biz.satisfaction_hint')}</div>`;
   }
 
   /** V2.8.1 Part 9 — internal company transfer form (only if you own >1 business). */
@@ -1481,18 +1503,80 @@ export class UI {
         <input id="xfer-qty" type="number" min="1" value="20" style="width:72px" />
         <button class="btn small primary" id="xfer-go">${t('xfer.send')}</button>
       </div>
+      <div class="xfer-preview" id="xfer-preview"></div>
       <div class="hint">${t('xfer.hint')}</div>
     </div>`;
   }
 
+  /** Live logistics quote for the transfer form / confirm (matches the server). */
+  private transferQuote(biz: import('@district/shared').BizPriv, product: ProductId, qty: number) {
+    const ref = getInternalTransferReferencePrice(product);
+    const unitFee = ref * INTERNAL_TRANSFER_FEE_RATE;
+    const srcWac = biz.inventory[product]?.costBasis ?? 0;
+    return { ref, unitFee, totalFee: Math.round(unitFee * qty), recvCost: Math.round((srcWac + unitFee) * 100) / 100 };
+  }
+
   private bindTransferForm(b: HTMLElement, biz: import('@district/shared').BizPriv): void {
+    const prodSel = b.querySelector('#xfer-prod') as HTMLSelectElement | null;
+    const qtyEl = b.querySelector('#xfer-qty') as HTMLInputElement | null;
+    const preview = b.querySelector('#xfer-preview') as HTMLElement | null;
+    const refresh = () => {
+      if (!prodSel || !qtyEl || !preview) return;
+      const product = prodSel.value as ProductId;
+      const qty = Math.max(0, parseInt(qtyEl.value, 10) || 0);
+      if (!product || qty <= 0) { preview.innerHTML = ''; return; }
+      const q = this.transferQuote(biz, product, qty);
+      preview.innerHTML = `
+        <div class="orv-kv"><span>${t('xfer.ref_value')}</span><span>${fmt(q.ref)} / ${t('xfer.unit')}</span></div>
+        <div class="orv-kv"><span>${t('xfer.fee')} (${Math.round(INTERNAL_TRANSFER_FEE_RATE * 100)}%)</span><span>${fmt(Math.round(q.unitFee * 100) / 100)} / ${t('xfer.unit')}</span></div>
+        <div class="orv-kv"><span>${t('xfer.total_fee')}</span><span><b>${fmt(q.totalFee)}</b></span></div>
+        <div class="orv-kv"><span>${t('xfer.recv_cost')}</span><span>${fmt(q.recvCost)} / ${t('xfer.unit')}</span></div>`;
+    };
+    prodSel?.addEventListener('change', refresh);
+    qtyEl?.addEventListener('input', refresh);
+    refresh();
     b.querySelector('#xfer-go')?.addEventListener('click', () => {
-      const product = (b.querySelector('#xfer-prod') as HTMLSelectElement)?.value as ProductId;
+      const product = prodSel?.value as ProductId;
       const toBizId = parseInt((b.querySelector('#xfer-to') as HTMLSelectElement)?.value ?? '0', 10);
-      const qty = parseInt((b.querySelector('#xfer-qty') as HTMLInputElement)?.value ?? '0', 10);
+      const qty = parseInt(qtyEl?.value ?? '0', 10);
       if (!product || !toBizId || !(qty > 0)) return;
       sfx.click();
+      this.confirmTransfer(biz, toBizId, product, qty);
+    });
+  }
+
+  /** Game-native transfer confirmation (no native confirm/alert). */
+  private confirmTransfer(biz: import('@district/shared').BizPriv, toBizId: number, product: ProductId, qty: number): void {
+    if (document.getElementById('xfer-overlay')) return;
+    const to = client.myBusinesses.get(toBizId);
+    const q = this.transferQuote(biz, product, qty);
+    const overlay = document.createElement('div');
+    overlay.className = 'overlay modal';
+    overlay.id = 'xfer-overlay';
+    overlay.innerHTML = `
+      <div class="card spec-confirm">
+        <h1>${t('xfer.confirm_title')}</h1>
+        <div class="lic-rows">
+          <div class="orv-kv"><span>${t('xfer.from')}</span><span>${bizHeading(biz)}</span></div>
+          <div class="orv-kv"><span>${t('xfer.to')}</span><span>${to ? bizHeading(to) : '?'}</span></div>
+          <div class="orv-kv"><span>${t('offer.field.product')}</span><span>${PRODUCTS[product].emoji} ${qty} ${pName(product)}</span></div>
+          <div class="orv-kv"><span>${t('xfer.total_fee')}</span><span><b>${fmt(q.totalFee)}</b></span></div>
+          <div class="orv-kv"><span>${t('xfer.recv_cost')}</span><span>${fmt(q.recvCost)} / ${t('xfer.unit')}</span></div>
+        </div>
+        <div class="hint">${t('xfer.no_xp')}</div>
+        <div class="offer-actions">
+          <button class="btn ghost" id="xfer-cancel">${t('offer.cancel_btn')}</button>
+          <button class="btn primary" id="xfer-confirm">${t('xfer.send')}</button>
+        </div>
+      </div>`;
+    document.body.appendChild(overlay);
+    const close = () => overlay.remove();
+    overlay.addEventListener('click', (e) => { if (e.target === overlay) close(); });
+    overlay.querySelector('#xfer-cancel')!.addEventListener('click', () => { sfx.click(); close(); });
+    overlay.querySelector('#xfer-confirm')!.addEventListener('click', () => {
+      sfx.click();
       client.send({ t: 'transfer_internal', fromBizId: biz.id, toBizId, product, qty });
+      close();
     });
   }
 
@@ -1545,6 +1629,7 @@ export class UI {
       ${nextReward}
       <div class="lvl-slots"><span class="k">${t('slots.current', { n: pr.slotLimit })}</span><span class="v">${slotNext}</span></div>
       ${this.specializationHtml(biz)}
+      <div class="hint xp-help">✦ ${t('lvl.xp_help')}</div>
       <h4 class="lvl-roadmap-h">${t('lvl.roadmap')}</h4>
       ${roadmap}`, (b) => {
       b.querySelectorAll('[data-spec-open]').forEach((el) => el.addEventListener('click', () => {

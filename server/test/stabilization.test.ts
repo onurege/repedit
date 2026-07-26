@@ -92,31 +92,55 @@ describe('queue cancel (Part 6)', () => {
 });
 
 describe('internal company transfer (Part 9)', () => {
-  it('moves goods via delivery PRICED at wholesale rate (not free), cost basis = ref, no revenue/XP', async () => {
+  it('charges only a 10% logistics fee; cost basis = source WAC + fee; no revenue/XP', async () => {
     const id = await newPlayer(world, 'tf1');
     const bakery = await world.chooseBusiness(id, 'bakery');
     bakery.bizXp = xpForBizLevel(20); bakery.bizLevel = 20; bakery.level = 3;
     world.players.get(id)!.cash = 1_000_000;
     world.companyByOwner(id)!.level = 10; // capacity for a 2nd business
-    give(bakery, 'bread', 100); bakery.costBasis.set('bread', 8); // source cost is low...
+    give(bakery, 'bread', 100); bakery.costBasis.set('bread', 8); // source WAC 8
     const mm = await world.openBusiness(id, marketLot(world), 'mini_market');
     mm.bizXp = xpForBizLevel(20); mm.bizLevel = 20; mm.level = 3;
 
     const cashBefore = world.players.get(id)!.cash;
     const bakeryXp0 = bakery.bizXp, mmXp0 = mm.bizXp;
-    const ref = 20; // bread has no wholesale price -> RETAIL_BASE.bread = 20 is the floor
+    const ref = 20;            // bread: no wholesale price -> RETAIL_BASE.bread = 20
+    const fee = ref * 0.10;    // 10% logistics fee = 2/unit
     await world.transferInternal(id, bakery.id, mm.id, 'bread', 40);
     expect(onHand(bakery, 'bread')).toBe(60);      // removed from source (in transit)
-    // NOT free: the company is charged the wholesale-reference cost.
-    expect(world.players.get(id)!.cash).toBe(cashBefore - ref * 40);
+    // NOT free, but only the 10% fee (not the full reference value) is charged.
+    expect(world.players.get(id)!.cash).toBe(cashBefore - fee * 40);
     await forceDeliveries(world);
     expect(onHand(mm, 'bread')).toBe(40);          // arrived by delivery (not teleport)
-    // Cost basis = the reference floor (not the source's artificially-low $8) — no laundering.
-    expect(mm.costBasis.get('bread')).toBeCloseTo(ref, 5);
-    // Not a trade: no XP, no trade count.
+    // Cost basis = source WAC (8) + per-unit fee (2) = 10 — truthful, not launderable.
+    expect(mm.costBasis.get('bread')).toBeCloseTo(8 + fee, 5);
     expect(bakery.bizXp).toBe(bakeryXp0);
     expect(mm.bizXp).toBe(mmXp0);
     expect(mm.tradeCount).toBe(0);
+  });
+
+  it('$0-WAC farm raw becomes exactly the per-unit fee at the receiver (no free cost basis)', async () => {
+    const id = await newPlayer(world, 'tf3');
+    const farm = await world.chooseBusiness(id, 'farm');
+    world.players.get(id)!.cash = 1_000_000; world.companyByOwner(id)!.level = 10;
+    give(farm, 'milk', 200); farm.costBasis.set('milk', 0); // produced from land, $0 WAC
+    const bakery = await world.openBusiness(id, lotOfKind(world, 'bakery'), 'bakery');
+    bakery.level = 3;
+    await world.transferInternal(id, farm.id, bakery.id, 'milk', 50);
+    await forceDeliveries(world);
+    const feePerUnit = 15 * 0.10; // milk wholesale price 15 -> fee 1.5
+    expect(bakery.costBasis.get('milk')).toBeCloseTo(feePerUnit, 5); // 0 + 1.5, not the full 15
+  });
+
+  it('rejects when the company cannot afford the logistics fee (before removing stock)', async () => {
+    const id = await newPlayer(world, 'tf4');
+    const bakery = await world.chooseBusiness(id, 'bakery');
+    world.players.get(id)!.cash = 1_000_000; world.companyByOwner(id)!.level = 10;
+    give(bakery, 'bread', 100);
+    const mm = await world.openBusiness(id, marketLot(world), 'mini_market'); mm.level = 3;
+    world.players.get(id)!.cash = 1; // now can't afford the fee
+    await expect(world.transferInternal(id, bakery.id, mm.id, 'bread', 40)).rejects.toBeInstanceOf(GameError);
+    expect(onHand(bakery, 'bread')).toBe(100); // stock untouched on rejection
   });
 
   it('rejects a transfer the destination cannot store, and to the same business', async () => {
@@ -134,7 +158,7 @@ describe('internal company transfer (Part 9)', () => {
 });
 
 // Helpers to find a vacant lot of a kind (openBusiness needs an explicit lot).
-function lotOfKind(w: World, kind: 'mini_market' | 'farm'): string {
+function lotOfKind(w: World, kind: 'mini_market' | 'farm' | 'bakery' | 'coffee_shop'): string {
   const taken = new Set([...w.businesses.values()].map((b) => b.lotId));
   const lot = lotsOfKind(kind).find((l) => !taken.has(l.id));
   if (!lot) throw new Error(`no vacant ${kind} lot`);
