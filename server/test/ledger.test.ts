@@ -23,8 +23,7 @@ describe('economic ledger', () => {
     const shop = world.bizByOwner(shopId)!;
 
     await world.buyNpc(shopId, 'beans', 20); // NPC_PURCHASE (goods arrive later by van)
-    shop.inv.get('milk')!.qty = 30;
-    shop.inv.get('beans')!.qty = 30;
+    shop.inv.get('coffee')!.qty = 30;         // V2.8 P2: retail drains finished stock
     world.simulate(shop, 120, true); // CUSTOMER_SALE (queued)
     const order = await world.createOrder(shopId, 'buy', 'milk', 50, 12); // MARKET_ESCROW
     farm.inv.get('milk')!.qty = 100;

@@ -91,6 +91,7 @@ export class GameClient {
   cityNews: CityNewsItem[] = [];
   rivalAlerts: RivalAlert[] = [];
   supplyEconomy: import('@district/shared').SupplyEconomy | null = null;
+  adminProduction: import('@district/shared').AdminProductionJob[] = [];
   connected = false;
 
   private ws: WebSocket | null = null;
@@ -494,6 +495,19 @@ export class GameClient {
       case 'supply_economy':
         this.supplyEconomy = msg.economy;
         this.emit('supply_economy');
+        break;
+      case 'production_complete':
+        // Non-blocking game-native feedback; fresh business state arrives via my_biz.
+        this.emit('toast',
+          msg.blocked
+            ? t('prod.complete.blocked', { qty: msg.qty, product: t('product.' + msg.product) })
+            : t('prod.complete.ready', { qty: msg.qty, product: t('product.' + msg.product) }),
+          msg.blocked ? 'error' : 'success');
+        this.emit('update');
+        break;
+      case 'admin_production':
+        this.adminProduction = msg.jobs;
+        this.emit('admin_production');
         break;
     }
   }

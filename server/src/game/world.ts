@@ -148,6 +148,21 @@ import {
   WHOLESALE_REPRICE_SECS,
   WHOLESALE_MAX_STEP_FRAC,
   supplyHealth,
+  // V2.8 Phase 2 — manual production
+  recipeFor,
+  planProduction,
+  maxOutputForInputs,
+  productionDurationSecs,
+  productionSpeedMult,
+  productionQueueLimit,
+  isProducibleProduct,
+  PRODUCTION_TIMING,
+  type Recipe,
+  type ProductionJobPub,
+  type ProductionLinePub,
+  type ProductionStatus,
+  type ProducibleProductPub,
+  type AdminProductionJob,
   type ProductCapability,
   type UrgentOrderKind,
   type UrgentOrderPub,
@@ -326,6 +341,26 @@ export interface BizRec {
   activeProducts: Set<ProductId>;           // licensed products occupying slots
   lastSlotChangeMs: number | null;          // active-config cooldown anchor
   progressionLoaded: boolean;               // starter backfill has run
+  // V2.8 Phase 2 — manual production line (in id order; head is the producing/next job).
+  prodJobs: ProdJobRec[];
+}
+
+// V2.8 Phase 2 — a persistent production job. Ingredients are committed to the
+// job (removed from inventory) at enqueue; output enters inventory at
+// completion. The recipe snapshot + committed inputs make the job self-contained
+// so it always completes exactly as planned, even across a recipe rebalance.
+export interface ProdJobRec {
+  id: number;
+  businessId: number;
+  product: ProductId;
+  outputQty: number;
+  batches: number;
+  recipe: Recipe;
+  inputs: { product: ProductId; qty: number }[];
+  status: ProductionStatus;
+  createdAtMs: number;
+  startedAtMs: number | null;
+  completesAtMs: number | null;
 }
 
 export interface ContractRec {
@@ -466,6 +501,10 @@ function activityParams(e: ActivityEntry): any[] {
 
 const TRADABLE: ProductId[] = ['milk', 'beans', 'wheat', 'bread'];
 
+// V2.8 Phase 2: fraction of a coffee shop's foot traffic that also wants a latte
+// (only when the shop keeps an active latte slot in stock). Small premium stream.
+const LATTE_DEMAND_FRACTION = 0.35;
+
 const STARTING_PRODUCTS: Record<BusinessType, ProductId[]> = {
   farm: ['milk', 'wheat'],
   coffee_shop: ['milk', 'beans', 'coffee'],
@@ -516,7 +555,8 @@ function baseCapacityFor(biz: BizRec, product: ProductId): number {
         : 0;
     case 'coffee_shop': {
       const lv = SHOP_LEVELS[biz.level];
-      if (product === 'coffee') return lv.coffeeCapacity;
+      // V2.8 Phase 2: latte is a finished drink and gets its own finished-goods slot.
+      if (product === 'coffee' || product === 'latte') return lv.coffeeCapacity;
       return product === 'milk' || product === 'beans' ? lv.ingredientCapacity : 0;
     }
     case 'bakery': {
@@ -778,6 +818,7 @@ export class World extends EventEmitter {
         activeProducts: new Set(),
         lastSlotChangeMs: r.last_slot_change ? new Date(r.last_slot_change).getTime() : null,
         progressionLoaded: false,
+        prodJobs: [],
       };
       this.businesses.set(biz.id, biz);
       // Catch up simulation for downtime (capped).
@@ -799,6 +840,29 @@ export class World extends EventEmitter {
     for (const biz of this.businesses.values()) {
       biz.bizLevel = bizLevelForXp(biz.bizXp); // keep level consistent with xp on load
       await this.backfillProgression(biz);
+    }
+    // V2.8 Phase 2: load live production jobs (id order = line order). They are
+    // resolved by wall-clock time after per-business catch-up below, so no
+    // production is lost across a restart and none can complete twice.
+    const jobRows = await query(
+      "SELECT * FROM production_jobs WHERE status IN ('queued','producing','waiting_storage') ORDER BY id",
+    );
+    for (const r of jobRows.rows) {
+      const biz = this.businesses.get(r.business_id);
+      if (!biz) continue;
+      biz.prodJobs.push({
+        id: Number(r.id),
+        businessId: r.business_id,
+        product: r.product,
+        outputQty: r.output_qty,
+        batches: r.batches,
+        recipe: r.recipe,
+        inputs: r.inputs,
+        status: r.status,
+        createdAtMs: new Date(r.created_at).getTime(),
+        startedAtMs: r.started_at ? new Date(r.started_at).getTime() : null,
+        completesAtMs: r.completes_at ? new Date(r.completes_at).getTime() : null,
+      });
     }
     const orders = await query("SELECT * FROM market_orders WHERE status = 'open'");
     for (const r of orders.rows) {
@@ -865,6 +929,11 @@ export class World extends EventEmitter {
       if (c.status === 'active' && c.nextExecutionAtMs != null && c.nextExecutionAtMs <= now) {
         await this.executeContract(c.id);
       }
+    }
+    // V2.8 Phase 2: resolve production that elapsed during downtime (promote +
+    // complete the chain by wall-clock), so offline production is never lost.
+    for (const biz of this.businesses.values()) {
+      if (biz.prodJobs.length) await this.resolveProduction(biz, now, true);
     }
 
     // V2.3: restore live city events and resolve any transitions missed while
@@ -1039,6 +1108,12 @@ export class World extends EventEmitter {
         continue;
       }
       this.simulate(biz, dt, false);
+    }
+    // V2.8 Phase 2: advance each business's production line (promote queued jobs,
+    // complete elapsed ones, retry storage-blocked output). Runs after simulate
+    // so retail sales this tick have already freed any finished-goods space.
+    for (const biz of this.businesses.values()) {
+      if (biz.prodJobs.length) await this.resolveProduction(biz, now, false);
     }
     for (const d of [...this.deliveries.values()]) {
       if (d.status === 'in_transit' && d.arriveAtMs <= now) {
@@ -1527,24 +1602,10 @@ export class World extends EventEmitter {
       }
       case 'coffee_shop': {
         const lv = SHOP_LEVELS[biz.level];
-        const milk = inv(biz, 'milk');
-        const beans = inv(biz, 'beans');
         const coffee = inv(biz, 'coffee');
-        // Brew coffee from ingredients.
-        biz.brewAccum += lv.brewPerSec * dt;
-        const brewWant = Math.floor(biz.brewAccum);
-        const brewed = Math.max(
-          0,
-          Math.min(brewWant, milk.qty, beans.qty, lv.coffeeCapacity - coffee.qty)
-        );
-        if (brewed > 0) {
-          milk.qty -= brewed;
-          beans.qty -= brewed;
-          coffee.qty += brewed;
-          biz.brewAccum -= brewed;
-          biz.dirty = true;
-        }
-        if (biz.brewAccum > 1) biz.brewAccum = 1;
+        // V2.8 Phase 2: coffee is no longer auto-brewed here — it is manufactured
+        // via the manual production line (one authoritative production path).
+        // Retail (NPC sales) stays automatic and simply drains finished stock.
         biz.custAccum +=
           lv.customersPerSec *
           priceDemandMultiplier(biz.price, RETAIL_BASE.coffee) *
@@ -1553,25 +1614,28 @@ export class World extends EventEmitter {
         const arrivals = Math.floor(biz.custAccum);
         biz.custAccum -= arrivals;
         this.applyRetail(biz, owner, 'coffee', biz.price, arrivals, silent);
-        const canServe = coffee.qty > 0 || (milk.qty > 0 && beans.qty > 0);
-        biz.status = canServe ? 'open' : 'out_of_stock';
+        // Latte retail: a modest premium stream, only while an active latte slot
+        // holds finished stock. Reuses the otherwise-unused prodAccum for arrivals.
+        let latteStock = 0;
+        if (biz.activeProducts.has('latte')) {
+          latteStock = inv(biz, 'latte').qty;
+          const lattePrice = RETAIL_BASE.latte ?? PRODUCTS.latte.basePrice;
+          biz.prodAccum +=
+            lv.customersPerSec * LATTE_DEMAND_FRACTION *
+            repDemandMultiplier(biz.reputation) *
+            this.cityDemand('coffee') * dt;
+          const latteArrivals = Math.floor(biz.prodAccum);
+          biz.prodAccum -= latteArrivals;
+          this.applyRetail(biz, owner, 'latte', lattePrice, latteArrivals, silent);
+        }
+        biz.status = coffee.qty > 0 || latteStock > 0 ? 'open' : 'out_of_stock';
         break;
       }
       case 'bakery': {
         const lv = BAKERY_LEVELS[biz.level];
-        const wheat = inv(biz, 'wheat');
         const bread = inv(biz, 'bread');
-        // Bake bread from wheat (1:1). Stops when wheat is empty.
-        biz.brewAccum += lv.brewPerSec * dt;
-        const bakeWant = Math.floor(biz.brewAccum);
-        const baked = Math.max(0, Math.min(bakeWant, wheat.qty, lv.coffeeCapacity - bread.qty));
-        if (baked > 0) {
-          wheat.qty -= baked;
-          bread.qty += baked;
-          biz.brewAccum -= baked;
-          biz.dirty = true;
-        }
-        if (biz.brewAccum > 1) biz.brewAccum = 1;
+        // V2.8 Phase 2: bread is no longer auto-baked here — it is manufactured
+        // via the manual production line. Retail stays automatic.
         biz.custAccum +=
           lv.customersPerSec *
           priceDemandMultiplier(biz.price, RETAIL_BASE.bread) *
@@ -1580,7 +1644,7 @@ export class World extends EventEmitter {
         const arrivals = Math.floor(biz.custAccum);
         biz.custAccum -= arrivals;
         this.applyRetail(biz, owner, 'bread', biz.price, arrivals, silent);
-        biz.status = bread.qty > 0 || wheat.qty > 0 ? 'open' : 'out_of_stock';
+        biz.status = bread.qty > 0 ? 'open' : 'out_of_stock';
         break;
       }
       case 'mini_market': {
@@ -1815,6 +1879,7 @@ export class World extends EventEmitter {
       activeProducts: new Set(),
       lastSlotChangeMs: null,
       progressionLoaded: false,
+      prodJobs: [],
     };
     for (const product of STARTING_PRODUCTS[type]) biz.inv.set(product, { qty: 0, reserved: 0 });
     return biz;
@@ -2002,6 +2067,286 @@ export class World extends EventEmitter {
     this.emit('biz_pub', biz);
     this.emit('push_state', { playerId: biz.ownerId });
     return biz;
+  }
+
+  // ============================================================
+  // V2.8 Phase 2 — manual production (queue, exactly-once, storage-safe)
+  // ============================================================
+
+  private productionLocks = new Set<number>(); // per-business start serialisation
+
+  /** True if this business TYPE can manufacture at least one producible recipe. */
+  private isProducerType(type: BusinessType): boolean {
+    return licensableProducts(type).some((l) => l.capability === 'produce' && isProducibleProduct(l.product));
+  }
+
+  private findJob(jobId: number): { biz: BizRec; job: ProdJobRec } | null {
+    for (const biz of this.businesses.values()) {
+      const job = biz.prodJobs.find((j) => j.id === jobId);
+      if (job) return { biz, job };
+    }
+    return null;
+  }
+
+  /**
+   * Start (queue) a manual production batch. Server-authoritative and
+   * EXACTLY-ONCE: ingredients are committed (removed from inventory) the moment
+   * the job is accepted, inside one transaction with the job insert, so a
+   * double-click / concurrent / replayed request can never consume ingredients
+   * or create a job twice. The player picks OUTPUT quantity; the server derives
+   * whole batches, the ingredient cost and the duration.
+   */
+  async startProduction(playerId: number, bizId: number, product: ProductId, desiredQty: number): Promise<BizRec> {
+    const biz = this.requireOwnedBiz(playerId, bizId);
+    const recipe = recipeFor(product);
+    if (!recipe || !isProducibleProduct(product)) throw new GameError('err.not_producible', { product });
+    if (!productCompatible(biz.type, product)) throw new GameError('err.not_producible', { product });
+    if (biz.licenses.get(product) !== 'produce') throw new GameError('err.produce_license_needed', { product });
+    if (!biz.activeProducts.has(product)) throw new GameError('err.product_inactive', { product });
+    if (capacityFor(biz, product) <= 0) throw new GameError('err.cannot_store_that');
+
+    const plan = planProduction(recipe, Math.floor(desiredQty));
+    if (!plan) throw new GameError('err.invalid_qty');
+
+    const limit = productionQueueLimit(biz.bizLevel);
+    if (biz.prodJobs.length >= limit) throw new GameError('err.production_queue_full', { limit });
+
+    // Ingredients must be available from UNCOMMITTED on-hand stock (goods already
+    // committed to earlier queued jobs are gone from inventory, so they can never
+    // be double-spent here).
+    for (const inp of plan.inputs) {
+      const have = inv(biz, inp.product).qty;
+      if (have < inp.qty) throw new GameError('err.missing_ingredient', { product: inp.product, need: inp.qty, have });
+    }
+
+    if (this.productionLocks.has(bizId)) throw new GameError('err.production_busy');
+    this.productionLocks.add(bizId);
+    let committed = false;
+    try {
+      // Commit ingredients in-memory FIRST (synchronous), then persist atomically
+      // with the job insert. This ordering is what makes concurrent starts safe.
+      for (const inp of plan.inputs) inv(biz, inp.product).qty -= inp.qty;
+      committed = true;
+      const recipeSnap: Recipe = {
+        output: recipe.output, outputQty: recipe.outputQty,
+        inputs: recipe.inputs.map((i) => ({ product: i.product, qty: i.qty })),
+      };
+      const inputsSnap = plan.inputs.map((i) => ({ product: i.product, qty: i.qty }));
+      let job!: ProdJobRec;
+      await tx(async (c) => {
+        const ins = await c.query(
+          `INSERT INTO production_jobs (business_id, product, output_qty, batches, recipe, inputs, status)
+           VALUES ($1,$2,$3,$4,$5,$6,'queued') RETURNING id, created_at`,
+          [bizId, product, plan.output, plan.batches, JSON.stringify(recipeSnap), JSON.stringify(inputsSnap)]
+        );
+        const row = ins.rows[0];
+        job = {
+          id: Number(row.id), businessId: bizId, product,
+          outputQty: plan.output, batches: plan.batches, recipe: recipeSnap, inputs: inputsSnap,
+          status: 'queued', createdAtMs: new Date(row.created_at).getTime(),
+          startedAtMs: null, completesAtMs: null,
+        };
+        for (const inp of plan.inputs) {
+          const rec = inv(biz, inp.product);
+          await c.query(
+            `INSERT INTO inventories (business_id, product, qty, reserved) VALUES ($1,$2,$3,$4)
+             ON CONFLICT (business_id, product) DO UPDATE SET qty=$3, reserved=$4`,
+            [bizId, inp.product, rec.qty, rec.reserved]
+          );
+        }
+      });
+      biz.prodJobs.push(job);
+      biz.dirty = true;
+      console.log(`[econ] PRODUCTION_START biz=${bizId} ${plan.output}x${product} inputs=${JSON.stringify(inputsSnap)}`);
+      // Promote immediately if the line is free (the job starts right now).
+      await this.resolveProduction(biz, Date.now(), false);
+      this.emit('biz_pub', biz);
+      this.emit('push_state', { playerId });
+      return biz;
+    } catch (err) {
+      if (committed) for (const inp of plan.inputs) inv(biz, inp.product).qty += inp.qty; // roll back the commit
+      throw err;
+    } finally {
+      this.productionLocks.delete(bizId);
+    }
+  }
+
+  /**
+   * Advance a business's production line by wall-clock time: promote the oldest
+   * queued job when the line is free, complete elapsed jobs, and retry
+   * storage-blocked output. Chains through elapsed time so an offline/queued
+   * backlog resolves in order without losing or duplicating any output.
+   */
+  private async resolveProduction(biz: BizRec, now: number, silent: boolean): Promise<void> {
+    let guard = biz.prodJobs.length + 2;
+    let lineFreeAt = now; // when the line frees for the next job (threads the chain)
+    while (guard-- > 0) {
+      const head = biz.prodJobs[0];
+      if (!head) return;
+      if (head.status === 'producing' || head.status === 'waiting_storage') {
+        const elapsed = head.completesAtMs != null && now >= head.completesAtMs;
+        if (head.status === 'producing' && !elapsed) return; // still cooking
+        const done = await this.completeJob(biz, head, silent);
+        if (!done) return; // storage-blocked -> the line stays blocked at the head
+        lineFreeAt = Math.max(lineFreeAt, head.completesAtMs ?? now);
+        continue; // head removed; loop to promote the next queued job
+      }
+      // head is queued -> promote it, anchoring its start to when the line freed.
+      const anchor = Math.max(lineFreeAt, head.createdAtMs);
+      const dur = productionDurationSecs(head.product, head.outputQty, biz.bizLevel);
+      head.status = 'producing';
+      head.startedAtMs = anchor;
+      head.completesAtMs = anchor + dur * 1000;
+      await query(
+        `UPDATE production_jobs SET status='producing', started_at=to_timestamp($2/1000.0), completes_at=to_timestamp($3/1000.0) WHERE id=$1 AND status='queued'`,
+        [head.id, head.startedAtMs, head.completesAtMs]
+      );
+      console.log(`[econ] PRODUCTION_PROMOTE biz=${biz.id} job=${head.id} ${head.outputQty}x${head.product} dur=${dur}s`);
+      if (!silent) { this.emit('biz_pub', biz); this.emit('push_state', { playerId: biz.ownerId }); }
+      // Loop again: if the promoted job's completesAt is already in the past
+      // (offline catch-up), the next iteration completes it immediately.
+    }
+  }
+
+  /**
+   * Complete one production job exactly once. Output enters inventory only if it
+   * fits within capacity (V2.6.2 invariant preserved); otherwise the job holds
+   * its finished goods in WAITING_FOR_STORAGE and is retried when space frees —
+   * the output is never destroyed, duplicated, or overflowed. Returns true when
+   * the job leaves the line (completed), false when it stays storage-blocked.
+   */
+  private async completeJob(biz: BizRec, job: ProdJobRec, silent: boolean): Promise<boolean> {
+    const rec = inv(biz, job.product);
+    const cap = capacityFor(biz, job.product);
+    if (rec.qty + rec.reserved + job.outputQty > cap) {
+      if (job.status !== 'waiting_storage') {
+        job.status = 'waiting_storage';
+        await query(`UPDATE production_jobs SET status='waiting_storage' WHERE id=$1 AND status='producing'`, [job.id]);
+        console.log(`[econ] PRODUCTION_WAIT_STORAGE biz=${biz.id} job=${job.id} ${job.outputQty}x${job.product}`);
+        if (!silent) {
+          this.emit('production_complete', { bizId: biz.id, ownerId: biz.ownerId, product: job.product, qty: job.outputQty, blocked: true });
+          this.emit('biz_pub', biz);
+          this.emit('push_state', { playerId: biz.ownerId });
+        }
+      }
+      return false;
+    }
+    // Atomic exactly-once: the status guard and the inventory write commit
+    // together, so a double tick / restart race can neither add output twice nor
+    // add it without marking the job done.
+    const newQty = rec.qty + job.outputQty;
+    let won = false;
+    await tx(async (c) => {
+      const upd = await c.query(
+        `UPDATE production_jobs SET status='completed' WHERE id=$1 AND status IN ('producing','waiting_storage') RETURNING id`,
+        [job.id]
+      );
+      if (!upd.rowCount) return; // completed elsewhere
+      won = true;
+      await c.query(
+        `INSERT INTO inventories (business_id, product, qty, reserved) VALUES ($1,$2,$3,$4)
+         ON CONFLICT (business_id, product) DO UPDATE SET qty=$3, reserved=$4`,
+        [biz.id, job.product, newQty, rec.reserved]
+      );
+    });
+    biz.prodJobs = biz.prodJobs.filter((j) => j.id !== job.id);
+    if (won) {
+      rec.qty = newQty;
+      biz.dirty = true;
+      this.addBizXp(biz, job.outputQty * BIZ_XP.perUnitProduced); // completion XP, once, by output volume
+      console.log(`[econ] PRODUCTION_DONE biz=${biz.id} job=${job.id} +${job.outputQty} ${job.product}`);
+      if (!silent) {
+        this.emit('production_complete', { bizId: biz.id, ownerId: biz.ownerId, product: job.product, qty: job.outputQty, blocked: false });
+        this.emit('biz_pub', biz);
+        this.emit('push_state', { playerId: biz.ownerId });
+      }
+    }
+    return true;
+  }
+
+  /** Owner-private production line snapshot (null for non-producer businesses). */
+  private toProductionLine(biz: BizRec): ProductionLinePub | null {
+    if (!this.isProducerType(biz.type)) return null;
+    const producible: ProducibleProductPub[] = [];
+    for (const [product, cap] of biz.licenses) {
+      if (cap !== 'produce') continue;
+      const recipe = recipeFor(product);
+      const timing = PRODUCTION_TIMING[product];
+      if (!recipe || !timing || !isProducibleProduct(product) || !biz.activeProducts.has(product)) continue;
+      const onHand = recipe.inputs.map((i) => ({ product: i.product, qty: inv(biz, i.product).qty }));
+      const haveMap = new Map<ProductId, number>(onHand.map((o) => [o.product, o.qty]));
+      producible.push({
+        product,
+        recipe: { output: recipe.output, outputQty: recipe.outputQty, inputs: recipe.inputs.map((i) => ({ product: i.product, qty: i.qty })) },
+        onHand,
+        maxOutput: maxOutputForInputs(recipe, haveMap),
+        batchSize: timing.batchSize, batchSecs: timing.batchSecs,
+      });
+    }
+    return {
+      queueLimit: productionQueueLimit(biz.bizLevel),
+      jobCount: biz.prodJobs.length,
+      speedMult: Math.round(productionSpeedMult(biz.bizLevel) * 100) / 100,
+      jobs: biz.prodJobs.map((j) => this.toJobPub(j)),
+      producible,
+      serverTime: Date.now(),
+    };
+  }
+
+  private toJobPub(j: ProdJobRec): ProductionJobPub {
+    return {
+      id: j.id, product: j.product, outputQty: j.outputQty, status: j.status,
+      startedAt: j.startedAtMs, completesAt: j.completesAtMs,
+      recipe: { output: j.recipe.output, outputQty: j.recipe.outputQty, inputs: j.recipe.inputs.map((i) => ({ product: i.product, qty: i.qty })) },
+      inputs: j.inputs.map((i) => ({ product: i.product, qty: i.qty })),
+    };
+  }
+
+  /** Admin: inspect all live production jobs across the city (read-only). */
+  async adminProductionJobs(adminId: number): Promise<AdminProductionJob[]> {
+    this.requireAdmin(adminId);
+    const now = Date.now();
+    const out: AdminProductionJob[] = [];
+    for (const biz of this.businesses.values()) {
+      for (const j of biz.prodJobs) {
+        out.push({
+          id: j.id, businessId: biz.id, ownerName: this.players.get(biz.ownerId)?.name ?? '???',
+          product: j.product, outputQty: j.outputQty, status: j.status,
+          startedAt: j.startedAtMs, completesAt: j.completesAtMs, serverTime: now,
+        });
+      }
+    }
+    return out.sort((a, b) => a.id - b.id);
+  }
+
+  /** Admin recovery: force-complete a job now (storage-safe). Audited. */
+  async adminCompleteProduction(adminId: number, jobId: number, reason?: string): Promise<void> {
+    this.requireAdmin(adminId);
+    const found = this.findJob(jobId);
+    if (!found) throw new GameError('err.unknown_job');
+    const { biz, job } = found;
+    if (job.status === 'queued') { job.status = 'producing'; job.startedAtMs = Date.now(); }
+    job.completesAtMs = Date.now();
+    await this.completeJob(biz, job, false);
+    await this.resolveProduction(biz, Date.now(), false);
+    await this.logAdminAction(adminId, 'COMPLETE_PRODUCTION', 'production_job', String(jobId), { reason: reason ?? null, product: job.product, qty: job.outputQty });
+  }
+
+  /**
+   * Admin recovery: remove a corrupted/blocked job. SAFE: committed ingredients
+   * are NOT refunded (no refund exploit) and no output is fabricated. Audited.
+   */
+  async adminRemoveProduction(adminId: number, jobId: number, reason?: string): Promise<void> {
+    this.requireAdmin(adminId);
+    const found = this.findJob(jobId);
+    if (!found) throw new GameError('err.unknown_job');
+    const { biz, job } = found;
+    await query(`UPDATE production_jobs SET status='cancelled' WHERE id=$1 AND status<>'completed'`, [jobId]);
+    biz.prodJobs = biz.prodJobs.filter((j) => j.id !== jobId);
+    await this.resolveProduction(biz, Date.now(), false);
+    await this.logAdminAction(adminId, 'REMOVE_PRODUCTION', 'production_job', String(jobId), { reason: reason ?? null, product: job.product, qty: job.outputQty });
+    this.emit('biz_pub', biz);
+    this.emit('push_state', { playerId: biz.ownerId });
   }
 
   // ============================================================
@@ -3120,7 +3465,8 @@ export class World extends EventEmitter {
       case 'add_milk':
       case 'add_beans':
       case 'add_wheat':
-      case 'add_bread': {
+      case 'add_bread':
+      case 'add_coffee': {
         const biz = this.requireOwnedBiz(playerId, bizId);
         const product = cmd.slice(4) as ProductId;
         // Respect the storage invariant even for dev/admin adds (V2.6.2): clamp
@@ -3136,6 +3482,29 @@ export class World extends EventEmitter {
         const biz = this.requireOwnedBiz(playerId, bizId);
         this.addBizXp(biz, v > 0 ? v : 1000);
         return `business xp +${v > 0 ? v : 1000} (lvl ${biz.bizLevel})`;
+      }
+      case 'finish_production': {
+        // V2.8 Phase 2 dev/E2E: fast-forward the whole current production line
+        // (respecting storage — a blocked head stops the fast-forward).
+        const biz = this.requireOwnedBiz(playerId, bizId);
+        if (!biz.prodJobs.length) return 'no active production';
+        let safety = biz.prodJobs.length + 2;
+        while (biz.prodJobs.length && safety-- > 0) {
+          const head = biz.prodJobs[0];
+          if (head.status === 'queued') { head.status = 'producing'; head.startedAtMs = Date.now() - 1; }
+          head.completesAtMs = Date.now() - 1;
+          await this.resolveProduction(biz, Date.now(), false);
+          if (biz.prodJobs[0] === head) break; // head storage-blocked; stop
+        }
+        return 'production fast-forwarded';
+      }
+      case 'add_latte': {
+        const biz = this.requireOwnedBiz(playerId, bizId);
+        const want = v > 0 ? v : 50;
+        const added = Math.min(want, freeSpaceFor(biz, 'latte'));
+        inv(biz, 'latte').qty += added;
+        biz.dirty = true;
+        return `+${added} ${PRODUCTS.latte.name}${added < want ? ' (storage full)' : ''}`;
       }
       case 'company_xp': {
         const company = await this.ensureCompany(playerId);
@@ -4903,6 +5272,7 @@ export class World extends EventEmitter {
       customers: b.customers,
       reputation: Math.round(b.reputation * 100) / 100,
       progression: this.toBizProgression(b),
+      productionLine: this.toProductionLine(b),
     };
   }
 

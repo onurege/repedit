@@ -52,18 +52,30 @@ const send = (page, msg) => page.evaluate((m) => window.__bd.client.send(m), msg
 const soldBread = (page) => page.evaluate(() => window.__bd.client.myBiz?.coffeeSold ?? 0);
 const companyId = (page) => page.evaluate(() => window.__bd.client.company.id);
 
-// Bake `wheat` units of bread and wait until they have all sold out to NPCs,
-// so each company's bread total is stable and the ordering is deterministic.
+// Turn `wheat` units into bread (V2.8 Phase 2: manual production) and wait until
+// it has all sold out to NPCs, so each company's bread total is stable and the
+// ordering is deterministic. Batches are sized to the free finished-goods space
+// so they always fit as customers drain stock.
 async function sellOut(page, wheat) {
   await send(page, { t: 'dev', cmd: 'speed', value: 20 });
   await send(page, { t: 'dev', cmd: 'add_wheat', value: wheat });
   await page.waitForFunction(
     () => {
-      const b = window.__bd.client.myBiz;
-      return b && b.coffeeSold > 0 && (b.inventory.bread?.qty ?? 0) === 0 && (b.inventory.wheat?.qty ?? 0) === 0;
+      const c = window.__bd.client; const b = c.myBiz;
+      const e = b.inventory.bread ?? { qty: 0, reserved: 0, capacity: 0 };
+      const w = b.inventory.wheat?.qty ?? 0;
+      const busy = (b.productionLine?.jobs?.length ?? 0) > 0;
+      if (!busy && w === 0 && (e.qty ?? 0) === 0 && b.coffeeSold > 0) return true;
+      const free = Math.max(0, e.capacity - e.qty - e.reserved);
+      const batch = Math.min(free, w);
+      if (!busy && batch >= 1) {
+        c.send({ t: 'start_production', bizId: b.id, product: 'bread', qty: batch });
+        setTimeout(() => c.send({ t: 'dev', cmd: 'finish_production' }), 250);
+      }
+      return false;
     },
     null,
-    { timeout: 60000 }
+    { timeout: 90000 }
   );
   await send(page, { t: 'dev', cmd: 'speed', value: 1 });
 }

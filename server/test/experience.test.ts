@@ -15,8 +15,9 @@ afterAll(async () => {
   await closeDb();
 });
 
-function sellBread(w: World, biz: any, wheat: number, seconds: number): number {
-  biz.inv.get('wheat')!.qty = wheat;
+// V2.8 Phase 2: retail draws from finished bread stock (production is manual).
+function sellBread(w: World, biz: any, stock: number, seconds: number): number {
+  biz.inv.get('bread')!.qty = stock;
   const before = biz.coffeeSold;
   w.simulate(biz, seconds, true);
   return biz.coffeeSold - before;

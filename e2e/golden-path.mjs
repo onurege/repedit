@@ -94,11 +94,18 @@ a = await S(A);
 check('A paid the NPC wholesaler', a.cash === 10000 - 60 * 8 - 30 * 15, `cash=${a.cash}`);
 check('NPC delivery created', a.deliveries >= 1, `deliveries=${a.deliveries}`);
 
-// wait for ingredient delivery, then for sales
+// wait for ingredient delivery, then MANUALLY produce coffee (V2.8 Phase 2:
+// coffee is no longer auto-brewed — the shop must queue a production batch).
 await A.waitForFunction(() => (window.__bd.client.myBiz.inventory.beans?.qty ?? 0) > 0, { timeout: 25000 });
+await A.waitForFunction(() => (window.__bd.client.myBiz.inventory.milk?.qty ?? 0) > 0, { timeout: 25000 });
+await A.evaluate(() => window.__bd.client.send({ t: 'start_production', bizId: window.__bd.client.myBiz.id, product: 'coffee', qty: 25 }));
+await sleep(400);
+await dev(A, 'finish_production', 0);
+await A.waitForFunction(() => (window.__bd.client.myBiz.inventory.coffee?.qty ?? 0) > 0, { timeout: 10000 });
+// then customers buy the finished coffee
 await A.waitForFunction(() => window.__bd.client.myBiz.coffeeSold > 0, { timeout: 30000 });
 a = await S(A);
-check('coffee shop operates (customers bought coffee)', a.biz.coffeeSold > 0, `sold=${a.biz.coffeeSold}`);
+check('coffee shop produces and sells (customers bought coffee)', a.biz.coffeeSold > 0, `sold=${a.biz.coffeeSold}`);
 
 // A posts BUY 100 MILK @ $12 (at 1x speed so the cash check is exact)
 await dev(A, 'speed', 1);

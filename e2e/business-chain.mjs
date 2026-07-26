@@ -108,15 +108,34 @@ await B.waitForFunction(
   { timeout: 40000 }
 );
 check('B received wheat', true);
+// V2.8 Phase 2: bread is manufactured on the production line. Top up wheat and
+// queue a batch, then customers buy the finished bread.
+await send(B, { t: 'dev', cmd: 'add_wheat', value: 300 });
+await B.waitForFunction(() => (window.__bd.client.myBiz.inventory.wheat?.qty ?? 0) >= 40, null, { timeout: 40000 });
+await B.evaluate(() => window.__bd.client.send({ t: 'start_production', bizId: window.__bd.client.myBiz.id, product: 'bread', qty: 40 }));
+await B.evaluate(() => new Promise((r) => setTimeout(r, 400)));
+await send(B, { t: 'dev', cmd: 'finish_production' });
 await B.waitForFunction(() => window.__bd.client.myBiz.coffeeSold > 0, null, { timeout: 40000 });
 b = await S(B);
-check('B baked and sold bread to NPC customers', b.biz.sold > 0 && b.biz.revenue > 0, `sold=${b.biz.sold}, revenue=$${b.biz.revenue}`);
+check('B produced and sold bread to NPC customers', b.biz.sold > 0 && b.biz.revenue > 0, `sold=${b.biz.sold}, revenue=$${b.biz.revenue}`);
 
-// B builds up a bread surplus and lists it. The player-trade chain is already
-// verified above; top up wheat via dev tools so the surplus outpaces B's own
-// customers regardless of timing.
+// B builds up a bread surplus (more production batches) and lists it. Batches
+// are sized to the free finished-goods space so they always fit as customers
+// drain stock, climbing toward the 32 needed for the listing.
 await send(B, { t: 'dev', cmd: 'add_wheat', value: 300 });
-await B.waitForFunction(() => (window.__bd.client.myBiz.inventory.bread?.qty ?? 0) >= 32, null, { timeout: 90000 });
+await B.evaluate(() => new Promise((r) => setTimeout(r, 400)));
+await B.waitForFunction(async () => {
+  const c = window.__bd.client; const e = c.myBiz.inventory.bread ?? { qty: 0, reserved: 0, capacity: 0 };
+  if (e.qty >= 32) return true;
+  const wheat = c.myBiz.inventory.wheat?.qty ?? 0;
+  const free = Math.max(0, e.capacity - e.qty - e.reserved);
+  const batch = Math.min(free, wheat);
+  if ((c.myBiz.productionLine?.jobs?.length ?? 0) === 0 && batch >= 5) {
+    c.send({ t: 'start_production', bizId: c.myBiz.id, product: 'bread', qty: batch });
+    setTimeout(() => c.send({ t: 'dev', cmd: 'finish_production' }), 300);
+  }
+  return false;
+}, null, { timeout: 90000 });
 await B.click('#nav-market');
 await B.selectOption('#mo-side', 'sell');
 await B.selectOption('#mo-product', 'bread');
