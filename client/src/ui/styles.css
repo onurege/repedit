@@ -970,6 +970,12 @@ html.touch .controls-hint { display: none; }
 .pp-mrow { display: flex; justify-content: space-between; font-size: 13px; padding: 3px 0; }
 .pp-missing .btn { margin-top: 8px; width: 100%; }
 .pp-start { width: 100%; margin-top: 4px; }
+/* V2.8 Phase 3 — profitability estimate + assortment economics */
+.pp-profit { border: 1.5px solid #cbe8d4; border-radius: 10px; padding: 8px 12px; margin-bottom: 10px; background: #f2fbf5; }
+.pp-profit.unknown { border-color: #e2e8f0; background: #f8fafc; color: #64748b; font-size: 12px; text-align: center; }
+.pp-profit-h { font-size: 11px; font-weight: 800; letter-spacing: 0.6px; color: #16a34a; text-transform: uppercase; margin-bottom: 4px; }
+.pp-profit-note { font-size: 10px; color: #94a3b8; margin-top: 6px; line-height: 1.4; }
+.invrow .cap.econ { color: #475569; }
 /* Admin production */
 .admin-prod-row { border: 1px solid #e2e8f0; border-radius: 10px; padding: 8px 10px; margin-bottom: 6px; }
 .admin-prod-row .apr-main { font-size: 13px; }

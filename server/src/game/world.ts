@@ -132,6 +132,12 @@ import {
   starterLicenses,
   licensableProducts,
   licenseDef,
+  ruleFor,
+  npcRetailProducts,
+  retailDemandWeight,
+  wholesaleEligible,
+  isRawProduct,
+  productCategory,
   levelReward,
   businessTier,
   productCapability,
@@ -343,6 +349,10 @@ export interface BizRec {
   progressionLoaded: boolean;               // starter backfill has run
   // V2.8 Phase 2 — manual production line (in id order; head is the producing/next job).
   prodJobs: ProdJobRec[];
+  // V2.8 Phase 3 — per-product NPC-retail arrival accumulator (fractional carry).
+  retailAccum: Map<ProductId, number>;
+  // V2.8 Phase 3 — weighted-average acquisition cost per product ($/unit; 0 = unknown).
+  costBasis: Map<ProductId, number>;
 }
 
 // V2.8 Phase 2 — a persistent production job. Ingredients are committed to the
@@ -361,6 +371,7 @@ export interface ProdJobRec {
   createdAtMs: number;
   startedAtMs: number | null;
   completesAtMs: number | null;
+  inputCost: number; // V2.8 Phase 3: total $ cost of committed ingredients (WAC at start)
 }
 
 export interface ContractRec {
@@ -422,6 +433,7 @@ export interface DeliveryRec {
   status: 'in_transit' | 'waiting' | 'delivered';
   departAtMs: number;
   arriveAtMs: number;
+  unitCost: number; // V2.8 Phase 3: price paid per unit (for buyer cost basis)
 }
 
 // V2.3: a city event in memory (only upcoming/active are kept live).
@@ -499,11 +511,13 @@ function activityParams(e: ActivityEntry): any[] {
   return [e.companyId, e.businessId, e.kind, e.product, e.units, e.amount];
 }
 
-const TRADABLE: ProductId[] = ['milk', 'beans', 'wheat', 'bread'];
-
-// V2.8 Phase 2: fraction of a coffee shop's foot traffic that also wants a latte
-// (only when the shop keeps an active latte slot in stock). Small premium stream.
-const LATTE_DEMAND_FRACTION = 0.35;
+// V2.8 Phase 3: the whole catalog trades on the marketplace so the supply chain
+// (farm raw -> processor finished -> mini market) can flow between players.
+const TRADABLE: ProductId[] = [
+  'milk', 'beans', 'wheat', 'eggs', 'strawberry',
+  'bread', 'croissant', 'cookie', 'cake', 'strawberry_cake',
+  'coffee', 'latte', 'cappuccino', 'strawberry_latte',
+];
 
 const STARTING_PRODUCTS: Record<BusinessType, ProductId[]> = {
   farm: ['milk', 'wheat'],
@@ -512,10 +526,13 @@ const STARTING_PRODUCTS: Record<BusinessType, ProductId[]> = {
   mini_market: ['bread', 'milk'],
 };
 
-// V2.4: which final-consumer products each business type sells to NPCs, and
-// which inputs it needs (for low-stock alerts).
+// V2.4/V2.8.3: which final-consumer products each business type may sell to NPCs
+// (its NPC-retail archetype set; only ACTIVE ones actually sell at runtime).
 const FINAL_PRODUCTS_OF: Record<BusinessType, ProductId[]> = {
-  coffee_shop: ['coffee'], bakery: ['bread'], mini_market: ['bread', 'milk'], farm: [],
+  coffee_shop: npcRetailProducts('coffee_shop'),
+  bakery: npcRetailProducts('bakery'),
+  mini_market: npcRetailProducts('mini_market'),
+  farm: [],
 };
 // Recipe inputs come from the shared single source of truth (BUSINESS_INPUTS).
 const INPUTS_OF = BUSINESS_INPUTS;
@@ -526,6 +543,21 @@ function inv(biz: BizRec, product: ProductId): InvRec {
     rec = { qty: 0, reserved: 0 };
     biz.inv.set(product, rec);
   }
+  return rec;
+}
+
+// V2.8 Phase 3: add `qty` units at `unitCost`, updating the weighted-average
+// cost basis (blends new stock into the existing on-hand at its old WAC).
+// `unitCost < 0` means "unknown" — quantity is added but the WAC is left as-is.
+function addInventoryWithCost(biz: BizRec, product: ProductId, qty: number, unitCost: number): InvRec {
+  const rec = inv(biz, product);
+  if (qty > 0 && unitCost >= 0) {
+    const oldQty = Math.max(0, rec.qty);
+    const oldWac = biz.costBasis.get(product) ?? 0;
+    const denom = oldQty + qty;
+    biz.costBasis.set(product, denom > 0 ? (oldQty * oldWac + qty * unitCost) / denom : unitCost);
+  }
+  rec.qty += qty;
   return rec;
 }
 
@@ -546,28 +578,29 @@ function freeSpaceFor(biz: BizRec, product: ProductId): number {
   return Math.max(0, capacityFor(biz, product) - usedStorage(biz, product));
 }
 
-// Base storage from the unchanged 1–3 facility tier.
+// Base storage from the unchanged 1–3 facility tier. V2.8 Phase 3: derived from
+// the catalog role — a business's FINISHED goods use its finished-goods store,
+// its recipe INPUTS use the ingredient store, and a mini market's assortment
+// uses the shelf. Storage keys off the shared SELLER_SUPPLIES/BUSINESS_INPUTS
+// so adding a product never needs a capacity edit here.
 function baseCapacityFor(biz: BizRec, product: ProductId): number {
   switch (biz.type) {
     case 'farm':
-      return product === 'milk' || product === 'wheat'
-        ? FARM_LEVELS[biz.level].milkCapacity
-        : 0;
+      return SELLER_SUPPLIES.farm.includes(product) ? FARM_LEVELS[biz.level].milkCapacity : 0;
     case 'coffee_shop': {
       const lv = SHOP_LEVELS[biz.level];
-      // V2.8 Phase 2: latte is a finished drink and gets its own finished-goods slot.
-      if (product === 'coffee' || product === 'latte') return lv.coffeeCapacity;
-      return product === 'milk' || product === 'beans' ? lv.ingredientCapacity : 0;
+      if (SELLER_SUPPLIES.coffee_shop.includes(product)) return lv.coffeeCapacity;   // finished drinks
+      if (BUSINESS_INPUTS.coffee_shop.includes(product)) return lv.ingredientCapacity; // milk/beans/strawberry
+      return 0;
     }
     case 'bakery': {
       const lv = BAKERY_LEVELS[biz.level];
-      if (product === 'bread') return lv.coffeeCapacity;
-      return product === 'wheat' ? lv.ingredientCapacity : 0;
+      if (SELLER_SUPPLIES.bakery.includes(product)) return lv.coffeeCapacity;         // finished baked goods
+      if (BUSINESS_INPUTS.bakery.includes(product)) return lv.ingredientCapacity;     // wheat/milk/eggs/strawberry
+      return 0;
     }
     case 'mini_market':
-      return product === 'bread' || product === 'milk'
-        ? MARKET_LEVELS[biz.level].stockCapacity
-        : 0;
+      return BUYER_CONSUMES.mini_market.includes(product) ? MARKET_LEVELS[biz.level].stockCapacity : 0;
   }
 }
 
@@ -819,6 +852,8 @@ export class World extends EventEmitter {
         lastSlotChangeMs: r.last_slot_change ? new Date(r.last_slot_change).getTime() : null,
         progressionLoaded: false,
         prodJobs: [],
+        retailAccum: new Map(Object.entries(accums.retail ?? {}) as [ProductId, number][]),
+        costBasis: new Map(),
       };
       this.businesses.set(biz.id, biz);
       // Catch up simulation for downtime (capped).
@@ -827,7 +862,9 @@ export class World extends EventEmitter {
     }
     for (const r of invRows.rows) {
       const biz = this.businesses.get(r.business_id);
-      if (biz) biz.inv.set(r.product, { qty: r.qty, reserved: r.reserved });
+      if (!biz) continue;
+      biz.inv.set(r.product, { qty: r.qty, reserved: r.reserved });
+      if (r.cost_basis != null && Number(r.cost_basis) > 0) biz.costBasis.set(r.product, Number(r.cost_basis));
     }
     // V2.8: product licenses + active products, then backfill any legacy business
     // with its starter licenses so nothing it currently sells disappears.
@@ -862,6 +899,7 @@ export class World extends EventEmitter {
         createdAtMs: new Date(r.created_at).getTime(),
         startedAtMs: r.started_at ? new Date(r.started_at).getTime() : null,
         completesAtMs: r.completes_at ? new Date(r.completes_at).getTime() : null,
+        inputCost: Number(r.input_cost ?? 0),
       });
     }
     const orders = await query("SELECT * FROM market_orders WHERE status = 'open'");
@@ -891,6 +929,7 @@ export class World extends EventEmitter {
         status: r.status,
         departAtMs: new Date(r.depart_at).getTime(),
         arriveAtMs: new Date(r.arrive_at).getTime(),
+        unitCost: Number(r.unit_cost ?? 0),
       });
     }
 
@@ -1049,7 +1088,7 @@ export class World extends EventEmitter {
             b.milkProduced,
             b.coffeeSold,
             b.customers,
-            JSON.stringify({ prod: b.prodAccum, brew: b.brewAccum, cust: b.custAccum }),
+            JSON.stringify({ prod: b.prodAccum, brew: b.brewAccum, cust: b.custAccum, retail: Object.fromEntries(b.retailAccum) }),
             b.id,
             b.price2,
             b.production,
@@ -1059,9 +1098,9 @@ export class World extends EventEmitter {
         );
         for (const [product, rec] of b.inv) {
           await c.query(
-            `INSERT INTO inventories (business_id, product, qty, reserved) VALUES ($1,$2,$3,$4)
-             ON CONFLICT (business_id, product) DO UPDATE SET qty=$3, reserved=$4`,
-            [b.id, product, rec.qty, rec.reserved]
+            `INSERT INTO inventories (business_id, product, qty, reserved, cost_basis) VALUES ($1,$2,$3,$4,$5)
+             ON CONFLICT (business_id, product) DO UPDATE SET qty=$3, reserved=$4, cost_basis=$5`,
+            [b.id, product, rec.qty, rec.reserved, b.costBasis.get(product) ?? 0]
           );
         }
         b.dirty = false;
@@ -1574,94 +1613,78 @@ export class World extends EventEmitter {
     return this.integrity.get(companyId);
   }
 
+  /** The retail price a business charges NPCs for a product (player-set where
+   * one exists — coffee/bread via `price`, mini-market milk via `price2` — else
+   * the archetype base). */
+  private retailPriceFor(biz: BizRec, product: ProductId): number {
+    if (biz.type === 'mini_market' && product === 'milk') return biz.price2;
+    if ((biz.type === 'coffee_shop' && product === 'coffee') ||
+        (biz.type === 'bakery' && product === 'bread') ||
+        (biz.type === 'mini_market' && product === 'bread')) return biz.price;
+    return RETAIL_BASE[product] ?? PRODUCTS[product].basePrice;
+  }
+
+  /** One NPC customer stream for an active retail product (drains finished stock). */
+  private retailStream(biz: BizRec, owner: PlayerRec, product: ProductId, customersPerSec: number, dt: number, silent: boolean): void {
+    const weight = retailDemandWeight(product);
+    if (weight <= 0) return;
+    const price = this.retailPriceFor(biz, product);
+    const base = RETAIL_BASE[product] ?? PRODUCTS[product].basePrice;
+    const acc = (biz.retailAccum.get(product) ?? 0) +
+      customersPerSec * weight *
+      priceDemandMultiplier(price, base) *
+      repDemandMultiplier(biz.reputation) *
+      this.cityDemand(product) * dt;
+    const arrivals = Math.floor(acc);
+    biz.retailAccum.set(product, acc - arrivals);
+    this.applyRetail(biz, owner, product, price, arrivals, silent);
+  }
+
   /** Core economy simulation for one business over dt seconds. */
   simulate(biz: BizRec, dt: number, silent: boolean): void {
     const owner = this.players.get(biz.ownerId);
     if (!owner) return;
     switch (biz.type) {
       case 'farm': {
+        // V2.8 Phase 3: the farm auto-produces its SELECTED raw product (any it
+        // has licensed + activated). Raw gathering has no recipe/input cost.
         const lv = FARM_LEVELS[biz.level];
-        const product: ProductId = biz.production === 'wheat' ? 'wheat' : 'milk';
+        let product = biz.production as ProductId;
+        if (!SELLER_SUPPLIES.farm.includes(product) || !biz.activeProducts.has(product)) {
+          product = biz.activeProducts.has('milk') ? 'milk' : (biz.activeProducts.has('wheat') ? 'wheat' : product);
+        }
         const rec = inv(biz, product);
         biz.prodAccum += lv.milkPerSec * dt;
         const want = Math.floor(biz.prodAccum);
-        const space = Math.max(0, lv.milkCapacity - rec.qty - rec.reserved);
+        const space = freeSpaceFor(biz, product);
         const add = Math.min(want, space);
         if (add > 0) {
           rec.qty += add;
-          biz.milkProduced += add; // total units produced (milk or wheat)
+          biz.milkProduced += add;
           biz.prodAccum -= add;
+          biz.costBasis.set(product, 0); // raw is produced from the land — zero acquisition cost
           this.addXp(owner, add * XP.perMilkProduced, silent);
-          this.addBizXp(biz, add * BIZ_XP.perUnitProduced); // V2.8 committed production
+          this.addBizXp(biz, add * BIZ_XP.perUnitProduced);
           biz.dirty = true;
         }
-        // Full storage must not bank production time.
         if (biz.prodAccum > 1) biz.prodAccum = 1;
         biz.status = space - add <= 0 ? 'storage_full' : 'producing';
         break;
       }
-      case 'coffee_shop': {
-        const lv = SHOP_LEVELS[biz.level];
-        const coffee = inv(biz, 'coffee');
-        // V2.8 Phase 2: coffee is no longer auto-brewed here — it is manufactured
-        // via the manual production line (one authoritative production path).
-        // Retail (NPC sales) stays automatic and simply drains finished stock.
-        biz.custAccum +=
-          lv.customersPerSec *
-          priceDemandMultiplier(biz.price, RETAIL_BASE.coffee) *
-          repDemandMultiplier(biz.reputation) *
-          this.cityDemand('coffee') * dt;
-        const arrivals = Math.floor(biz.custAccum);
-        biz.custAccum -= arrivals;
-        this.applyRetail(biz, owner, 'coffee', biz.price, arrivals, silent);
-        // Latte retail: a modest premium stream, only while an active latte slot
-        // holds finished stock. Reuses the otherwise-unused prodAccum for arrivals.
-        let latteStock = 0;
-        if (biz.activeProducts.has('latte')) {
-          latteStock = inv(biz, 'latte').qty;
-          const lattePrice = RETAIL_BASE.latte ?? PRODUCTS.latte.basePrice;
-          biz.prodAccum +=
-            lv.customersPerSec * LATTE_DEMAND_FRACTION *
-            repDemandMultiplier(biz.reputation) *
-            this.cityDemand('coffee') * dt;
-          const latteArrivals = Math.floor(biz.prodAccum);
-          biz.prodAccum -= latteArrivals;
-          this.applyRetail(biz, owner, 'latte', lattePrice, latteArrivals, silent);
-        }
-        biz.status = coffee.qty > 0 || latteStock > 0 ? 'open' : 'out_of_stock';
-        break;
-      }
-      case 'bakery': {
-        const lv = BAKERY_LEVELS[biz.level];
-        const bread = inv(biz, 'bread');
-        // V2.8 Phase 2: bread is no longer auto-baked here — it is manufactured
-        // via the manual production line. Retail stays automatic.
-        biz.custAccum +=
-          lv.customersPerSec *
-          priceDemandMultiplier(biz.price, RETAIL_BASE.bread) *
-          repDemandMultiplier(biz.reputation) *
-          this.cityDemand('bread') * dt;
-        const arrivals = Math.floor(biz.custAccum);
-        biz.custAccum -= arrivals;
-        this.applyRetail(biz, owner, 'bread', biz.price, arrivals, silent);
-        biz.status = bread.qty > 0 ? 'open' : 'out_of_stock';
-        break;
-      }
+      // Processors (coffee shop, bakery) and the mini market all retail their
+      // ACTIVE archetype products to NPCs from finished stock. Production is
+      // manual (Phase 2); this only drains stock. One stream per active product.
+      case 'coffee_shop':
+      case 'bakery':
       case 'mini_market': {
-        const lv = MARKET_LEVELS[biz.level];
-        const rep = repDemandMultiplier(biz.reputation);
-        // Two independent customer streams: bread (custAccum) and milk
-        // (prodAccum, unused by retail businesses otherwise).
-        biz.custAccum += lv.customersPerSec * priceDemandMultiplier(biz.price, RETAIL_BASE.bread) * rep * this.cityDemand('bread') * dt;
-        const breadArrivals = Math.floor(biz.custAccum);
-        biz.custAccum -= breadArrivals;
-        this.applyRetail(biz, owner, 'bread', biz.price, breadArrivals, silent);
-        biz.prodAccum += lv.customersPerSec * priceDemandMultiplier(biz.price2, RETAIL_BASE.milk) * rep * this.cityDemand('milk') * dt;
-        const milkArrivals = Math.floor(biz.prodAccum);
-        biz.prodAccum -= milkArrivals;
-        this.applyRetail(biz, owner, 'milk', biz.price2, milkArrivals, silent);
-        biz.status =
-          inv(biz, 'bread').qty > 0 || inv(biz, 'milk').qty > 0 ? 'open' : 'out_of_stock';
+        const cps = (biz.type === 'coffee_shop' ? SHOP_LEVELS : biz.type === 'bakery' ? BAKERY_LEVELS : MARKET_LEVELS)[biz.level].customersPerSec;
+        let anyStock = false;
+        for (const product of FINAL_PRODUCTS_OF[biz.type]) {
+          if (!biz.activeProducts.has(product)) continue;
+          if (inv(biz, product).qty > 0) anyStock = true;
+          this.retailStream(biz, owner, product, cps, dt, silent);
+        }
+        biz.status = anyStock ? 'open' : 'out_of_stock';
         break;
       }
     }
@@ -1880,6 +1903,8 @@ export class World extends EventEmitter {
       lastSlotChangeMs: null,
       progressionLoaded: false,
       prodJobs: [],
+      retailAccum: new Map(),
+      costBasis: new Map(),
     };
     for (const product of STARTING_PRODUCTS[type]) biz.inv.set(product, { qty: 0, reserved: 0 });
     return biz;
@@ -1943,15 +1968,15 @@ export class World extends EventEmitter {
   async buyLicense(playerId: number, bizId: number, product: ProductId): Promise<BizRec> {
     const p = this.player(playerId);
     const biz = this.requireOwnedBiz(playerId, bizId);
-    const def = licenseDef(product);
-    const cap = productCapability(biz.type, product);
-    if (!def || !cap || !productCompatible(biz.type, product)) throw new GameError('err.license_incompatible');
+    const rule = ruleFor(biz.type, product);
+    const cap = rule?.capability ?? null;
+    if (!rule || !cap) throw new GameError('err.license_incompatible');
     if (biz.licenses.has(product)) throw new GameError('err.license_owned');
-    if (biz.bizLevel < def.requiredLevel) throw new GameError('err.license_level', { level: def.requiredLevel });
-    if (def.prereqLicense && !biz.licenses.has(def.prereqLicense)) {
-      throw new GameError('err.license_prereq', { product: def.prereqLicense });
+    if (biz.bizLevel < rule.requiredLevel) throw new GameError('err.license_level', { level: rule.requiredLevel });
+    if (rule.prereqLicense && !biz.licenses.has(rule.prereqLicense)) {
+      throw new GameError('err.license_prereq', { product: rule.prereqLicense });
     }
-    const fee = def.fee;
+    const fee = rule.fee;
     if (p.cash < fee) throw new GameError('err.not_enough_cash', { cost: fee });
 
     const key = `${bizId}:${product}`;
@@ -2125,6 +2150,9 @@ export class World extends EventEmitter {
     try {
       // Commit ingredients in-memory FIRST (synchronous), then persist atomically
       // with the job insert. This ordering is what makes concurrent starts safe.
+      // Capture the committed ingredient cost NOW (weighted-average at commit),
+      // so the finished output later inherits the real price the player paid.
+      const inputCost = plan.inputs.reduce((s, inp) => s + inp.qty * (biz.costBasis.get(inp.product) ?? 0), 0);
       for (const inp of plan.inputs) inv(biz, inp.product).qty -= inp.qty;
       committed = true;
       const recipeSnap: Recipe = {
@@ -2135,16 +2163,16 @@ export class World extends EventEmitter {
       let job!: ProdJobRec;
       await tx(async (c) => {
         const ins = await c.query(
-          `INSERT INTO production_jobs (business_id, product, output_qty, batches, recipe, inputs, status)
-           VALUES ($1,$2,$3,$4,$5,$6,'queued') RETURNING id, created_at`,
-          [bizId, product, plan.output, plan.batches, JSON.stringify(recipeSnap), JSON.stringify(inputsSnap)]
+          `INSERT INTO production_jobs (business_id, product, output_qty, batches, recipe, inputs, status, input_cost)
+           VALUES ($1,$2,$3,$4,$5,$6,'queued',$7) RETURNING id, created_at`,
+          [bizId, product, plan.output, plan.batches, JSON.stringify(recipeSnap), JSON.stringify(inputsSnap), inputCost]
         );
         const row = ins.rows[0];
         job = {
           id: Number(row.id), businessId: bizId, product,
           outputQty: plan.output, batches: plan.batches, recipe: recipeSnap, inputs: inputsSnap,
           status: 'queued', createdAtMs: new Date(row.created_at).getTime(),
-          startedAtMs: null, completesAtMs: null,
+          startedAtMs: null, completesAtMs: null, inputCost,
         };
         for (const inp of plan.inputs) {
           const rec = inv(biz, inp.product);
@@ -2251,6 +2279,11 @@ export class World extends EventEmitter {
     });
     biz.prodJobs = biz.prodJobs.filter((j) => j.id !== job.id);
     if (won) {
+      // V2.8 Phase 3: finished output inherits the committed ingredient cost.
+      const outUnitCost = job.outputQty > 0 ? job.inputCost / job.outputQty : 0;
+      const oldWac = biz.costBasis.get(job.product) ?? 0;
+      const denom = Math.max(0, rec.qty) + job.outputQty;
+      biz.costBasis.set(job.product, denom > 0 ? (Math.max(0, rec.qty) * oldWac + job.outputQty * outUnitCost) / denom : outUnitCost);
       rec.qty = newQty;
       biz.dirty = true;
       this.addBizXp(biz, job.outputQty * BIZ_XP.perUnitProduced); // completion XP, once, by output volume
@@ -2275,12 +2308,24 @@ export class World extends EventEmitter {
       if (!recipe || !timing || !isProducibleProduct(product) || !biz.activeProducts.has(product)) continue;
       const onHand = recipe.inputs.map((i) => ({ product: i.product, qty: inv(biz, i.product).qty }));
       const haveMap = new Map<ProductId, number>(onHand.map((o) => [o.product, o.qty]));
+      // Ingredient cost per 1 output unit from real cost basis. -1 if any input's
+      // cost is unknown (never substitute the Central Wholesale price).
+      let known = true;
+      let batchInput = 0;
+      for (const i of recipe.inputs) {
+        const wac = biz.costBasis.get(i.product) ?? 0;
+        if (wac <= 0) known = false;
+        batchInput += i.qty * wac;
+      }
+      const unitInputCost = known ? batchInput / recipe.outputQty : -1;
       producible.push({
         product,
         recipe: { output: recipe.output, outputQty: recipe.outputQty, inputs: recipe.inputs.map((i) => ({ product: i.product, qty: i.qty })) },
         onHand,
         maxOutput: maxOutputForInputs(recipe, haveMap),
         batchSize: timing.batchSize, batchSecs: timing.batchSecs,
+        unitInputCost,
+        retailPrice: RETAIL_BASE[product] ?? PRODUCTS[product].basePrice,
       });
     }
     return {
@@ -2601,7 +2646,7 @@ export class World extends EventEmitter {
     this.addXp(p, XP.perNpcPurchase);
 
     try {
-      const delivery = await this.createDelivery(product, qty, WHOLESALE_LOT_ID, biz);
+      const delivery = await this.createDelivery(product, qty, WHOLESALE_LOT_ID, biz, qty > 0 ? cost / qty : 0);
       await tx(async (c) => {
         await c.query('UPDATE players SET cash=$1, xp=$2, level=$3 WHERE id=$4', [
           p.cash,
@@ -2646,7 +2691,8 @@ export class World extends EventEmitter {
     product: ProductId,
     qty: number,
     fromLotId: string,
-    toBiz: BizRec
+    toBiz: BizRec,
+    unitCost = 0 // V2.8 Phase 3: real per-unit price paid, for the buyer's cost basis
   ): Promise<DeliveryRec> {
     const fromLot = lotById(fromLotId);
     const toLot = lotById(toBiz.lotId);
@@ -2656,9 +2702,9 @@ export class World extends EventEmitter {
     const now = Date.now();
     const arrive = now + seconds * 1000;
     const res = await query(
-      `INSERT INTO deliveries (product, qty, from_lot, to_lot, to_business, depart_at, arrive_at)
-       VALUES ($1,$2,$3,$4,$5,to_timestamp($6/1000.0),to_timestamp($7/1000.0)) RETURNING id`,
-      [product, qty, fromLotId, toBiz.lotId, toBiz.id, now, arrive]
+      `INSERT INTO deliveries (product, qty, from_lot, to_lot, to_business, depart_at, arrive_at, unit_cost)
+       VALUES ($1,$2,$3,$4,$5,to_timestamp($6/1000.0),to_timestamp($7/1000.0),$8) RETURNING id`,
+      [product, qty, fromLotId, toBiz.lotId, toBiz.id, now, arrive, unitCost]
     );
     const d: DeliveryRec = {
       id: res.rows[0].id,
@@ -2670,6 +2716,7 @@ export class World extends EventEmitter {
       status: 'in_transit',
       departAtMs: now,
       arriveAtMs: arrive,
+      unitCost,
     };
     this.deliveries.set(d.id, d);
     return d;
@@ -2713,8 +2760,8 @@ export class World extends EventEmitter {
       }
       return;
     }
-    // Fits — unload the whole delivery.
-    rec.qty += d.qty;
+    // Fits — unload the whole delivery, blending its real price into cost basis.
+    addInventoryWithCost(biz, d.product, d.qty, d.unitCost);
     biz.dirty = true;
     d.status = 'delivered';
     await tx(async (c) => {
@@ -2949,7 +2996,7 @@ export class World extends EventEmitter {
 
     this.fulfillLocks.add(orderId);
     try {
-      const delivery = await this.createDelivery(order.product, qty, sellerBiz.lotId, buyerBiz);
+      const delivery = await this.createDelivery(order.product, qty, sellerBiz.lotId, buyerBiz, order.price);
       const tradeId = await tx(async (c) => {
         const upd = await c.query(
           `UPDATE market_orders SET remaining=$1, status=$2 WHERE id=$3 AND status='open' RETURNING id`,
@@ -3251,7 +3298,7 @@ export class World extends EventEmitter {
       c.nextExecutionAtMs = c.remaining <= 0 ? null : nextAt;
       c.lastResult = c.remaining <= 0 ? 'completed' : 'delivered';
 
-      const delivery = await this.createDelivery(c.product, c.quantity, sellerBiz.lotId, buyerBiz);
+      const delivery = await this.createDelivery(c.product, c.quantity, sellerBiz.lotId, buyerBiz, c.unitPrice);
       await tx(async (cl) => {
         const upd = await cl.query(
           `UPDATE contracts SET remaining_deliveries=$1, status=$2, last_result=$3,
@@ -3429,7 +3476,10 @@ export class World extends EventEmitter {
   setProduction(playerId: number, product: ProductId, bizId?: number): void {
     const biz = this.requireOwnedBiz(playerId, bizId);
     if (biz.type !== 'farm') throw new GameError('err.only_farms_production');
-    if (product !== 'milk' && product !== 'wheat') throw new GameError('err.farm_product_choice');
+    // V2.8 Phase 3: a farm may auto-produce any raw product it has licensed AND
+    // activated (milk/wheat/eggs/strawberry) — its specialization choice.
+    if (!SELLER_SUPPLIES.farm.includes(product)) throw new GameError('err.farm_product_choice');
+    if (!biz.activeProducts.has(product)) throw new GameError('err.product_inactive', { product });
     if (biz.production === product) return;
     biz.production = product;
     biz.prodAccum = 0;
@@ -3612,11 +3662,11 @@ export class World extends EventEmitter {
     const available = licensableProducts(b.type)
       .filter((l) => !b.licenses.has(l.product))
       .map((l) => {
-        const levelMet = b.bizLevel >= l.def.requiredLevel;
-        const prereqMet = !l.def.prereqLicense || b.licenses.has(l.def.prereqLicense);
+        const levelMet = b.bizLevel >= l.rule.requiredLevel;
+        const prereqMet = !l.rule.prereqLicense || b.licenses.has(l.rule.prereqLicense);
         return {
-          product: l.product, capability: l.capability, requiredLevel: l.def.requiredLevel,
-          prereqLicense: l.def.prereqLicense, fee: l.def.fee, recipe: l.def.recipe,
+          product: l.product, capability: l.capability, requiredLevel: l.rule.requiredLevel,
+          prereqLicense: l.rule.prereqLicense, fee: l.rule.fee, recipe: l.recipe,
           levelMet, prereqMet, met: levelMet && prereqMet,
         };
       });
@@ -5117,7 +5167,7 @@ export class World extends EventEmitter {
       if (sCo) this.addCompanyXp(sCo, COMPANY_XP.perTrade);
       o.status = 'accepted';
 
-      const delivery = await this.createDelivery(o.product, o.curQty, sellerBiz.lotId, buyerBiz);
+      const delivery = await this.createDelivery(o.product, o.curQty, sellerBiz.lotId, buyerBiz, o.curPrice);
       await tx(async (c) => {
         const upd = await c.query(
           "UPDATE trade_offers SET status='accepted', updated_at=now() WHERE id=$1 AND version=$2 AND status IN ('pending','countered') RETURNING id",
@@ -5257,6 +5307,7 @@ export class World extends EventEmitter {
         reserved: rec.reserved,
         incoming: this.incomingFor(b.id, product),
         capacity: capacityFor(b, product),
+        costBasis: Math.round((b.costBasis.get(product) ?? 0) * 100) / 100,
       };
     }
     return {

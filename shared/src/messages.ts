@@ -276,6 +276,7 @@ export interface InventoryEntry {
   reserved: number;
   incoming: number;
   capacity: number;
+  costBasis: number; // V2.8 Phase 3: weighted-avg acquisition $/unit (0 = unknown)
 }
 
 /**
@@ -370,6 +371,10 @@ export interface ProducibleProductPub {
   maxOutput: number;                 // ingredient-limited max output (server truth)
   batchSize: number;                 // output units per timing batch
   batchSecs: number;                 // seconds per timing batch (before level speed)
+  // V2.8 Phase 3 profitability: ingredient cost per 1 output unit from real cost
+  // basis (-1 = unavailable), and the NPC retail reference for the output.
+  unitInputCost: number;
+  retailPrice: number;
 }
 
 /** Owner-private production state for one business. */

@@ -14,10 +14,10 @@ const multi: Recipe = { output: 'bread', outputQty: 2, inputs: [{ product: 'whea
 
 describe('planProduction — recipe scaling', () => {
   it('scales a single-input recipe', () => {
-    const p = planProduction(bread, 100)!;
+    const p = planProduction(bread, 100)!; // V2.8 Phase 3: bread = 2 wheat -> 1 bread
     expect(p.batches).toBe(100);
     expect(p.output).toBe(100);
-    expect(p.inputs).toEqual([{ product: 'wheat', qty: 100 }]);
+    expect(p.inputs).toEqual([{ product: 'wheat', qty: 200 }]);
   });
 
   it('scales a multi-input recipe', () => {

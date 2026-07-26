@@ -37,15 +37,17 @@ describe('event lifecycle', () => {
     // Advance past the announce window: it becomes active and demand rises.
     await world.processEvents(e.startsAtMs + 1);
     expect(world.cityEvents.find((x) => x.id === e.id)!.status).toBe('active');
-    expect(world.cityDemand('bread')).toBeCloseTo(1.4, 5); // +40%
-    expect(world.cityDemand('coffee')).toBeCloseTo(1.5, 5); // +50%
+    // V2.8 Phase 3: City Festival now drives premium demand (cake/cookie/coffee).
+    expect(world.cityDemand('cake')).toBeCloseTo(1.7, 5);            // +70%
+    expect(world.cityDemand('strawberry_cake')).toBeCloseTo(2.0, 5); // +100%
+    expect(world.cityDemand('coffee')).toBeCloseTo(1.2, 5);         // +20%
     row = await query(`SELECT status FROM city_events WHERE id=$1`, [e.id]);
     expect(row.rows[0].status).toBe('active');
 
     // Advance past the end: it ends and demand returns to normal.
     await world.processEvents(e.endsAtMs + 1);
     expect(world.cityEvents.find((x) => x.id === e.id)).toBeUndefined();
-    expect(world.cityDemand('bread')).toBe(1);
+    expect(world.cityDemand('cake')).toBe(1);
     row = await query(`SELECT status FROM city_events WHERE id=$1`, [e.id]);
     expect(row.rows[0].status).toBe('ended');
   });
@@ -55,12 +57,12 @@ describe('demand modifier calculation', () => {
   it('derives effective demand freshly and never double-applies', async () => {
     const e = await world.createEvent('city_festival', { announceSecs: 5, durationSecs: 30 });
     await world.processEvents(e.startsAtMs + 1); // active
-    const first = world.cityDemand('bread');
+    const first = world.cityDemand('cake');
     // Re-processing the same active event must not compound the modifier.
     await world.processEvents(e.startsAtMs + 2);
     await world.processEvents(e.startsAtMs + 3);
-    expect(world.cityDemand('bread')).toBe(first);
-    expect(first).toBeCloseTo(1.4, 5);
+    expect(world.cityDemand('cake')).toBe(first);
+    expect(first).toBeCloseTo(1.7, 5);
   });
 
   it('is bounded within the safe demand band', async () => {
@@ -95,7 +97,7 @@ describe('restart persistence', () => {
     const resumed = world2.cityEvents.find((x) => x.id === e.id);
     expect(resumed).toBeDefined();
     expect(resumed!.status).toBe('active');
-    expect(world2.cityDemand('bread')).toBeCloseTo(1.4, 5);
+    expect(world2.cityDemand('cake')).toBeCloseTo(1.7, 5);
   });
 });
 
@@ -133,10 +135,10 @@ describe('demand affects real NPC sales', () => {
     world.simulate(baseBiz, 400, true);
     const soldBase = baseBiz.coffeeSold - before;
 
-    // Same setup, but with an active City Festival (+40% bread demand).
-    const e = await world.createEvent('city_festival', { announceSecs: 2, durationSecs: 600 });
+    // Same setup, but with an active Local Market Day (+20% bread demand).
+    const e = await world.createEvent('local_market_day', { announceSecs: 2, durationSecs: 600 });
     await world.processEvents(e.startsAtMs + 1);
-    expect(world.cityDemand('bread')).toBeCloseTo(1.4, 5);
+    expect(world.cityDemand('bread')).toBeCloseTo(1.2, 5);
     const beforeE = evtBiz.coffeeSold;
     world.simulate(evtBiz, 400, true);
     const soldEvent = evtBiz.coffeeSold - beforeE;

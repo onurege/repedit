@@ -17,6 +17,14 @@ export interface UpdateDef {
 // Newest first. Adding an entry makes it pop for players who haven't seen it.
 export const UPDATES: UpdateDef[] = [
   {
+    // V2.8 Phase 3 — product catalog, supply chains, demand & profitability.
+    id: 'v2_8_3',
+    version: 'V2.8',
+    titleKey: 'update.v2_8_3.title',
+    taglineKey: 'update.v2_8_3.tagline',
+    featureKeys: ['update.v2_8_3.f1', 'update.v2_8_3.f2', 'update.v2_8_3.f3', 'update.v2_8_3.f4'],
+  },
+  {
     // V2.8 Phase 2 — manual production, batch planning & production queue.
     id: 'v2_8_2',
     version: 'V2.8',
