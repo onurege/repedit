@@ -19,7 +19,7 @@ import {
   type RivalAlert, type CityNewsItem, type UrgentOrderPub,
   MARKET_MIN_PRICE, MARKET_MAX_PRICE, MARKET_MAX_QTY,
   MAX_BUSINESS_LEVEL, levelReward, businessTier, slotsForLevel,
-  productionDurationSecs, RETAIL_BASE,
+  productionDurationSecs, RETAIL_BASE, TRADABLE_PRODUCTS, isTradable, WHOLESALE_PRODUCTS,
   type BizPriv, type RecipePub, type OwnedLicensePub, type AvailableLicensePub, type SupplyEconomy,
 } from '@district/shared';
 import { IS_TOUCH } from '../touch.js';
@@ -1128,6 +1128,7 @@ export class UI {
         : t(`biz.hint.${biz.type}`, { wheat: NPC_WHOLESALE_PRICES.wheat! });
       this.setBody(body, `
         <div class="bigstatus ${statusIsBad(biz.status) ? 'bad' : 'ok'}">${statusText(biz.status)}</div>
+        <div class="kv"><span class="k">${t('biz.biz_level')}</span><span class="v">${biz.bizLevel} / ${MAX_BUSINESS_LEVEL}${biz.master ? ' ★' : ''}</span></div>
         <div class="kv"><span class="k">${t('biz.level')}</span><span class="v">${biz.level} / ${MAX_LEVEL}</span></div>
         <div class="kv"><span class="k">${t('biz.revenue')}</span><span class="v pos">${fmt(biz.revenue)}</span></div>
         <div class="kv"><span class="k">${t('biz.expenses')}</span><span class="v neg">${fmt(biz.expenses)}</span></div>
@@ -1182,7 +1183,8 @@ export class UI {
           </div>`;
         })
         .join('') +
-        `<div class="hint">${t('inv.hint')}</div>`);
+        `<div class="hint">${t('inv.hint')}</div>` +
+        this.transferFormHtml(biz), (b) => this.bindTransferForm(b, biz));
     } else if (tab === 'production' && isFarm) {
       const lv = FARM_LEVELS[biz.level];
       const producing = biz.production as ProductId;
@@ -1389,6 +1391,9 @@ export class UI {
         <button class="btn success pp-start" id="pp-start" ${canProduce && !queueFull ? '' : 'disabled'}>${t('prod.start')}</button>
         <div class="hint">${t('prod.mfg_hint', { mult: line.speedMult })}</div>
       </div>`, (b) => {
+      b.querySelectorAll('[data-cancel-job]').forEach((el) => el.addEventListener('click', () => {
+        sfx.click(); client.send({ t: 'cancel_production', bizId: biz.id, jobId: parseInt((el as HTMLElement).dataset.cancelJob!, 10) });
+      }));
       b.querySelectorAll('[data-psel]').forEach((el) => el.addEventListener('click', () => {
         sfx.click(); this.prodSel = (el as HTMLElement).dataset.psel as ProductId; this.prodQty = 0; this.lastBodyHTML = ''; this.renderPanel();
       }));
@@ -1454,9 +1459,39 @@ export class UI {
     }
     const restHtml = rest.length
       ? `<div class="pq-next-h">${t('prod.up_next')}</div>${rest.map((j, i) =>
-          `<div class="pq-row"><span class="pq-i">${i + 1}</span><span>${PRODUCTS[j.product].emoji} ${j.outputQty} ${pName(j.product)}${j.repeatRemaining > 0 ? ` <span class="pq-repeat">↻${j.repeatRemaining}</span>` : ''}</span></div>`).join('')}`
+          `<div class="pq-row"><span class="pq-i">${i + 1}</span><span class="pq-rp">${PRODUCTS[j.product].emoji} ${j.outputQty} ${pName(j.product)}${j.repeatRemaining > 0 ? ` <span class="pq-repeat">↻${j.repeatRemaining}</span>` : ''}</span><button class="btn tiny warn" data-cancel-job="${j.id}" title="${t('prod.cancel')}">✕</button></div>`).join('')}`
       : '';
     return `<div class="pq">${nowHtml}${restHtml}<div class="pq-note">${t('prod.committed_note')}</div></div>`;
+  }
+
+  /** V2.8.1 Part 9 — internal company transfer form (only if you own >1 business). */
+  private transferFormHtml(biz: import('@district/shared').BizPriv): string {
+    const others = [...client.myBusinesses.values()].filter((b) => b.id !== biz.id);
+    if (!others.length) return '';
+    const sellable = (Object.keys(biz.inventory) as ProductId[]).filter((p) => (biz.inventory[p]?.qty ?? 0) > 0);
+    if (!sellable.length) return `<div class="xfer"><h4 class="xfer-h">${t('xfer.title')}</h4><p class="hint">${t('xfer.empty')}</p></div>`;
+    return `<div class="xfer">
+      <h4 class="xfer-h">${t('xfer.title')}</h4>
+      <div class="xfer-row">
+        <select id="xfer-prod">${sellable.map((p) => `<option value="${p}">${PRODUCTS[p].emoji} ${pName(p)} (${biz.inventory[p]!.qty})</option>`).join('')}</select>
+        <span>→</span>
+        <select id="xfer-to">${others.map((b) => `<option value="${b.id}">${bizHeading(b)}</option>`).join('')}</select>
+        <input id="xfer-qty" type="number" min="1" value="20" style="width:72px" />
+        <button class="btn small primary" id="xfer-go">${t('xfer.send')}</button>
+      </div>
+      <div class="hint">${t('xfer.hint')}</div>
+    </div>`;
+  }
+
+  private bindTransferForm(b: HTMLElement, biz: import('@district/shared').BizPriv): void {
+    b.querySelector('#xfer-go')?.addEventListener('click', () => {
+      const product = (b.querySelector('#xfer-prod') as HTMLSelectElement)?.value as ProductId;
+      const toBizId = parseInt((b.querySelector('#xfer-to') as HTMLSelectElement)?.value ?? '0', 10);
+      const qty = parseInt((b.querySelector('#xfer-qty') as HTMLInputElement)?.value ?? '0', 10);
+      if (!product || !toBizId || !(qty > 0)) return;
+      sfx.click();
+      client.send({ t: 'transfer_internal', fromBizId: biz.id, toBizId, product, qty });
+    });
   }
 
   /** Estimated cost / revenue / gross margin for a planned batch (labelled ESTIMATED). */
@@ -1727,13 +1762,22 @@ export class UI {
     if (tab === 'orders') {
       const orders = [...client.orders.values()].sort((a, b) => b.createdAt - a.createdAt);
       const rows = orders.map((o) => this.orderRow(o, o.ownerId !== myId)).join('');
+      // V2.8.1: product lists come from ONE authoritative source, business-aware.
+      // SELL = products the SELECTED business currently owns (tradable, in stock).
+      // BUY  = every tradable product. No hardcoded lists.
+      const myBiz = client.myBiz;
+      const sellable = myBiz
+        ? (Object.keys(myBiz.inventory) as ProductId[]).filter((p) => isTradable(p) && (myBiz.inventory[p]?.qty ?? 0) > 0)
+        : [];
+      const opt = (pid: ProductId) => `<option value="${pid}">${PRODUCTS[pid].emoji} ${pName(pid)}</option>`;
+      const productOptions = (side: 'buy' | 'sell') =>
+        (side === 'sell' ? sellable : TRADABLE_PRODUCTS).map(opt).join('') || `<option value="">${t('market.no_sellable')}</option>`;
       this.setBody(body, `
         <div class="mkt-form">
-          <h4>${t('market.create')}</h4>
+          <h4>${t('market.create')}${myBiz ? ` · ${bizHeading(myBiz)}` : ''}</h4>
           <div class="mkt-row">
             <select id="mo-side"><option value="sell">${t('market.side.sell')}</option><option value="buy">${t('market.side.buy')}</option></select>
-            <select id="mo-product">${(['milk', 'wheat', 'bread', 'beans'] as ProductId[])
-              .map((pid) => `<option value="${pid}">${pName(pid)}</option>`).join('')}</select>
+            <select id="mo-product">${productOptions('sell')}</select>
             <input id="mo-qty" type="number" min="1" value="100" style="width:76px" title="${t('market.qty')}" />
             <span>@</span>
             <input id="mo-price" type="number" min="1" value="12" style="width:64px" title="${t('market.unit_price')}" />
@@ -1742,12 +1786,16 @@ export class UI {
           <div class="hint">${t('market.hint', { price: NPC_WHOLESALE_PRICES.milk! })}</div>
         </div>
         ${rows || `<p class="hint">${t('market.empty')}</p>`}`, (b) => {
+        const sideSel = b.querySelector('#mo-side') as HTMLSelectElement;
+        const prodSel = b.querySelector('#mo-product') as HTMLSelectElement;
+        sideSel.addEventListener('change', () => { prodSel.innerHTML = productOptions(sideSel.value as 'buy' | 'sell'); });
         b.querySelector('#mo-create')!.addEventListener('click', () => {
-          const side = (b.querySelector('#mo-side') as HTMLSelectElement).value as 'buy' | 'sell';
-          const product = (b.querySelector('#mo-product') as HTMLSelectElement).value as ProductId;
+          const side = sideSel.value as 'buy' | 'sell';
+          const product = prodSel.value as ProductId;
+          if (!product) { sfx.click(); return; }
           const qty = parseInt((b.querySelector('#mo-qty') as HTMLInputElement).value, 10);
           const price = parseInt((b.querySelector('#mo-price') as HTMLInputElement).value, 10);
-          client.send({ t: 'order_create', side, product, qty, price });
+          client.send({ t: 'order_create', side, product, qty, price, bizId: myBiz?.id });
           this.setFlag('created_order');
           sfx.click();
         });
@@ -1852,9 +1900,11 @@ export class UI {
       </div>`;
     };
 
-    const rows = (['wheat', 'milk', 'beans', 'bread'] as ProductId[]).map(rowFor).join('');
+    // V2.8.1: raw materials only, from the authoritative wholesale list (no bread).
+    const rows = WHOLESALE_PRODUCTS.map(rowFor).join('');
     this.setBody(body, `
       ${rows}
+      <div class="hint">${t('wholesale.raw_only')}</div>
       <div class="hint">${t('wholesale.hint2')}</div>`, (bd) => {
       bd.querySelectorAll('[data-npc-buy]').forEach((b) =>
         b.addEventListener('click', () => {
@@ -2627,7 +2677,6 @@ export class UI {
   }
 
   // ---- V2.7 Phase 3 UI polish: in-game offer / counter-offer modal ----
-  private static readonly OFFER_TRADABLE: ProductId[] = ['milk', 'beans', 'wheat', 'bread'];
   private static readonly OFFER_EXPIRY_MINUTES = [5, 10, 15, 30];
 
   /**
@@ -2651,12 +2700,17 @@ export class UI {
     const otherLabel = target.companyName ?? otherName;
     const isCounter = opts.mode === 'counter';
 
-    // Products valid for direct trade that this business actually tracks.
-    const storable = UI.OFFER_TRADABLE.filter((p) => (myBiz.inventory[p]?.capacity ?? 0) > 0 || (myBiz.inventory[p]?.qty ?? 0) > 0);
-    const products = storable.length ? storable : UI.OFFER_TRADABLE;
+    // V2.8.1: product list is business-aware and from the shared TRADABLE source.
+    // SELL = products this business owns (in stock); BUY = every tradable product.
+    const productsFor = (side: 'buy' | 'sell'): ProductId[] => side === 'sell'
+      ? (Object.keys(myBiz.inventory) as ProductId[]).filter((p) => isTradable(p) && (myBiz.inventory[p]?.qty ?? 0) > 0)
+      : [...TRADABLE_PRODUCTS];
+    const initialSide = (isCounter ? (opts.counter!.iAmBuyer ? 'buy' : 'sell') : 'buy') as 'buy' | 'sell';
+    let products = productsFor(initialSide);
+    if (!products.length && initialSide === 'sell') products = [...TRADABLE_PRODUCTS];
 
     const state = {
-      side: (isCounter ? (opts.counter!.iAmBuyer ? 'buy' : 'sell') : 'buy') as 'buy' | 'sell',
+      side: initialSide,
       product: (isCounter ? opts.counter!.product : products[0]) as ProductId,
       qty: isCounter ? opts.counter!.qty : 100,
       price: isCounter ? opts.counter!.price : 10,
@@ -2808,9 +2862,20 @@ export class UI {
 
     // Wire selectors.
     if (!isCounter) {
+      const bindProdChips = () => overlay.querySelectorAll('[data-prod]').forEach((el) => el.addEventListener('click', () => {
+        state.product = (el as HTMLElement).dataset.prod as ProductId;
+        overlay.querySelectorAll('.prod-chip').forEach((c) => c.classList.toggle('selected', (c as HTMLElement).dataset.prod === state.product));
+        refresh();
+      }));
       overlay.querySelectorAll('[data-side]').forEach((el) => el.addEventListener('click', () => {
         state.side = (el as HTMLElement).dataset.side as 'buy' | 'sell';
         overlay.querySelectorAll('.side-card').forEach((c) => c.classList.toggle('selected', (c as HTMLElement).dataset.side === state.side));
+        // Rebuild the product picker for the new side (SELL = owned, BUY = tradable).
+        let list = productsFor(state.side);
+        if (!list.length) list = [...TRADABLE_PRODUCTS];
+        if (!list.includes(state.product)) state.product = list[0];
+        const picker = overlay.querySelector('#prod-picker');
+        if (picker) { picker.innerHTML = list.map(prodChip).join(''); bindProdChips(); }
         refresh();
       }));
       overlay.querySelectorAll('[data-exp]').forEach((el) => el.addEventListener('click', () => {
@@ -2818,11 +2883,7 @@ export class UI {
         overlay.querySelectorAll('.expiry-chip').forEach((c) => c.classList.toggle('selected', Number((c as HTMLElement).dataset.exp) === state.expiryMin));
         refresh();
       }));
-      overlay.querySelectorAll('[data-prod]').forEach((el) => el.addEventListener('click', () => {
-        state.product = (el as HTMLElement).dataset.prod as ProductId;
-        overlay.querySelectorAll('.prod-chip').forEach((c) => c.classList.toggle('selected', (c as HTMLElement).dataset.prod === state.product));
-        refresh();
-      }));
+      bindProdChips();
     }
     $('#qty-dec').addEventListener('click', () => { qtyEl.value = String(Math.max(1, Math.floor(Number(qtyEl.value)) - 10)); refresh(); });
     $('#qty-inc').addEventListener('click', () => { qtyEl.value = String(Math.floor(Number(qtyEl.value)) + 10); refresh(); });

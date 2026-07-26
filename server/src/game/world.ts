@@ -63,6 +63,7 @@ import {
   MARKET_MIN_PRICE,
   MARKET_MAX_PRICE,
   MARKET_MAX_QTY,
+  TRADABLE_PRODUCTS,
   BUSINESS_NAME_MIN,
   BUSINESS_NAME_MAX,
   LOTS,
@@ -177,6 +178,7 @@ import {
   isCityIcon,
   maxProductionRepeat,
   type Recipe,
+  type ProductionPlan,
   type ProductionJobPub,
   type ProductionLinePub,
   type ProductionStatus,
@@ -527,13 +529,8 @@ function activityParams(e: ActivityEntry): any[] {
   return [e.companyId, e.businessId, e.kind, e.product, e.units, e.amount];
 }
 
-// V2.8 Phase 3: the whole catalog trades on the marketplace so the supply chain
-// (farm raw -> processor finished -> mini market) can flow between players.
-const TRADABLE: ProductId[] = [
-  'milk', 'beans', 'wheat', 'eggs', 'strawberry',
-  'bread', 'croissant', 'cookie', 'cake', 'strawberry_cake',
-  'coffee', 'latte', 'cappuccino', 'strawberry_latte',
-];
+// V2.8.1: single source of truth — the shared TRADABLE_PRODUCTS list (no local copy).
+const TRADABLE = TRADABLE_PRODUCTS;
 
 const STARTING_PRODUCTS: Record<BusinessType, ProductId[]> = {
   farm: ['milk', 'wheat'],
@@ -2189,6 +2186,44 @@ export class World extends EventEmitter {
     return Math.max(1, Math.round(productionDurationSecs(product, output, biz.bizLevel) * specSpeedMult(biz.specialization, biz.bizLevel, product)));
   }
 
+  /** Finished output already committed to a product's slot by all live jobs. */
+  private lineOutputFor(biz: BizRec, product: ProductId): number {
+    return biz.prodJobs.reduce((s, j) => s + (j.product === product ? j.outputQty : 0), 0);
+  }
+  /**
+   * V2.8.1: room (units) a NEW batch of `product` may occupy without a PROJECTED
+   * overflow — capacity minus on-hand+reserved, incoming deliveries, and output
+   * already queued. Production may not begin beyond this; WAITING_FOR_STORAGE is
+   * reserved for genuine races (a delivery landing between start and completion).
+   */
+  private projectedOutputRoom(biz: BizRec, product: ProductId): number {
+    return Math.max(0, capacityFor(biz, product) - usedStorage(biz, product) - this.incomingFor(biz.id, product) - this.lineOutputFor(biz, product));
+  }
+  /**
+   * The ONE production-start validation used by the planner MAX, start_production
+   * and auto-repeat — a single source of truth. Returns a ready error, or null.
+   */
+  private productionStartError(biz: BizRec, product: ProductId, plan: ProductionPlan): { code: string; params?: MsgParams } | null {
+    const recipe = recipeFor(product);
+    if (!recipe || !isProducibleProduct(product) || !productCompatible(biz.type, product)) return { code: 'err.not_producible', params: { product } };
+    if (biz.licenses.get(product) !== 'produce') return { code: 'err.produce_license_needed', params: { product } };
+    if (!biz.activeProducts.has(product)) return { code: 'err.product_inactive', params: { product } };
+    if (capacityFor(biz, product) <= 0) return { code: 'err.cannot_store_that' };
+    if (biz.prodJobs.length >= this.queueLimitFor(biz)) return { code: 'err.production_queue_full', params: { limit: this.queueLimitFor(biz) } };
+    for (const inp of plan.inputs) {
+      const have = inv(biz, inp.product).qty;
+      if (have < inp.qty) return { code: 'err.missing_ingredient', params: { product: inp.product, need: inp.qty, have } };
+    }
+    const room = this.projectedOutputRoom(biz, product);
+    if (plan.output > room) return { code: 'err.storage_would_overflow', params: { room } };
+    return null;
+  }
+  /** Max output a NEW batch may produce right now: min(ingredients, projected storage room). */
+  private maxProducibleNow(biz: BizRec, product: ProductId, recipe: Recipe): number {
+    const haveMap = new Map<ProductId, number>(recipe.inputs.map((i) => [i.product, inv(biz, i.product).qty]));
+    return Math.min(maxOutputForInputs(recipe, haveMap), this.projectedOutputRoom(biz, product));
+  }
+
   private findJob(jobId: number): { biz: BizRec; job: ProdJobRec } | null {
     for (const biz of this.businesses.values()) {
       const job = biz.prodJobs.find((j) => j.id === jobId);
@@ -2210,25 +2245,13 @@ export class World extends EventEmitter {
     // V2.8 Phase 4: bounded auto-repeat, clamped to what this level unlocks.
     const repeatRemaining = Math.max(0, Math.min(Math.floor(repeat) || 0, maxProductionRepeat(biz.bizLevel)));
     const recipe = recipeFor(product);
-    if (!recipe || !isProducibleProduct(product)) throw new GameError('err.not_producible', { product });
-    if (!productCompatible(biz.type, product)) throw new GameError('err.not_producible', { product });
-    if (biz.licenses.get(product) !== 'produce') throw new GameError('err.produce_license_needed', { product });
-    if (!biz.activeProducts.has(product)) throw new GameError('err.product_inactive', { product });
-    if (capacityFor(biz, product) <= 0) throw new GameError('err.cannot_store_that');
-
+    if (!recipe) throw new GameError('err.not_producible', { product });
     const plan = planProduction(recipe, Math.floor(desiredQty));
     if (!plan) throw new GameError('err.invalid_qty');
-
-    const limit = this.queueLimitFor(biz);
-    if (biz.prodJobs.length >= limit) throw new GameError('err.production_queue_full', { limit });
-
-    // Ingredients must be available from UNCOMMITTED on-hand stock (goods already
-    // committed to earlier queued jobs are gone from inventory, so they can never
-    // be double-spent here).
-    for (const inp of plan.inputs) {
-      const have = inv(biz, inp.product).qty;
-      if (have < inp.qty) throw new GameError('err.missing_ingredient', { product: inp.product, need: inp.qty, have });
-    }
+    // V2.8.1: ONE shared validation (license/active/queue/ingredients/storage
+    // projection) — the planner MAX and auto-repeat use the exact same check.
+    const err = this.productionStartError(biz, product, plan);
+    if (err) throw new GameError(err.code, err.params);
 
     if (this.productionLocks.has(bizId)) throw new GameError('err.production_busy');
     this.productionLocks.add(bizId);
@@ -2394,23 +2417,16 @@ export class World extends EventEmitter {
   private async tryRepeat(biz: BizRec, prev: ProdJobRec, silent: boolean): Promise<void> {
     const nextRepeat = prev.repeatRemaining - 1;
     const recipe = recipeFor(prev.product);
-    const reason = (): string | null => {
-      if (!recipe || !isProducibleProduct(prev.product)) return 'not_producible';
-      if (biz.licenses.get(prev.product) !== 'produce') return 'license';
-      if (!biz.activeProducts.has(prev.product)) return 'inactive';
-      if (biz.prodJobs.length >= this.queueLimitFor(biz)) return 'queue_full';
-      const plan = planProduction(recipe, prev.outputQty);
-      if (!plan) return 'invalid';
-      for (const inp of plan.inputs) if (inv(biz, inp.product).qty < inp.qty) return 'ingredients';
-      return null;
-    };
-    const why = reason();
-    if (why) {
-      console.log(`[econ] PRODUCTION_REPEAT_SKIP biz=${biz.id} ${prev.product} reason=${why}`);
-      if (!silent) this.emit('production_repeat_failed', { ownerId: biz.ownerId, product: prev.product, reason: why });
+    const plan = recipe ? planProduction(recipe, prev.outputQty) : null;
+    // V2.8.1: the repeat uses the EXACT SAME validation as a manual start.
+    const err = !recipe || !plan ? { code: 'not_producible' } : this.productionStartError(biz, prev.product, plan);
+    if (err) {
+      const reason = err.code.replace(/^err\./, '').replace('missing_ingredient', 'ingredients').replace('storage_would_overflow', 'storage').replace('produce_license_needed', 'license');
+      console.log(`[econ] PRODUCTION_REPEAT_SKIP biz=${biz.id} ${prev.product} reason=${reason}`);
+      if (!silent) this.emit('production_repeat_failed', { ownerId: biz.ownerId, product: prev.product, reason });
       return;
     }
-    const plan = planProduction(recipe!, prev.outputQty)!;
+    if (!plan || !recipe) return; // (narrowing — guaranteed non-null past the check)
     const inputCost = plan.inputs.reduce((s, inp) => s + inp.qty * (biz.costBasis.get(inp.product) ?? 0), 0);
     for (const inp of plan.inputs) inv(biz, inp.product).qty -= inp.qty; // commit exactly once
     const recipeSnap: Recipe = { output: recipe!.output, outputQty: recipe!.outputQty, inputs: recipe!.inputs.map((i) => ({ product: i.product, qty: i.qty })) };
@@ -2445,7 +2461,6 @@ export class World extends EventEmitter {
       const timing = PRODUCTION_TIMING[product];
       if (!recipe || !timing || !isProducibleProduct(product) || !biz.activeProducts.has(product)) continue;
       const onHand = recipe.inputs.map((i) => ({ product: i.product, qty: inv(biz, i.product).qty }));
-      const haveMap = new Map<ProductId, number>(onHand.map((o) => [o.product, o.qty]));
       // Ingredient cost per 1 output unit from real cost basis. -1 if any input's
       // cost is unknown (never substitute the Central Wholesale price).
       let known = true;
@@ -2460,7 +2475,9 @@ export class World extends EventEmitter {
         product,
         recipe: { output: recipe.output, outputQty: recipe.outputQty, inputs: recipe.inputs.map((i) => ({ product: i.product, qty: i.qty })) },
         onHand,
-        maxOutput: maxOutputForInputs(recipe, haveMap),
+        // V2.8.1: MAX = min(ingredients, projected storage room) — planner never
+        // suggests a batch that could not begin.
+        maxOutput: this.maxProducibleNow(biz, product, recipe),
         batchSize: timing.batchSize, batchSecs: timing.batchSecs,
         unitInputCost,
         retailPrice: RETAIL_BASE[product] ?? PRODUCTS[product].basePrice,
@@ -2502,6 +2519,41 @@ export class World extends EventEmitter {
       }
     }
     return out.sort((a, b) => a.id - b.id);
+  }
+
+  /**
+   * V2.8.1 Part 6 — cancel a QUEUED production job (owner). Only queued jobs may
+   * be cancelled; a producing or storage-blocked job is committed. Refunds the
+   * committed ingredients, drops any repeat, and recomputes the line. Exactly-once
+   * via the per-business production lock (same guard as start).
+   */
+  async cancelProduction(playerId: number, bizId: number, jobId: number): Promise<BizRec> {
+    const biz = this.requireOwnedBiz(playerId, bizId);
+    const job = biz.prodJobs.find((j) => j.id === jobId);
+    if (!job) throw new GameError('err.unknown_job');
+    if (job.status !== 'queued') throw new GameError('err.cannot_cancel_started');
+    if (this.productionLocks.has(bizId)) throw new GameError('err.production_busy');
+    this.productionLocks.add(bizId);
+    try {
+      // Refund the committed ingredients (restored at their existing WAC), mark the
+      // job cancelled, drop its repeat, then re-resolve the queue.
+      const upd = await query(`UPDATE production_jobs SET status='cancelled' WHERE id=$1 AND status='queued' RETURNING id`, [jobId]);
+      if (!upd.rowCount) throw new GameError('err.cannot_cancel_started'); // raced into producing
+      for (const inp of job.inputs) {
+        const rec = inv(biz, inp.product);
+        rec.qty += inp.qty; // refund exactly what was committed
+        await query(`INSERT INTO inventories (business_id, product, qty, reserved) VALUES ($1,$2,$3,$4) ON CONFLICT (business_id, product) DO UPDATE SET qty=$3, reserved=$4`, [biz.id, inp.product, rec.qty, rec.reserved]);
+      }
+      biz.prodJobs = biz.prodJobs.filter((j) => j.id !== jobId);
+      biz.dirty = true;
+      console.log(`[econ] PRODUCTION_CANCEL biz=${biz.id} job=${jobId} refunded ${JSON.stringify(job.inputs)}`);
+      await this.resolveProduction(biz, Date.now(), false);
+      this.emit('biz_pub', biz);
+      this.emit('push_state', { playerId });
+      return biz;
+    } finally {
+      this.productionLocks.delete(bizId);
+    }
   }
 
   /** Admin recovery: force-complete a job now (storage-safe). Audited. */
@@ -2929,6 +2981,35 @@ export class World extends EventEmitter {
         await this.completeDelivery(d);
       }
     }
+  }
+
+  /**
+   * V2.8.1 Part 9 — Internal Company Transfer. Move inventory between two
+   * businesses of the SAME company via a REAL delivery (no teleport). No money,
+   * no XP, no revenue, no rankings/trade-count/supplier stats — it is not a
+   * trade. The receiving business inherits the correct cost basis (truthful
+   * accounting), so a mini market's assortment margin stays honest.
+   */
+  async transferInternal(playerId: number, fromBizId: number, toBizId: number, product: ProductId, qty: number): Promise<{ from: BizRec; to: BizRec }> {
+    if (fromBizId === toBizId) throw new GameError('err.transfer_same_business');
+    const from = this.requireOwnedBiz(playerId, fromBizId);
+    const to = this.businesses.get(toBizId);
+    if (!to || to.ownerId !== playerId) throw new GameError('err.unknown_business'); // same company (1 player = 1 company)
+    qty = Math.floor(qty);
+    if (!Number.isFinite(qty) || qty < 1 || qty > MARKET_MAX_QTY) throw new GameError('err.invalid_qty');
+    const rec = inv(from, product);
+    if (rec.qty < qty) throw new GameError('err.only_have', { qty: rec.qty, product });
+    if (capacityFor(to, product) <= 0) throw new GameError('err.cannot_store_that');
+    const unitCost = from.costBasis.get(product) ?? 0;
+    // Remove from source synchronously (in transit), persist, then dispatch a van.
+    rec.qty -= qty;
+    from.dirty = true;
+    await query(`INSERT INTO inventories (business_id, product, qty, reserved) VALUES ($1,$2,$3,$4) ON CONFLICT (business_id, product) DO UPDATE SET qty=$3, reserved=$4`, [from.id, product, rec.qty, rec.reserved]);
+    await this.createDelivery(product, qty, from.lotId, to, unitCost); // unloads with cost basis
+    console.log(`[econ] TRANSFER biz=${from.id}->${to.id} ${qty}x${product} @cost=${unitCost}`);
+    this.emit('biz_pub', from);
+    this.emit('push_state', { playerId });
+    return { from, to };
   }
 
   async createOrder(

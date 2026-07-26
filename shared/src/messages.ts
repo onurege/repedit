@@ -247,6 +247,8 @@ export type ClientMsg =
   | { t: 'get_supply_economy' }
   // ---- V2.8 Phase 2: manual production ----
   | { t: 'start_production'; bizId: number; product: ProductId; qty: number; repeat?: number }
+  | { t: 'cancel_production'; bizId: number; jobId: number }
+  | { t: 'transfer_internal'; fromBizId: number; toBizId: number; product: ProductId; qty: number }
   | { t: 'get_production'; bizId?: number }
   | { t: 'admin_production' }
   | { t: 'admin_production_complete'; jobId: number; reason?: string }

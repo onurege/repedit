@@ -125,14 +125,17 @@ check('repeat consumed ingredients exactly (never auto-bought): milk/beans = 0',
 check('repeat did not fabricate a third batch (line empty, count exhausted)', await C.evaluate(() => (window.__bd.client.myBiz.productionLine?.jobs?.length ?? 0) === 0));
 
 // Insufficient-ingredient repeat: no fabrication, no negative inventory.
+// V2.8.1: clear finished coffee first so the batch has projected storage room.
+await dev(C, 'make_admin', 0); await C.waitForTimeout(200);
+await send(C, { t: 'admin_inventory', bizId: idC, product: 'coffee', op: 'set', amount: 0, reason: 'e2e' }); await C.waitForTimeout(300);
 await dev(C, 'add_milk', 20); await dev(C, 'add_beans', 20); await C.waitForTimeout(300); // enough for ONE batch only
 await send(C, { t: 'start_production', bizId: idC, product: 'coffee', qty: 20, repeat: 1 });
 await C.waitForFunction(() => (window.__bd.client.myBiz.productionLine?.jobs?.length ?? 0) >= 1, { timeout: 8000 });
 await dev(C, 'finish_production', 0);
-await C.waitForFunction(() => (window.__bd.client.myBiz.inventory.coffee?.qty ?? 0) >= 60, { timeout: 8000 }).catch(() => {});
+await C.waitForTimeout(1500);
 // Ingredients stayed at 0 (repeat could not conjure them) and no extra batch was
-// fabricated beyond the 3 legitimately produced (retail drains coffee, so bound it).
-check('repeat with no ingredients did NOT fabricate resources', (await inv(C, 'milk')) === 0 && (await inv(C, 'beans')) === 0 && (await inv(C, 'coffee')) <= 60, `milk=${await inv(C, 'milk')} beans=${await inv(C, 'beans')} coffee=${await inv(C, 'coffee')}`);
+// fabricated beyond the one legitimately produced (retail drains coffee, so bound it).
+check('repeat with no ingredients did NOT fabricate resources', (await inv(C, 'milk')) === 0 && (await inv(C, 'beans')) === 0 && (await inv(C, 'coffee')) <= 20, `milk=${await inv(C, 'milk')} beans=${await inv(C, 'beans')} coffee=${await inv(C, 'coffee')}`);
 
 // ---------- Mobile (390x844) ----------
 const M = await player(`spM_${run}`, 'bakery', { width: 390, height: 844 });
