@@ -135,9 +135,10 @@ client.on('update', () => {
 // Throttle sale popups per lot so a busy shop shows tidy, occasional feedback
 // (below the name label) rather than a spammy stack.
 const lastSalePopup = new Map<string, number>();
-client.on('sale', (e: { bizId: number; lotId: string; amount: number }) => {
+client.on('sale', (e: { bizId: number; lotId: string; amount: number; xp?: number }) => {
   const mine = client.myBiz?.id === e.bizId;
-  // A customer walks to the shop; the +$ pops when they reach the door.
+  // A customer walks to the shop; the +$ (and, for your own shop, +XP) pops when
+  // they reach the door. XP scales with customer satisfaction, so it's shown here.
   actors.spawnCustomer(e.lotId, () => {
     if (mine) sfx.sale();
     else sfx.saleFar();
@@ -147,9 +148,10 @@ client.on('sale', (e: { bizId: number; lotId: string; amount: number }) => {
     const pos = city.lotWorldPos(e.lotId);
     // Popups rise from just above the storefront and fade out well below the
     // floating name label, so the two never collide.
+    const label = mine && e.xp ? `+$${e.amount}  +${e.xp} XP` : `+$${e.amount}`;
     effects.popupText(
       pos.clone().setY(4.2).add(new THREE.Vector3((Math.random() - 0.5) * 3, 0, 2)),
-      `+$${e.amount}`,
+      label,
       mine ? '#7dff8a' : '#bdeecb'
     );
   });

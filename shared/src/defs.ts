@@ -203,6 +203,15 @@ export const REP_SALE_GOUGING = -0.002;     // per sale above 1.2x base
 export const REP_LOST_CUSTOMER = -0.005;    // out of stock when customer arrives
 export const REP_TRADE_FULFILLED = 0.05;    // farm fulfils a marketplace trade
 
+// V2.8.1: Customer Satisfaction is the retail face of reputation (driven by
+// fair-price sales, gouging and lost customers). It SCALES the Business XP a
+// retail sale grants: happy customers = more XP, unhappy = less. 1.0 at the
+// neutral start (rep 3), up to ~1.4 for delighted, down to ~0.6 for unhappy.
+export function satisfactionXpMult(reputation: number): number {
+  const r = Math.max(REP_MIN, Math.min(REP_MAX, reputation));
+  return 0.6 + ((r - REP_MIN) / (REP_MAX - REP_MIN)) * 0.8;
+}
+
 // ---- Offline / catch-up ----
 export const OFFLINE_CAP_SECONDS = 8 * 3600;
 

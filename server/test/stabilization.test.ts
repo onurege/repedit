@@ -92,26 +92,28 @@ describe('queue cancel (Part 6)', () => {
 });
 
 describe('internal company transfer (Part 9)', () => {
-  it('moves goods between the same owner\'s businesses via delivery with correct cost basis, no revenue/XP', async () => {
+  it('moves goods via delivery PRICED at wholesale rate (not free), cost basis = ref, no revenue/XP', async () => {
     const id = await newPlayer(world, 'tf1');
     const bakery = await world.chooseBusiness(id, 'bakery');
     bakery.bizXp = xpForBizLevel(20); bakery.bizLevel = 20; bakery.level = 3;
     world.players.get(id)!.cash = 1_000_000;
     world.companyByOwner(id)!.level = 10; // capacity for a 2nd business
-    // Bakery has bread with a known cost basis (as if produced/bought at 16).
-    give(bakery, 'bread', 100); bakery.costBasis.set('bread', 16);
+    give(bakery, 'bread', 100); bakery.costBasis.set('bread', 8); // source cost is low...
     const mm = await world.openBusiness(id, marketLot(world), 'mini_market');
     mm.bizXp = xpForBizLevel(20); mm.bizLevel = 20; mm.level = 3;
 
     const cashBefore = world.players.get(id)!.cash;
     const bakeryXp0 = bakery.bizXp, mmXp0 = mm.bizXp;
+    const ref = 20; // bread has no wholesale price -> RETAIL_BASE.bread = 20 is the floor
     await world.transferInternal(id, bakery.id, mm.id, 'bread', 40);
     expect(onHand(bakery, 'bread')).toBe(60);      // removed from source (in transit)
+    // NOT free: the company is charged the wholesale-reference cost.
+    expect(world.players.get(id)!.cash).toBe(cashBefore - ref * 40);
     await forceDeliveries(world);
     expect(onHand(mm, 'bread')).toBe(40);          // arrived by delivery (not teleport)
-    expect(mm.costBasis.get('bread')).toBeCloseTo(16, 5); // inherited real cost basis
-    // Not a trade: no money moved, no XP, no trade count.
-    expect(world.players.get(id)!.cash).toBe(cashBefore);
+    // Cost basis = the reference floor (not the source's artificially-low $8) — no laundering.
+    expect(mm.costBasis.get('bread')).toBeCloseTo(ref, 5);
+    // Not a trade: no XP, no trade count.
     expect(bakery.bizXp).toBe(bakeryXp0);
     expect(mm.bizXp).toBe(mmXp0);
     expect(mm.tradeCount).toBe(0);
