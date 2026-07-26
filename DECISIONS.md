@@ -578,3 +578,75 @@ Frontend/input/CSS only — no backend, economy, schema, or WebSocket changes.
   Desktop visual quality is unchanged.
 
 Not in this hotfix: any gameplay/economy change, V2.7 Phase 5, native apps.
+
+## V2.8 Phase 1 — Product Economy Foundation
+
+Additive on top of V2.7. The existing 1–3 facility "upgrade tier"
+(capacity/production/upgrade), the production loop, the V2.6.2 storage invariant
+and all V2.7 systems are untouched. Everything below is opt-in and migrated
+safely; a business at Business Level 1 behaves exactly as before.
+
+- **Canonical layer (`shared/src/economy.ts`).** One authoritative source for
+  recipes, the product-license catalog, business levels 1–50, the XP curve and
+  product slots. The server is authoritative; clients render these definitions
+  (never redefine them).
+- **Recipes.** `Recipe { output, outputQty, inputs[] }`. bread (wheat→bread) and
+  coffee (milk+beans→coffee) mirror today's production; latte (beans×2+milk) is
+  the multi-input, license-gated **foundation** product — recipe-previewable now,
+  produced in Phase 2.
+- **Product licenses.** Per BUSINESS (not company). Capability is PRODUCE
+  (manufacture, has a recipe) or RETAIL (stock & resell) — this preserves the
+  Mini Market retail role and each type's identity (`businesses` map per product).
+  Requirements: business level, prerequisite license, fee. Starter licenses
+  reproduce every current business's products, so migration loses nothing.
+  Purchase is server-authoritative and **exactly-once** (the `business_licenses`
+  primary key is the guard) with one `PRODUCT_LICENSE` ledger row. No
+  refund/resale/transfer in Phase 1.
+- **Business Level 1–50 (XP-driven).** Five tiers (Local/Established/Regional/
+  Major/City Icon). **Every level grants something** (storage rises each level;
+  milestones add slots/tier) — no empty levels. Storage bonus is modest
+  (×1.0 at L1, ≈×2.0 at L50) and never a margin advantage. XP accrues only from
+  committed, demand-limited activity (production, NPC retail sales, contract
+  deliveries, urgent-order wins); player↔player XP is deliberately deferred to
+  block circular-trade farming.
+- **Product slots.** License ≠ active. Slots scale by level (L1:1 → L50:12) with
+  grandfathering so a business never drops below its starter product count.
+  Activation is server-authoritative with a modest reconfiguration cooldown
+  (admins/dev bypass).
+- **Central Wholesale player-first pricing.** A manipulation-resistant reference
+  from COMPLETED player marketplace trades (self-trades excluded, min sample +
+  volume, per-trade weight cap, volume-weighted median). A conservative repricer
+  nudges the base price toward `reference × (1+premium)`, clamped to a safe band
+  around the NPC base and bounded per refresh, so wholesale sits ABOVE healthy
+  player prices and never undercuts them; Emergency Reserve stays ×2.5 above
+  normal. No trustworthy history → safe fallback to the base NPC price.
+- **Player-Sourced Input Ratio.** From committed deliveries
+  (`from_lot = wholesale` → central, else player), city + per-product, with
+  healthy/central-dependent/critical bands. Operator diagnostic only (Admin
+  Console) — never public, never faked toward a target, never affects gameplay.
+- **Migration 016 (additive).** biz_xp/biz_level/last_slot_change columns +
+  business_licenses & business_active_products tables; starter licenses + active
+  slots backfilled on load/creation.
+
+### Balancing review (current values; flagged, not silently rebalanced)
+
+- **XP curve** `xpToNextBizLevel(n) = round(45·n^1.6)`: L1→2 ≈ 45, L5→6 ≈ 590,
+  cumulative to L5 ≈ 856, L10 ≈ 3.7k, L20 ≈ 22k, L50 cumulative ≈ 0.6M. **Early
+  game (L1–10)** is quick from ordinary NPC sales/production; **mid (L11–30)** a
+  meaningful investment; **late (L31–50)** a long tail. With NPC-sale XP = 2/unit
+  a busy shop levels early tiers in a session and the top tiers over long play —
+  reasonable for a persistent idle economy. FLAG: exact XP-per-activity constants
+  (`BIZ_XP`) are conservative starting points; revisit after live data.
+- **License fees**: latte = $4,000 (the only buyable license this phase) —
+  roughly a mid-game purchase; starters are free. FLAG: expand with the catalog.
+- **Slots**: L1:1 · L5:2 · every +5 → +1 · L50:12. Slots (not raw margins) are
+  the main progression payoff, per the anti-power-creep rule.
+- **Storage**: +2%/level, capped ≈×2 at L50 — additive over the facility tier.
+- **Wholesale premium** = +20% over the player reference, clamped to [0.7×,2.5×]
+  of the NPC base, ±8%/refresh, 5-min cadence. Emergency = ×2.5. Intent: player
+  sourcing is normally cheaper; wholesale is the safety net; emergency is worst.
+  FLAG: premium/clamp/cadence are conservative defaults for the current tiny
+  catalog; tune as real completed-trade volume grows.
+
+Not in Phase 1: manual production, production queue/timers/quantity selection,
+ingredient-consumption UI, large product catalog, new business types.

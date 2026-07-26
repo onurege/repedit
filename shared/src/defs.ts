@@ -3,7 +3,9 @@
 // Extend by adding entries — no engine changes needed.
 // ============================================================
 
-export type ProductId = 'milk' | 'beans' | 'coffee' | 'wheat' | 'bread';
+// `latte` is the V2.8 Phase-1 foundation product (licensable + recipe-previewable;
+// its manual production lands in Phase 2). All other ids are pre-existing.
+export type ProductId = 'milk' | 'beans' | 'coffee' | 'wheat' | 'bread' | 'latte';
 
 export interface ProductDef {
   id: ProductId;
@@ -18,6 +20,7 @@ export const PRODUCTS: Record<ProductId, ProductDef> = {
   coffee: { id: 'coffee', name: 'Coffee', basePrice: 30, emoji: '☕' },
   wheat: { id: 'wheat', name: 'Wheat', basePrice: 8, emoji: '🌾' },
   bread: { id: 'bread', name: 'Bread', basePrice: 20, emoji: '🍞' },
+  latte: { id: 'latte', name: 'Latte', basePrice: 42, emoji: '🥤' },
 };
 
 // Reference retail prices used for demand/fairness of retail sales.
@@ -127,6 +130,17 @@ export const XP = {
   perTrade: 40,
   perUpgrade: 150,
   perNpcPurchase: 5,
+};
+
+// V2.8 — Business XP (per business, drives Business Level 1–50). Awarded only
+// from committed, demand-limited activity; player-to-player XP is gated against
+// self-circular trades by the caller. Deliberately small vs the nonlinear curve.
+export const BIZ_XP = {
+  perUnitProduced: 1,   // manufacturing output (bakery/coffee/farm)
+  perRetailSale: 2,     // NPC final sale (demand-limited)
+  perContractUnit: 2,   // fulfilled supply-contract delivery
+  perUrgentUnit: 2,     // urgent city-order contribution
+  perPlayerSaleUnit: 1, // player marketplace/offer sale (cross-owner only)
 };
 
 // ---- Reputation ----

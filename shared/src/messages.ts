@@ -238,6 +238,13 @@ export type ClientMsg =
   | { t: 'get_city_news' }
   | { t: 'admin_create_urgent'; product: ProductId; qty: number; reward: number; durationSecs?: number; kind?: string }
   | { t: 'admin_cancel_urgent'; orderId: number; reason?: string }
+  // ---- V2.8 Phase 1: product economy ----
+  | { t: 'buy_license'; bizId: number; product: ProductId }
+  | { t: 'set_product_active'; bizId: number; product: ProductId; active: boolean }
+  | { t: 'admin_set_biz_xp'; bizId: number; xp: number; mode: 'set' | 'add'; reason?: string }
+  | { t: 'admin_grant_license'; bizId: number; product: ProductId; reason?: string }
+  | { t: 'admin_revoke_license'; bizId: number; product: ProductId; reason?: string }
+  | { t: 'get_supply_economy' }
   | { t: 'ping' };
 
 // ---------- server -> client ----------
@@ -296,11 +303,42 @@ export interface BizPub {
   name: string | null;  // player-chosen name; null => default "<owner>'s <Type>"
   lotId: string;
   district: DistrictId; // derived from the lot; districts share one economy
-  level: number;
+  level: number;        // facility upgrade tier (1–3) — unchanged legacy field
+  bizLevel: number;     // V2.8: XP-driven Business Level (1–50)
+  bizTier: string;      // V2.8: tier code (local/established/regional/major/city_icon)
   status: BizStatus;
   reputation: number;   // public: star rating
   supplies: ProductId[]; // products this business can supply via contract
   tradeCount: number;    // successful player trades + contract deliveries
+}
+
+// ---- V2.8 Phase 1: product-economy progression (owner-private detail) ----
+export interface RecipePub { output: ProductId; outputQty: number; inputs: { product: ProductId; qty: number }[]; }
+export interface OwnedLicensePub { product: ProductId; capability: 'produce' | 'retail'; active: boolean; recipe: RecipePub | null; }
+export interface AvailableLicensePub {
+  product: ProductId;
+  capability: 'produce' | 'retail';
+  requiredLevel: number;
+  prereqLicense: ProductId | null;
+  fee: number;
+  recipe: RecipePub | null;
+  met: boolean;               // all requirements satisfied (level + prereq + funds not checked here)
+  levelMet: boolean;
+  prereqMet: boolean;
+}
+export interface BusinessProgression {
+  bizLevel: number;
+  bizXp: number;
+  tier: string;
+  xpIntoLevel: number;        // xp accumulated within the current level
+  xpForNextLevel: number;     // xp span of the current level (Infinity-safe: 0 at max)
+  atMax: boolean;
+  slotsUsed: number;
+  slotLimit: number;
+  nextRewardKind: string | null;   // 'slot' | 'tier' | 'storage' | null(at max)
+  nextRewardLevel: number | null;
+  owned: OwnedLicensePub[];
+  available: AvailableLicensePub[];
 }
 
 // A player owns exactly one company; a company owns one or more businesses.
@@ -527,6 +565,7 @@ export interface BizPriv extends BizPub {
   coffeeSold: number;
   customers: number;
   reputation: number;
+  progression: BusinessProgression; // V2.8 Phase 1
 }
 
 export interface OrderPub {
@@ -701,7 +740,15 @@ export type ServerMsg =
   | { t: 'rival_alert'; alert: RivalAlert }              // realtime push to the affected player
   | { t: 'city_news'; items: CityNewsItem[] }            // bounded feed snapshot
   | { t: 'city_news_item'; item: CityNewsItem }          // realtime append
+  // ---- V2.8 Phase 1 ----
+  | { t: 'supply_economy'; economy: SupplyEconomy }      // admin diagnostic
   | { t: 'pong' };
+
+// V2.8 — aggregate supply-economy health for the Admin Console (operator-only).
+export interface SupplyEconomy {
+  overall: { player: number; central: number; ratio: number; health: string };
+  byProduct: { product: ProductId; player: number; central: number; ratio: number }[];
+}
 
 // ---------- V2.7 Phase 4 domain types ----------
 
