@@ -814,3 +814,74 @@ undercuts wholesale by design so player sourcing wins.
 Not in Phase 3 (STOP): new business types, Cocoa/Mocha, 30+ products, seasons,
 achievements, parallel lines, cancellation/refunds, auto-buy/auto-supplier,
 infinite auto-production, removing Central Wholesale, Phase 4.
+
+## V2.8 Phase 4 (FINAL) — Specialization, Mastery, Controlled Automation & Balance
+
+Turns the built systems into a deeper long-term management game: same-type
+businesses develop different identities, high level grants options/QoL (not
+guaranteed margins), and the whole economy is balanced as one system. Additive
+on Phases 1–3; nothing is rewritten.
+
+**Specialization (permanent, per-business, L20).** One deliberate choice at
+level 20; no free/paid switching or respec in V2.8 (architecture leaves room).
+Two disjoint-family paths per type (shared/economy.ts `SPECIALIZATIONS`):
+- Bakery: Volume (bread/croissant/cookie) · Patisserie (cake/strawberry_cake)
+- Coffee: High-Volume (coffee/latte) · Specialty (cappuccino/strawberry_latte)
+- Farm: Staple (wheat/milk) · Specialty (eggs/strawberry)
+- Mini Market: Everyday (bread/milk/coffee/croissant) · Premium (cake/…/latte)
+
+**Bonuses — MODEST, family-scoped, mastery-scaled (tiers 0/I/II/III at
+L20/30/40/50).** Never a universal margin multiplier; margin is a function of
+NPC price + recipe only, so specialization changes THROUGHPUT/CAPACITY, never
+free money:
+| effect (family only)        | L20  | L30  | L40  | L50  |
+|-----------------------------|-----:|-----:|-----:|-----:|
+| production speed (duration) | ×0.93| ×0.90| ×0.87| ×0.84|
+| storage capacity            | ×1.08| ×1.12| ×1.16| ×1.20|
+| NPC retail volume           | ×1.06| ×1.09| ×1.12| ×1.15|
+| production-queue depth (+)  | +1   | +1   | +2   | +2   |
+Farm raw throughput uses the inverse of the speed factor (≤ +19% for family).
+Both paths of a type carry the SAME magnitude (economy-final test asserts
+equality) — the only difference is which family, so neither dominates (§27).
+
+**Mastery (L30/40/50)** strengthens the SAME chosen path (no second choice).
+**Level 50 = Master / City Icon**: public prestige title + badge (BizPub.master),
+12 slots, tier-3 mastery. Bounded so a skilled L20 still competes with a poorly
+run L50 (economy-final: L50 family throughput advantage 1.3–3× a L20, not
+magical).
+
+**Controlled automation — bounded production repeat.** Unlock L25 (×1), L35
+(×2), L45 (×3). A finished job with repeats left re-queues the SAME job once
+more ONLY if license/active/queue/ingredients allow AT THAT MOMENT; it commits
+ingredients exactly once and NEVER auto-buys. Insufficient → fails gracefully
+(owner notified), no negative inventory, no fabrication, no infinite loop
+(count decrements). Persisted in `production_jobs.repeat_remaining`.
+
+**Farm cost-basis decision (§20-21).** Kept TRUTHFUL: farm-produced raw has a $0
+ACQUISITION cost (it was never purchased) — this is correct accounting and keeps
+the player profitability estimate honest and simple. Opportunity/economic cost
+(time/capacity scarcity) is a separate concept and is deliberately NOT shown as
+an expense and NOT written into inventory cost basis. No fake purchase price is
+ever invented.
+
+**Migration 019** (additive): `businesses.specialization` (NULL until chosen —
+never auto-assigned) + `production_jobs.repeat_remaining`. No existing state
+touched.
+
+**XP pacing (§31) — reviewed, unchanged.** Phase-1 curve `45·n^1.6` per level:
+cumulative to L20 ≈ 62k, L25 ≈ 110k, L30 ≈ 175k, L50 ≈ 0.6M. With committed
+production/retail/contract/urgent XP this reaches L20 (specialization) in active
+mid-game play and keeps L50 a long-tail prestige goal. Specialization/mastery/
+templates/repeat grant NO XP (§32).
+
+**Final economy simulation (deterministic, `economy-final.test.ts` +
+`economy-sim.test.ts`).** Asserted safety properties (not fragile exact profit):
+every finished product viable; demand-weighted margin spread < 2.5× (no dominant
+product); both specialization paths symmetric (no dominant path); player
+sourcing < Central Wholesale < Emergency for every recipe; L50 advantage
+bounded; storage/slots/queue/repeat within documented caps. Population/level/
+event/shortage scenarios reasoned in the health report below — all SIMULATED.
+
+Not in Phase 4 (STOP — V2.8 COMPLETE): new products/business types, Cocoa/Mocha,
+seasons, achievements, employees, warehouses, player retail pricing, respec,
+parallel lines, auto-buy/auto-contract/auto-trade, infinite automation, V2.9.

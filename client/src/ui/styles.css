@@ -976,6 +976,36 @@ html.touch .controls-hint { display: none; }
 .pp-profit-h { font-size: 11px; font-weight: 800; letter-spacing: 0.6px; color: #16a34a; text-transform: uppercase; margin-bottom: 4px; }
 .pp-profit-note { font-size: 10px; color: #94a3b8; margin-top: 6px; line-height: 1.4; }
 .invrow .cap.econ { color: #475569; }
+/* V2.8 Phase 4 — specialization, mastery, City Icon, auto-repeat */
+.spec-avail { border: 1.5px solid #c7b3ff; border-radius: 12px; padding: 10px 12px; margin: 12px 0; background: #f7f3ff; }
+.spec-avail-h { font-weight: 800; color: #6d28d9; margin-bottom: 4px; }
+.spec-avail .btn { margin-top: 8px; }
+.spec-chosen { border: 1.5px solid #c7dbff; border-radius: 12px; padding: 10px 12px; margin: 12px 0; background: #f8fbff; }
+.spec-chosen-h { font-size: 11px; font-weight: 800; letter-spacing: 0.5px; color: #2563eb; text-transform: uppercase; }
+.spec-chosen .spec-name { font-size: 15px; font-weight: 800; margin: 2px 0; }
+.spec-chosen .spec-fam { font-size: 13px; color: #475569; }
+.spec-locked { margin: 12px 0; }
+.city-icon-badge { font-size: 10px; font-weight: 800; letter-spacing: 0.5px; color: #b45309; background: #fef3c7; padding: 2px 6px; border-radius: 999px; vertical-align: middle; }
+.spec-modal { width: min(560px, 96vw); }
+.spec-warn { font-size: 12px; color: #b45309; background: #fffbeb; border-radius: 8px; padding: 6px 10px; margin: 8px 0; }
+.spec-cards { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin: 12px 0; }
+.spec-card { border: 1.5px solid #dbe3ee; border-radius: 12px; padding: 12px; background: #fff; }
+.spec-card-h { font-size: 16px; font-weight: 800; margin-bottom: 6px; }
+.spec-card-best { font-size: 10px; font-weight: 800; letter-spacing: 0.5px; color: #94a3b8; text-transform: uppercase; }
+.spec-card-fam { font-size: 13px; margin: 3px 0 8px; }
+.spec-card-str { font-size: 12px; color: #475569; margin-bottom: 10px; }
+.spec-card .btn { width: 100%; }
+.spec-confirm { width: min(420px, 94vw); text-align: center; }
+.spec-confirm-name { font-size: 18px; font-weight: 800; margin: 8px 0; }
+.pp-repeat { display: flex; align-items: center; gap: 8px; margin: 8px 0; padding: 6px 10px; border-radius: 10px; background: #f1f5f9; }
+.pp-repeat-lbl { font-weight: 800; font-size: 13px; }
+.pp-repeat-n { min-width: 48px; text-align: center; font-weight: 800; }
+.pp-repeat-max { color: #94a3b8; font-size: 12px; }
+.pq-repeat { font-size: 11px; font-weight: 800; color: #7c3aed; }
+@media (max-width: 640px), (max-height: 500px) {
+  .spec-cards { grid-template-columns: 1fr; }
+  .spec-card .btn, .pp-repeat .btn { min-height: 44px; }
+}
 /* Admin production */
 .admin-prod-row { border: 1px solid #e2e8f0; border-radius: 10px; padding: 8px 10px; margin-bottom: 6px; }
 .admin-prod-row .apr-main { font-size: 13px; }

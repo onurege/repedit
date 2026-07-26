@@ -163,6 +163,19 @@ import {
   productionQueueLimit,
   isProducibleProduct,
   PRODUCTION_TIMING,
+  // V2.8 Phase 4 — specialization, mastery & controlled automation
+  SPECIALIZATION_UNLOCK_LEVEL,
+  REPEAT_UNLOCK_LEVEL,
+  specializationsFor,
+  isValidSpecialization,
+  specializationDef,
+  masteryTier,
+  specSpeedMult,
+  specStorageMult,
+  specRetailMult,
+  specBonus,
+  isCityIcon,
+  maxProductionRepeat,
   type Recipe,
   type ProductionJobPub,
   type ProductionLinePub,
@@ -353,6 +366,8 @@ export interface BizRec {
   retailAccum: Map<ProductId, number>;
   // V2.8 Phase 3 — weighted-average acquisition cost per product ($/unit; 0 = unknown).
   costBasis: Map<ProductId, number>;
+  // V2.8 Phase 4 — permanent specialization path id (null = unspecialized).
+  specialization: string | null;
 }
 
 // V2.8 Phase 2 — a persistent production job. Ingredients are committed to the
@@ -372,6 +387,7 @@ export interface ProdJobRec {
   startedAtMs: number | null;
   completesAtMs: number | null;
   inputCost: number; // V2.8 Phase 3: total $ cost of committed ingredients (WAC at start)
+  repeatRemaining: number; // V2.8 Phase 4: bounded auto-repeats left for this job
 }
 
 export interface ContractRec {
@@ -605,10 +621,12 @@ function baseCapacityFor(biz: BizRec, product: ProductId): number {
 }
 
 // V2.8: apply the modest Business-Level storage bonus on top of the base tier
-// (multiplier is 1.0 at bizLevel 1, so migrated businesses are unchanged).
+// (multiplier is 1.0 at bizLevel 1, so migrated businesses are unchanged). V2.8
+// Phase 4: a modest specialization storage bonus applies ONLY to family products.
 function capacityFor(biz: BizRec, product: ProductId): number {
   const base = baseCapacityFor(biz, product);
-  return base <= 0 ? 0 : Math.round(base * storageMultForLevel(biz.bizLevel));
+  if (base <= 0) return 0;
+  return Math.round(base * storageMultForLevel(biz.bizLevel) * specStorageMult(biz.specialization, biz.bizLevel, product));
 }
 
 interface OfferRec {
@@ -854,6 +872,7 @@ export class World extends EventEmitter {
         prodJobs: [],
         retailAccum: new Map(Object.entries(accums.retail ?? {}) as [ProductId, number][]),
         costBasis: new Map(),
+        specialization: r.specialization ?? null,
       };
       this.businesses.set(biz.id, biz);
       // Catch up simulation for downtime (capped).
@@ -900,6 +919,7 @@ export class World extends EventEmitter {
         startedAtMs: r.started_at ? new Date(r.started_at).getTime() : null,
         completesAtMs: r.completes_at ? new Date(r.completes_at).getTime() : null,
         inputCost: Number(r.input_cost ?? 0),
+        repeatRemaining: Number(r.repeat_remaining ?? 0),
       });
     }
     const orders = await query("SELECT * FROM market_orders WHERE status = 'open'");
@@ -1078,7 +1098,7 @@ export class World extends EventEmitter {
         await c.query(
           `UPDATE businesses SET level=$1, price=$2, reputation=$3, revenue=$4, expenses=$5,
              milk_produced=$6, coffee_sold=$7, customers=$8, accums=$9, sim_ts=now(),
-             price2=$11, production=$12, biz_xp=$13, biz_level=$14 WHERE id=$10`,
+             price2=$11, production=$12, biz_xp=$13, biz_level=$14, specialization=$15 WHERE id=$10`,
           [
             b.level,
             b.price,
@@ -1094,6 +1114,7 @@ export class World extends EventEmitter {
             b.production,
             b.bizXp,
             b.bizLevel,
+            b.specialization,
           ]
         );
         for (const [product, rec] of b.inv) {
@@ -1630,8 +1651,11 @@ export class World extends EventEmitter {
     if (weight <= 0) return;
     const price = this.retailPriceFor(biz, product);
     const base = RETAIL_BASE[product] ?? PRODUCTS[product].basePrice;
+    // V2.8 Phase 4: a specialized retailer/processor draws modestly more foot
+    // traffic for its family products.
     const acc = (biz.retailAccum.get(product) ?? 0) +
       customersPerSec * weight *
+      specRetailMult(biz.specialization, biz.bizLevel, product) *
       priceDemandMultiplier(price, base) *
       repDemandMultiplier(biz.reputation) *
       this.cityDemand(product) * dt;
@@ -1654,7 +1678,10 @@ export class World extends EventEmitter {
           product = biz.activeProducts.has('milk') ? 'milk' : (biz.activeProducts.has('wheat') ? 'wheat' : product);
         }
         const rec = inv(biz, product);
-        biz.prodAccum += lv.milkPerSec * dt;
+        // V2.8 Phase 4: a specialized farm gets modestly higher raw throughput for
+        // its family (staple: wheat/milk; specialty: eggs/strawberry).
+        const rateMult = 1 / specSpeedMult(biz.specialization, biz.bizLevel, product);
+        biz.prodAccum += lv.milkPerSec * rateMult * dt;
         const want = Math.floor(biz.prodAccum);
         const space = freeSpaceFor(biz, product);
         const add = Math.min(want, space);
@@ -1905,6 +1932,7 @@ export class World extends EventEmitter {
       prodJobs: [],
       retailAccum: new Map(),
       costBasis: new Map(),
+      specialization: null,
     };
     for (const product of STARTING_PRODUCTS[type]) biz.inv.set(product, { qty: 0, reserved: 0 });
     return biz;
@@ -2095,6 +2123,53 @@ export class World extends EventEmitter {
   }
 
   // ============================================================
+  // V2.8 Phase 4 — business specialization (permanent, server-authoritative)
+  // ============================================================
+
+  /**
+   * Choose a PERMANENT specialization for one business. Requires level 20 and no
+   * existing specialization — there is no free or paid switching in V2.8.
+   */
+  async chooseSpecialization(playerId: number, bizId: number, specId: string): Promise<BizRec> {
+    const biz = this.requireOwnedBiz(playerId, bizId);
+    if (biz.bizLevel < SPECIALIZATION_UNLOCK_LEVEL) throw new GameError('err.spec_locked', { level: SPECIALIZATION_UNLOCK_LEVEL });
+    if (biz.specialization) throw new GameError('err.spec_already');
+    if (!isValidSpecialization(biz.type, specId)) throw new GameError('err.spec_invalid');
+    biz.specialization = specId;
+    biz.dirty = true;
+    await query('UPDATE businesses SET specialization=$1 WHERE id=$2 AND specialization IS NULL', [specId, bizId]);
+    console.log(`[econ] SPECIALIZATION player=${playerId} biz=${bizId} -> ${specId}`);
+    this.emit('biz_pub', biz);
+    this.emit('push_state', { playerId });
+    return biz;
+  }
+
+  /** Admin: set/reset a business's specialization (recovery/testing). Audited. */
+  async adminSetSpecialization(adminId: number, bizId: number, specId: string): Promise<BizRec> {
+    this.requireAdmin(adminId);
+    const biz = this.businesses.get(bizId);
+    if (!biz) throw new GameError('err.unknown_business');
+    if (specId && !isValidSpecialization(biz.type, specId)) throw new GameError('err.spec_invalid');
+    biz.specialization = specId || null;
+    biz.dirty = true;
+    await query('UPDATE businesses SET specialization=$1 WHERE id=$2', [biz.specialization, bizId]);
+    await this.logAdminAction(adminId, 'SET_SPECIALIZATION', 'business', String(bizId), { specialization: biz.specialization });
+    this.emit('biz_pub', biz);
+    this.emit('push_state', { playerId: biz.ownerId });
+    return biz;
+  }
+
+  /** Admin diagnostic: count of businesses per specialization (per type). */
+  specializationDistribution(): Record<string, number> {
+    const counts: Record<string, number> = {};
+    for (const biz of this.businesses.values()) {
+      const key = biz.specialization ?? `${biz.type}:unspecialized`;
+      counts[key] = (counts[key] ?? 0) + 1;
+    }
+    return counts;
+  }
+
+  // ============================================================
   // V2.8 Phase 2 — manual production (queue, exactly-once, storage-safe)
   // ============================================================
 
@@ -2103,6 +2178,15 @@ export class World extends EventEmitter {
   /** True if this business TYPE can manufacture at least one producible recipe. */
   private isProducerType(type: BusinessType): boolean {
     return licensableProducts(type).some((l) => l.capability === 'produce' && isProducibleProduct(l.product));
+  }
+
+  /** Production-queue depth for a business (level base + specialization bonus). */
+  private queueLimitFor(biz: BizRec): number {
+    return productionQueueLimit(biz.bizLevel) + specBonus(biz.specialization, biz.bizLevel).queueBonus;
+  }
+  /** Wall-clock duration for a batch, with the specialization family speed bonus. */
+  private batchDurationSecs(biz: BizRec, product: ProductId, output: number): number {
+    return Math.max(1, Math.round(productionDurationSecs(product, output, biz.bizLevel) * specSpeedMult(biz.specialization, biz.bizLevel, product)));
   }
 
   private findJob(jobId: number): { biz: BizRec; job: ProdJobRec } | null {
@@ -2121,8 +2205,10 @@ export class World extends EventEmitter {
    * or create a job twice. The player picks OUTPUT quantity; the server derives
    * whole batches, the ingredient cost and the duration.
    */
-  async startProduction(playerId: number, bizId: number, product: ProductId, desiredQty: number): Promise<BizRec> {
+  async startProduction(playerId: number, bizId: number, product: ProductId, desiredQty: number, repeat = 0): Promise<BizRec> {
     const biz = this.requireOwnedBiz(playerId, bizId);
+    // V2.8 Phase 4: bounded auto-repeat, clamped to what this level unlocks.
+    const repeatRemaining = Math.max(0, Math.min(Math.floor(repeat) || 0, maxProductionRepeat(biz.bizLevel)));
     const recipe = recipeFor(product);
     if (!recipe || !isProducibleProduct(product)) throw new GameError('err.not_producible', { product });
     if (!productCompatible(biz.type, product)) throw new GameError('err.not_producible', { product });
@@ -2133,7 +2219,7 @@ export class World extends EventEmitter {
     const plan = planProduction(recipe, Math.floor(desiredQty));
     if (!plan) throw new GameError('err.invalid_qty');
 
-    const limit = productionQueueLimit(biz.bizLevel);
+    const limit = this.queueLimitFor(biz);
     if (biz.prodJobs.length >= limit) throw new GameError('err.production_queue_full', { limit });
 
     // Ingredients must be available from UNCOMMITTED on-hand stock (goods already
@@ -2163,16 +2249,16 @@ export class World extends EventEmitter {
       let job!: ProdJobRec;
       await tx(async (c) => {
         const ins = await c.query(
-          `INSERT INTO production_jobs (business_id, product, output_qty, batches, recipe, inputs, status, input_cost)
-           VALUES ($1,$2,$3,$4,$5,$6,'queued',$7) RETURNING id, created_at`,
-          [bizId, product, plan.output, plan.batches, JSON.stringify(recipeSnap), JSON.stringify(inputsSnap), inputCost]
+          `INSERT INTO production_jobs (business_id, product, output_qty, batches, recipe, inputs, status, input_cost, repeat_remaining)
+           VALUES ($1,$2,$3,$4,$5,$6,'queued',$7,$8) RETURNING id, created_at`,
+          [bizId, product, plan.output, plan.batches, JSON.stringify(recipeSnap), JSON.stringify(inputsSnap), inputCost, repeatRemaining]
         );
         const row = ins.rows[0];
         job = {
           id: Number(row.id), businessId: bizId, product,
           outputQty: plan.output, batches: plan.batches, recipe: recipeSnap, inputs: inputsSnap,
           status: 'queued', createdAtMs: new Date(row.created_at).getTime(),
-          startedAtMs: null, completesAtMs: null, inputCost,
+          startedAtMs: null, completesAtMs: null, inputCost, repeatRemaining,
         };
         for (const inp of plan.inputs) {
           const rec = inv(biz, inp.product);
@@ -2221,7 +2307,7 @@ export class World extends EventEmitter {
       }
       // head is queued -> promote it, anchoring its start to when the line freed.
       const anchor = Math.max(lineFreeAt, head.createdAtMs);
-      const dur = productionDurationSecs(head.product, head.outputQty, biz.bizLevel);
+      const dur = this.batchDurationSecs(biz, head.product, head.outputQty);
       head.status = 'producing';
       head.startedAtMs = anchor;
       head.completesAtMs = anchor + dur * 1000;
@@ -2293,8 +2379,60 @@ export class World extends EventEmitter {
         this.emit('biz_pub', biz);
         this.emit('push_state', { playerId: biz.ownerId });
       }
+      // V2.8 Phase 4: bounded auto-repeat — re-queue the same job ONCE more, only
+      // if it's still valid AND ingredients are actually available right now.
+      if (job.repeatRemaining > 0) await this.tryRepeat(biz, job, silent);
     }
     return true;
+  }
+
+  /**
+   * Controlled automation: attempt to re-queue the same job with one fewer
+   * repeat. NEVER auto-buys. Commits ingredients exactly once, only when the
+   * repeat becomes a real accepted job; otherwise fails gracefully (notify).
+   */
+  private async tryRepeat(biz: BizRec, prev: ProdJobRec, silent: boolean): Promise<void> {
+    const nextRepeat = prev.repeatRemaining - 1;
+    const recipe = recipeFor(prev.product);
+    const reason = (): string | null => {
+      if (!recipe || !isProducibleProduct(prev.product)) return 'not_producible';
+      if (biz.licenses.get(prev.product) !== 'produce') return 'license';
+      if (!biz.activeProducts.has(prev.product)) return 'inactive';
+      if (biz.prodJobs.length >= this.queueLimitFor(biz)) return 'queue_full';
+      const plan = planProduction(recipe, prev.outputQty);
+      if (!plan) return 'invalid';
+      for (const inp of plan.inputs) if (inv(biz, inp.product).qty < inp.qty) return 'ingredients';
+      return null;
+    };
+    const why = reason();
+    if (why) {
+      console.log(`[econ] PRODUCTION_REPEAT_SKIP biz=${biz.id} ${prev.product} reason=${why}`);
+      if (!silent) this.emit('production_repeat_failed', { ownerId: biz.ownerId, product: prev.product, reason: why });
+      return;
+    }
+    const plan = planProduction(recipe!, prev.outputQty)!;
+    const inputCost = plan.inputs.reduce((s, inp) => s + inp.qty * (biz.costBasis.get(inp.product) ?? 0), 0);
+    for (const inp of plan.inputs) inv(biz, inp.product).qty -= inp.qty; // commit exactly once
+    const recipeSnap: Recipe = { output: recipe!.output, outputQty: recipe!.outputQty, inputs: recipe!.inputs.map((i) => ({ product: i.product, qty: i.qty })) };
+    const inputsSnap = plan.inputs.map((i) => ({ product: i.product, qty: i.qty }));
+    const ins = await query(
+      `INSERT INTO production_jobs (business_id, product, output_qty, batches, recipe, inputs, status, input_cost, repeat_remaining)
+       VALUES ($1,$2,$3,$4,$5,$6,'queued',$7,$8) RETURNING id, created_at`,
+      [biz.id, prev.product, plan.output, plan.batches, JSON.stringify(recipeSnap), JSON.stringify(inputsSnap), inputCost, nextRepeat]
+    );
+    const row = ins.rows[0];
+    for (const inp of plan.inputs) {
+      const rec = inv(biz, inp.product);
+      await query(`INSERT INTO inventories (business_id, product, qty, reserved) VALUES ($1,$2,$3,$4) ON CONFLICT (business_id, product) DO UPDATE SET qty=$3, reserved=$4`, [biz.id, inp.product, rec.qty, rec.reserved]);
+    }
+    biz.prodJobs.push({
+      id: Number(row.id), businessId: biz.id, product: prev.product,
+      outputQty: plan.output, batches: plan.batches, recipe: recipeSnap, inputs: inputsSnap,
+      status: 'queued', createdAtMs: new Date(row.created_at).getTime(),
+      startedAtMs: null, completesAtMs: null, inputCost, repeatRemaining: nextRepeat,
+    });
+    biz.dirty = true;
+    console.log(`[econ] PRODUCTION_REPEAT biz=${biz.id} ${plan.output}x${prev.product} (repeats left ${nextRepeat})`);
   }
 
   /** Owner-private production line snapshot (null for non-producer businesses). */
@@ -2329,12 +2467,13 @@ export class World extends EventEmitter {
       });
     }
     return {
-      queueLimit: productionQueueLimit(biz.bizLevel),
+      queueLimit: this.queueLimitFor(biz),
       jobCount: biz.prodJobs.length,
       speedMult: Math.round(productionSpeedMult(biz.bizLevel) * 100) / 100,
       jobs: biz.prodJobs.map((j) => this.toJobPub(j)),
       producible,
       serverTime: Date.now(),
+      maxRepeat: maxProductionRepeat(biz.bizLevel),
     };
   }
 
@@ -2344,6 +2483,7 @@ export class World extends EventEmitter {
       startedAt: j.startedAtMs, completesAt: j.completesAtMs,
       recipe: { output: j.recipe.output, outputQty: j.recipe.outputQty, inputs: j.recipe.inputs.map((i) => ({ product: i.product, qty: i.qty })) },
       inputs: j.inputs.map((i) => ({ product: i.product, qty: i.qty })),
+      repeatRemaining: j.repeatRemaining,
     };
   }
 
@@ -2452,7 +2592,7 @@ export class World extends EventEmitter {
    * arrived from another player's business vs from Central Wholesale, over the
    * recent window. Aggregate operator diagnostic — no private company data.
    */
-  async playerSourcedRatio(): Promise<{ overall: { player: number; central: number; ratio: number; health: string }; byProduct: { product: ProductId; player: number; central: number; ratio: number }[] }> {
+  async playerSourcedRatio(): Promise<import('@district/shared').SupplyEconomy> {
     const from = new Date(Date.now() - WHOLESALE_REF_WINDOW_SECS * 1000).toISOString();
     const r = await query(
       `SELECT product, (from_lot = $2) AS central, SUM(qty)::bigint AS units
@@ -2475,6 +2615,8 @@ export class World extends EventEmitter {
         product, player: v.player, central: v.central,
         ratio: v.player + v.central > 0 ? v.player / (v.player + v.central) : 0,
       })).sort((a, b) => a.product.localeCompare(b.product)),
+      specializations: Object.entries(this.specializationDistribution())
+        .map(([key, count]) => ({ key, count })).sort((a, b) => b.count - a.count),
     };
   }
 
@@ -3648,6 +3790,8 @@ export class World extends EventEmitter {
       reputation: Math.round(b.reputation * 100) / 100,
       supplies: SELLER_SUPPLIES[b.type] ?? [],
       tradeCount: b.tradeCount,
+      specialization: b.specialization,          // V2.8 Phase 4: public path id
+      master: isCityIcon(b.bizLevel),            // V2.8 Phase 4: L50 prestige
     };
   }
 
@@ -3677,6 +3821,14 @@ export class World extends EventEmitter {
       slotsUsed: b.activeProducts.size, slotLimit: this.slotLimit(b),
       nextRewardKind: nextRewardLevel == null ? null : levelReward(nextRewardLevel).kind,
       nextRewardLevel, owned, available,
+      // V2.8 Phase 4 — specialization, mastery & automation.
+      specialization: b.specialization,
+      specFamily: specializationDef(b.specialization)?.family ?? [],
+      canSpecialize: b.bizLevel >= SPECIALIZATION_UNLOCK_LEVEL && !b.specialization,
+      specOptions: specializationsFor(b.type).map((s) => ({ id: s.id, family: s.family })),
+      masteryTier: b.specialization ? masteryTier(b.bizLevel) : 0,
+      unlockLevel: SPECIALIZATION_UNLOCK_LEVEL,
+      maxRepeat: maxProductionRepeat(b.bizLevel),
     };
   }
 

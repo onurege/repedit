@@ -180,6 +180,11 @@ export class Net {
     w.on('production_complete', ({ ownerId, bizId, product, qty, blocked }: { ownerId: number; bizId: number; product: any; qty: number; blocked: boolean }) => {
       this.sendToPlayer(ownerId, { t: 'production_complete', bizId, product, qty, blocked });
     });
+    // V2.8 Phase 4: a bounded auto-repeat couldn't run (e.g. out of ingredients) —
+    // notify the owner (never auto-buys). The fresh state rides push_state.
+    w.on('production_repeat_failed', ({ ownerId, product, reason }: { ownerId: number; product: string; reason: string }) => {
+      this.sendToPlayer(ownerId, { t: 'toast', code: `toast.repeat_failed.${reason}`, params: { product }, kind: 'info' });
+    });
     // V2.7 Phase 2: admin realtime effects.
     w.on('push_state', ({ playerId }: { playerId: number }) => this.pushOwnState(playerId));
     w.on('admin_force_logout', ({ playerId, reason }: { playerId: number; reason: string | null }) => {
@@ -638,9 +643,23 @@ export class Net {
         }
         // ---- V2.8 Phase 2: manual production ----
         case 'start_production': {
-          const biz = await world.startProduction(pid, msg.bizId, msg.product, msg.qty);
+          const biz = await world.startProduction(pid, msg.bizId, msg.product, msg.qty, msg.repeat);
           this.send(conn.ws, { t: 'my_biz', biz: world.toBizPriv(biz) });
           this.send(conn.ws, { t: 'toast', code: 'toast.production_started', params: { product: msg.product }, kind: 'success' });
+          break;
+        }
+        case 'choose_specialization': {
+          const biz = await world.chooseSpecialization(pid, msg.bizId, msg.specId);
+          this.send(conn.ws, { t: 'my_biz', biz: world.toBizPriv(biz) });
+          this.send(conn.ws, { t: 'toast', code: 'toast.specialized', params: { spec: msg.specId }, kind: 'success' });
+          this.broadcast({ t: 'biz', biz: world.toBizPub(biz) });
+          break;
+        }
+        case 'admin_set_specialization': {
+          const biz = await world.adminSetSpecialization(pid, msg.bizId, msg.specId);
+          this.send(conn.ws, { t: 'toast', code: 'toast.admin_done', kind: 'success' });
+          this.sendToPlayer(biz.ownerId, { t: 'my_biz', biz: world.toBizPriv(biz) });
+          this.broadcast({ t: 'biz', biz: world.toBizPub(biz) });
           break;
         }
         case 'get_production': {

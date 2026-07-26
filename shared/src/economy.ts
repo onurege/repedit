@@ -305,3 +305,116 @@ export function productionQueueLimit(level: number): number {
   const clamped = Math.max(1, Math.min(MAX_BUSINESS_LEVEL, level));
   return 2 + Math.floor((clamped - 1) / 10) * 2; // L1–10:2, 11–20:4, 21–30:6, 31–40:8, 41–50:10
 }
+
+// ============================================================
+// V2.8 Phase 4 — business specialization, mastery & controlled automation.
+//
+// Specialization is a permanent, per-BUSINESS strategic choice unlocked at
+// level 20. It gives MODEST, family-scoped operational bonuses (never a
+// universal margin multiplier), deepening business identity without breaking
+// multiplayer dependency. Mastery (L30/40/50) strengthens the SAME choice.
+// ============================================================
+export const SPECIALIZATION_UNLOCK_LEVEL = 20;
+export const MASTERY_LEVELS = [30, 40, 50] as const;
+
+export interface SpecializationDef {
+  id: string;                 // stable public id (also the i18n key suffix)
+  type: BusinessType;
+  family: ProductId[];        // products this path is "best at"
+}
+
+// Two strategic paths per business type. Families never overlap within a type.
+export const SPECIALIZATIONS: Record<BusinessType, SpecializationDef[]> = {
+  bakery: [
+    { id: 'volume_bakery', type: 'bakery', family: ['bread', 'croissant', 'cookie'] },
+    { id: 'patisserie', type: 'bakery', family: ['cake', 'strawberry_cake'] },
+  ],
+  coffee_shop: [
+    { id: 'volume_cafe', type: 'coffee_shop', family: ['coffee', 'latte'] },
+    { id: 'specialty_cafe', type: 'coffee_shop', family: ['cappuccino', 'strawberry_latte'] },
+  ],
+  farm: [
+    { id: 'staple_producer', type: 'farm', family: ['wheat', 'milk'] },
+    { id: 'specialty_farm', type: 'farm', family: ['eggs', 'strawberry'] },
+  ],
+  mini_market: [
+    { id: 'everyday_retail', type: 'mini_market', family: ['bread', 'milk', 'coffee', 'croissant'] },
+    { id: 'premium_grocer', type: 'mini_market', family: ['cake', 'strawberry_cake', 'cappuccino', 'strawberry_latte'] },
+  ],
+};
+
+const SPEC_BY_ID = new Map<string, SpecializationDef>();
+for (const list of Object.values(SPECIALIZATIONS)) for (const s of list) SPEC_BY_ID.set(s.id, s);
+
+export function specializationDef(id: string | null | undefined): SpecializationDef | undefined {
+  return id ? SPEC_BY_ID.get(id) : undefined;
+}
+export function specializationsFor(type: BusinessType): SpecializationDef[] {
+  return SPECIALIZATIONS[type] ?? [];
+}
+/** True if `specId` is a valid specialization for `type`. */
+export function isValidSpecialization(type: BusinessType, specId: string): boolean {
+  return specializationsFor(type).some((s) => s.id === specId);
+}
+
+// Mastery tier from level: 0 = specialized (L20–29), then I/II/III at 30/40/50.
+export function masteryTier(level: number): 0 | 1 | 2 | 3 {
+  if (level >= 50) return 3;
+  if (level >= 40) return 2;
+  if (level >= 30) return 1;
+  return 0;
+}
+
+// Family-scoped bonus curve by mastery tier. Deliberately MODEST (≤18%). Speed
+// is a production-DURATION multiplier (lower = faster); the rest are >1.
+export interface SpecBonus {
+  speedMult: number;    // production duration for family products (<=1)
+  storageMult: number;  // finished/family storage capacity (>=1)
+  retailMult: number;   // NPC retail volume for family products (>=1)
+  queueBonus: number;   // extra production-queue depth (whole business)
+}
+const SPEC_SPEED = [0.93, 0.90, 0.87, 0.84];
+const SPEC_STORAGE = [1.08, 1.12, 1.16, 1.20];
+const SPEC_RETAIL = [1.06, 1.09, 1.12, 1.15];
+const SPEC_QUEUE = [1, 1, 2, 2];
+
+/** The active bonus for a business given its specialization id and level. */
+export function specBonus(specId: string | null | undefined, level: number): SpecBonus {
+  if (!specId || !SPEC_BY_ID.has(specId) || level < SPECIALIZATION_UNLOCK_LEVEL) {
+    return { speedMult: 1, storageMult: 1, retailMult: 1, queueBonus: 0 };
+  }
+  const t = masteryTier(level);
+  return { speedMult: SPEC_SPEED[t], storageMult: SPEC_STORAGE[t], retailMult: SPEC_RETAIL[t], queueBonus: SPEC_QUEUE[t] };
+}
+/** Whether a product is in the business's specialization family (gets the bonus). */
+export function specAppliesTo(specId: string | null | undefined, product: ProductId): boolean {
+  const def = SPEC_BY_ID.get(specId ?? '');
+  return !!def && def.family.includes(product);
+}
+/** Family-scoped production speed multiplier (1.0 if not specialized / not in family). */
+export function specSpeedMult(specId: string | null | undefined, level: number, product: ProductId): number {
+  return specAppliesTo(specId, product) ? specBonus(specId, level).speedMult : 1;
+}
+/** Family-scoped storage multiplier (1.0 outside the family). */
+export function specStorageMult(specId: string | null | undefined, level: number, product: ProductId): number {
+  return specAppliesTo(specId, product) ? specBonus(specId, level).storageMult : 1;
+}
+/** Family-scoped retail-volume multiplier (1.0 outside the family). */
+export function specRetailMult(specId: string | null | undefined, level: number, product: ProductId): number {
+  return specAppliesTo(specId, product) ? specBonus(specId, level).retailMult : 1;
+}
+
+// Master / City Icon prestige — level 50 businesses.
+export const CITY_ICON_LEVEL = 50;
+export function isCityIcon(level: number): boolean { return level >= CITY_ICON_LEVEL; }
+
+// ---------- Controlled automation: bounded production repeat ----------
+// Repeat re-queues the SAME job when it finishes, at most N more times, and ONLY
+// if ingredients/license/slot/storage allow at that moment. It never auto-buys.
+export const REPEAT_UNLOCK_LEVEL = 25;
+export function maxProductionRepeat(level: number): number {
+  if (level >= 45) return 3;
+  if (level >= 35) return 2;
+  if (level >= 25) return 1;
+  return 0;
+}
