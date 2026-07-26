@@ -246,11 +246,14 @@ export type ClientMsg =
   | { t: 'admin_revoke_license'; bizId: number; product: ProductId; reason?: string }
   | { t: 'get_supply_economy' }
   // ---- V2.8 Phase 2: manual production ----
-  | { t: 'start_production'; bizId: number; product: ProductId; qty: number }
+  | { t: 'start_production'; bizId: number; product: ProductId; qty: number; repeat?: number }
   | { t: 'get_production'; bizId?: number }
   | { t: 'admin_production' }
   | { t: 'admin_production_complete'; jobId: number; reason?: string }
   | { t: 'admin_production_remove'; jobId: number; reason?: string }
+  // ---- V2.8 Phase 4: specialization & controlled automation ----
+  | { t: 'choose_specialization'; bizId: number; specId: string }
+  | { t: 'admin_set_specialization'; bizId: number; specId: string; reason?: string }
   | { t: 'ping' };
 
 // ---------- server -> client ----------
@@ -317,6 +320,8 @@ export interface BizPub {
   reputation: number;   // public: star rating
   supplies: ProductId[]; // products this business can supply via contract
   tradeCount: number;    // successful player trades + contract deliveries
+  specialization: string | null; // V2.8 Phase 4: public specialization path id
+  master: boolean;       // V2.8 Phase 4: level-50 Master / City Icon prestige
 }
 
 // ---- V2.8 Phase 1: product-economy progression (owner-private detail) ----
@@ -346,7 +351,18 @@ export interface BusinessProgression {
   nextRewardLevel: number | null;
   owned: OwnedLicensePub[];
   available: AvailableLicensePub[];
+  // V2.8 Phase 4 — specialization, mastery & automation (owner-private).
+  specialization: string | null;        // chosen path id, or null
+  specFamily: ProductId[];               // products the chosen path is best at
+  canSpecialize: boolean;                // reached unlock level and not yet chosen
+  specOptions: SpecOptionPub[];          // the two paths (shown at/after unlock)
+  masteryTier: number;                   // 0..3 (I/II/III at L30/40/50)
+  unlockLevel: number;                   // specialization unlock level
+  maxRepeat: number;                     // bounded production-repeat cap for this level
 }
+
+/** A selectable specialization path (public, safe). */
+export interface SpecOptionPub { id: string; family: ProductId[]; }
 
 // ---------- V2.8 Phase 2: manual production ----------
 export type ProductionStatus = 'queued' | 'producing' | 'completed' | 'waiting_storage';
@@ -361,6 +377,7 @@ export interface ProductionJobPub {
   completesAt: number | null;        // epoch ms (null while queued)
   recipe: RecipePub;                 // snapshot taken at start (survives rebalancing)
   inputs: { product: ProductId; qty: number }[]; // ingredients already committed
+  repeatRemaining: number;           // V2.8 Phase 4: bounded auto-repeats left
 }
 
 /** A product this business can currently plan/produce, with a live input snapshot. */
@@ -385,6 +402,7 @@ export interface ProductionLinePub {
   jobs: ProductionJobPub[];          // producing first, then queued in order
   producible: ProducibleProductPub[];// active PRODUCE-licensed recipes
   serverTime: number;                // authoritative clock for progress bars
+  maxRepeat: number;                 // V2.8 Phase 4: bounded auto-repeat cap (0 = locked)
 }
 
 // A player owns exactly one company; a company owns one or more businesses.
@@ -811,6 +829,7 @@ export interface AdminProductionJob {
 export interface SupplyEconomy {
   overall: { player: number; central: number; ratio: number; health: string };
   byProduct: { product: ProductId; player: number; central: number; ratio: number }[];
+  specializations: { key: string; count: number }[]; // V2.8 Phase 4 distribution
 }
 
 // ---------- V2.7 Phase 4 domain types ----------

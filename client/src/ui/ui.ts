@@ -1138,6 +1138,7 @@ export class UI {
           : `<div class="kv"><span class="k">${soldLabel}</span><span class="v">${biz.coffeeSold}</span></div>
              <div class="kv"><span class="k">${t('biz.customers')}</span><span class="v">${biz.customers}</span></div>`}
         <div class="kv"><span class="k">${t('biz.reputation')}</span><span class="v">★ ${biz.reputation.toFixed(2)}</span></div>
+        ${biz.specialization ? `<div class="kv"><span class="k">${t('spec.strategy')}</span><span class="v">${biz.master ? '★ ' : ''}${t('spec.name.' + biz.specialization)}</span></div>` : ''}
         <div class="hint">${hint}</div>
       `);
     } else if (tab === 'inventory') {
@@ -1300,6 +1301,7 @@ export class UI {
   // Which product's planner is open, and the desired output quantity in it.
   private prodSel: ProductId | null = null;
   private prodQty = 0;
+  private prodRepeat = 0; // V2.8 Phase 4: bounded auto-repeat count in the planner
 
   private fmtDuration(secs: number): string {
     if (secs <= 0) return '0s';
@@ -1383,11 +1385,17 @@ export class UI {
         </div>
         ${this.profitabilityHtml(sel, qty)}
         ${missingList}
+        ${this.repeatHtml(line)}
         <button class="btn success pp-start" id="pp-start" ${canProduce && !queueFull ? '' : 'disabled'}>${t('prod.start')}</button>
         <div class="hint">${t('prod.mfg_hint', { mult: line.speedMult })}</div>
       </div>`, (b) => {
       b.querySelectorAll('[data-psel]').forEach((el) => el.addEventListener('click', () => {
         sfx.click(); this.prodSel = (el as HTMLElement).dataset.psel as ProductId; this.prodQty = 0; this.lastBodyHTML = ''; this.renderPanel();
+      }));
+      b.querySelectorAll('[data-radd]').forEach((el) => el.addEventListener('click', () => {
+        sfx.click();
+        this.prodRepeat = Math.max(0, Math.min(line.maxRepeat, this.prodRepeat + parseInt((el as HTMLElement).dataset.radd!, 10)));
+        this.lastBodyHTML = ''; this.renderPanel();
       }));
       const applyQty = (v: number) => { this.prodQty = Math.max(outQty, v); this.lastBodyHTML = ''; this.renderPanel(); };
       b.querySelectorAll('[data-qadd]').forEach((el) => el.addEventListener('click', () => {
@@ -1400,10 +1408,23 @@ export class UI {
       b.querySelector('#pp-find')?.addEventListener('click', () => { sfx.click(); this.openPanel('market'); });
       b.querySelector('#pp-start')?.addEventListener('click', () => {
         sfx.click();
-        client.send({ t: 'start_production', bizId: biz.id, product: sel.product, qty });
-        this.prodQty = 0;
+        client.send({ t: 'start_production', bizId: biz.id, product: sel.product, qty, repeat: Math.min(this.prodRepeat, line.maxRepeat) });
+        this.prodQty = 0; this.prodRepeat = 0;
       });
     });
+  }
+
+  /** Bounded auto-repeat stepper (only shown once the level unlocks it). */
+  private repeatHtml(line: import('@district/shared').ProductionLinePub): string {
+    if (line.maxRepeat <= 0) return '';
+    const r = Math.min(this.prodRepeat, line.maxRepeat);
+    return `<div class="pp-repeat">
+      <span class="pp-repeat-lbl">${t('prod.repeat')}</span>
+      <button class="btn small ghost" data-radd="-1">−</button>
+      <span class="pp-repeat-n">${r > 0 ? t('prod.repeat_x', { n: r }) : t('prod.repeat_off')}</span>
+      <button class="btn small ghost" data-radd="1">+</button>
+      <span class="pp-repeat-max">/ ${line.maxRepeat}</span>
+    </div>`;
   }
 
   private productionQueueHtml(line: import('@district/shared').ProductionLinePub, now: number): string {
@@ -1423,7 +1444,7 @@ export class UI {
       const pct = Math.min(100, Math.round((done / total) * 100));
       const remain = Math.max(0, Math.round((head.completesAt - now) / 1000));
       nowHtml = `<div class="pq-now">
-        <div class="pq-now-h">${t('prod.now_producing')}</div>
+        <div class="pq-now-h">${t('prod.now_producing')}${head.repeatRemaining > 0 ? ` <span class="pq-repeat">↻ ${t('prod.repeat_x', { n: head.repeatRemaining })}</span>` : ''}</div>
         <div class="pq-job">${PRODUCTS[head.product].emoji} <b>${head.outputQty} ${pName(head.product)}</b></div>
         <div class="pq-bar"><div style="width:${pct}%"></div></div>
         <div class="pq-sub">${this.fmtDuration(remain)} ${t('prod.remaining')}</div>
@@ -1433,7 +1454,7 @@ export class UI {
     }
     const restHtml = rest.length
       ? `<div class="pq-next-h">${t('prod.up_next')}</div>${rest.map((j, i) =>
-          `<div class="pq-row"><span class="pq-i">${i + 1}</span><span>${PRODUCTS[j.product].emoji} ${j.outputQty} ${pName(j.product)}</span></div>`).join('')}`
+          `<div class="pq-row"><span class="pq-i">${i + 1}</span><span>${PRODUCTS[j.product].emoji} ${j.outputQty} ${pName(j.product)}${j.repeatRemaining > 0 ? ` <span class="pq-repeat">↻${j.repeatRemaining}</span>` : ''}</span></div>`).join('')}`
       : '';
     return `<div class="pq">${nowHtml}${restHtml}<div class="pq-note">${t('prod.committed_note')}</div></div>`;
   }
@@ -1478,7 +1499,7 @@ export class UI {
       <div class="lvl-head">
         <div class="lvl-badge ${pr.atMax ? 'max' : ''}">${pr.atMax ? '★' : biz.bizLevel}</div>
         <div class="lvl-headmain">
-          <div class="lvl-lv">${t('lvl.level', { level: biz.bizLevel })}${pr.atMax ? ` · ${t('lvl.max')}` : ''}</div>
+          <div class="lvl-lv">${t('lvl.level', { level: biz.bizLevel })}${pr.atMax ? ` · ${t('lvl.max')}` : ''}${biz.master ? ` <span class="city-icon-badge">★ ${t('spec.city_icon')}</span>` : ''}</div>
           <div class="lvl-tier">${tierName}</div>
         </div>
       </div>
@@ -1486,8 +1507,98 @@ export class UI {
       <div class="lvl-bar"><div style="width:${pct}%"></div></div>
       ${nextReward}
       <div class="lvl-slots"><span class="k">${t('slots.current', { n: pr.slotLimit })}</span><span class="v">${slotNext}</span></div>
+      ${this.specializationHtml(biz)}
       <h4 class="lvl-roadmap-h">${t('lvl.roadmap')}</h4>
-      ${roadmap}`);
+      ${roadmap}`, (b) => {
+      b.querySelectorAll('[data-spec-open]').forEach((el) => el.addEventListener('click', () => {
+        sfx.click(); this.openSpecializationModal(biz);
+      }));
+    });
+  }
+
+  /** Specialization status / prompt block for the Level tab. */
+  private specializationHtml(biz: import('@district/shared').BizPriv): string {
+    const pr = biz.progression;
+    if (pr.specialization) {
+      const fam = pr.specFamily.map((p) => PRODUCTS[p].emoji).join(' ');
+      const mastery = pr.masteryTier > 0 ? ` · ${t('spec.mastery', { n: ['', 'I', 'II', 'III'][pr.masteryTier] })}` : '';
+      return `<div class="spec-chosen">
+        <div class="spec-chosen-h">${t('spec.your_strategy')}</div>
+        <div class="spec-name">${t('spec.name.' + pr.specialization)}${mastery}</div>
+        <div class="spec-fam">${t('spec.best_at')} ${fam}</div>
+      </div>`;
+    }
+    if (pr.canSpecialize) {
+      return `<div class="spec-avail">
+        <div class="spec-avail-h">✦ ${t('spec.available')}</div>
+        <div class="hint">${t('spec.available_sub')}</div>
+        <button class="btn small primary" data-spec-open="1">${t('spec.choose')}</button>
+      </div>`;
+    }
+    if (biz.bizLevel < pr.unlockLevel) {
+      return `<div class="spec-locked hint">🔒 ${t('spec.unlock_at', { level: pr.unlockLevel })}</div>`;
+    }
+    return '';
+  }
+
+  /** Game-native specialization selection + confirmation (no prompt/confirm/alert). */
+  private openSpecializationModal(biz: import('@district/shared').BizPriv): void {
+    if (document.getElementById('spec-overlay')) return;
+    const opts = biz.progression.specOptions;
+    const overlay = document.createElement('div');
+    overlay.className = 'overlay modal';
+    overlay.id = 'spec-overlay';
+    const card = (o: import('@district/shared').SpecOptionPub) => `
+      <div class="spec-card" data-spec-pick="${o.id}">
+        <div class="spec-card-h">${t('spec.name.' + o.id)}</div>
+        <div class="spec-card-best">${t('spec.best_for')}</div>
+        <div class="spec-card-fam">${o.family.map((p) => `${PRODUCTS[p].emoji} ${pName(p)}`).join(' · ')}</div>
+        <div class="spec-card-str">${t('spec.strengths.' + o.id)}</div>
+        <button class="btn small primary" data-spec-choose="${o.id}">${t('spec.choose_this')}</button>
+      </div>`;
+    overlay.innerHTML = `
+      <div class="card spec-modal">
+        <h1>${t('spec.title.' + biz.type)}</h1>
+        <div class="spec-warn">${t('spec.permanent_warn')}</div>
+        <div class="spec-cards">${opts.map(card).join('')}</div>
+        <div class="offer-actions"><button class="btn ghost" id="spec-cancel">${t('offer.cancel_btn')}</button></div>
+      </div>`;
+    document.body.appendChild(overlay);
+    const close = () => overlay.remove();
+    overlay.addEventListener('click', (e) => { if (e.target === overlay) close(); });
+    overlay.querySelector('#spec-cancel')!.addEventListener('click', () => { sfx.click(); close(); });
+    overlay.querySelectorAll('[data-spec-choose]').forEach((el) => el.addEventListener('click', () => {
+      sfx.click();
+      const specId = (el as HTMLElement).dataset.specChoose!;
+      // Second, explicit confirmation before this permanent choice.
+      this.confirmSpecialization(biz, specId, close);
+    }));
+  }
+
+  private confirmSpecialization(biz: import('@district/shared').BizPriv, specId: string, closeParent: () => void): void {
+    if (document.getElementById('spec-confirm-overlay')) return;
+    const overlay = document.createElement('div');
+    overlay.className = 'overlay modal';
+    overlay.id = 'spec-confirm-overlay';
+    overlay.innerHTML = `
+      <div class="card spec-confirm">
+        <h1>${t('spec.confirm_title')}</h1>
+        <div class="spec-confirm-name">${t('spec.name.' + specId)}</div>
+        <div class="spec-warn">${t('spec.permanent_warn')}</div>
+        <div class="offer-actions">
+          <button class="btn ghost" id="sc-cancel">${t('offer.cancel_btn')}</button>
+          <button class="btn primary" id="sc-go">${t('spec.confirm_go')}</button>
+        </div>
+      </div>`;
+    document.body.appendChild(overlay);
+    const close = () => overlay.remove();
+    overlay.addEventListener('click', (e) => { if (e.target === overlay) close(); });
+    overlay.querySelector('#sc-cancel')!.addEventListener('click', () => { sfx.click(); close(); });
+    overlay.querySelector('#sc-go')!.addEventListener('click', () => {
+      sfx.click();
+      client.send({ t: 'choose_specialization', bizId: biz.id, specId }); // server-authoritative + permanent
+      close(); closeParent();
+    });
   }
 
   /** Canonical progression roadmap grouped by tier (client renders shared defs). */
@@ -2800,6 +2911,9 @@ export class UI {
       </div>
       <div class="hint" style="margin-bottom:10px">${t('admin.supply.desc', { player: eco.overall.player, central: eco.overall.central })}</div>
       <h4 class="admin-h">${t('admin.supply.by_product')}</h4>${rows}
+      <h4 class="admin-h">${t('admin.spec.title')}</h4>
+      ${(eco.specializations ?? []).filter((s) => !s.key.includes('unspecialized')).map((s) =>
+        `<div class="supply-row"><span class="sr-name">${t('spec.name.' + s.key)}</span><span class="sr-pct">${s.count}</span></div>`).join('') || `<p class="hint">—</p>`}
       <button class="btn small ghost" id="supply-refresh" style="margin-top:10px">${t('admin.refresh')}</button>`, (b) => {
       b.querySelector('#supply-refresh')!.addEventListener('click', () => { sfx.click(); client.send({ t: 'get_supply_economy' }); });
     });

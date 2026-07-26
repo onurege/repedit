@@ -36,7 +36,8 @@
     "e2e:desktop-camera": "node e2e/desktop-camera.mjs",
     "e2e:economy": "node e2e/product-economy.mjs",
     "e2e:production": "node e2e/production.mjs",
-    "e2e:supply-economy": "node e2e/supply-economy.mjs"
+    "e2e:supply-economy": "node e2e/supply-economy.mjs",
+    "e2e:specialization": "node e2e/specialization.mjs"
   },
   "devDependencies": {
     "npm-run-all": "^4.1.5",
