@@ -146,3 +146,29 @@ export const SLOT_SWITCH_COOLDOWN_SECS = 120;
 
 // Ledger kind for a license purchase (consistent with existing UPPER_SNAKE types).
 export const LEDGER_PRODUCT_LICENSE = 'PRODUCT_LICENSE';
+
+// ---------- Central Wholesale player-first reference pricing ----------
+// Central Wholesale is a SAFETY NET: its price is derived from trustworthy
+// COMPLETED player trades and sits a premium ABOVE the healthy player price, so
+// player-to-player sourcing stays the cheaper option. Falls back to the base
+// NPC price when there isn't enough trustworthy history.
+export const WHOLESALE_PREMIUM = 0.2;          // wholesale ≈ player reference +20%
+export const WHOLESALE_REF_WINDOW_SECS = 24 * 3600; // completed-trade window
+export const WHOLESALE_REF_MIN_TRADES = 5;     // min distinct completed trades
+export const WHOLESALE_REF_MIN_VOLUME = 60;    // min total units (anti tiny-wash)
+export const WHOLESALE_REF_MAX_OBS_WEIGHT = 150; // cap one trade's weight (anti single-spike)
+export const WHOLESALE_REF_CLAMP_LO = 0.7;     // never below 70% of the base NPC price
+export const WHOLESALE_REF_CLAMP_HI = 2.5;     // never above 250% of the base NPC price
+export const WHOLESALE_REPRICE_SECS = 300;     // conservative refresh cadence
+export const WHOLESALE_MAX_STEP_FRAC = 0.08;   // move at most ±8% of base per refresh
+
+// Player-Sourced Input Ratio health bands (operator diagnostic only — never
+// affects gameplay). PLAYER = marketplace/contract/offer; CENTRAL = wholesale.
+export const SUPPLY_HEALTHY_MIN = 0.7;         // >= 70% player-sourced = healthy
+export const SUPPLY_CENTRAL_DEPENDENT_MIN = 0.4; // 40–70% = central-dependent; < 40% = critical
+export type SupplyHealth = 'healthy' | 'central_dependent' | 'critical';
+export function supplyHealth(playerRatio: number): SupplyHealth {
+  if (playerRatio >= SUPPLY_HEALTHY_MIN) return 'healthy';
+  if (playerRatio >= SUPPLY_CENTRAL_DEPENDENT_MIN) return 'central_dependent';
+  return 'critical';
+}

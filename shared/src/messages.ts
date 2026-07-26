@@ -242,6 +242,9 @@ export type ClientMsg =
   | { t: 'buy_license'; bizId: number; product: ProductId }
   | { t: 'set_product_active'; bizId: number; product: ProductId; active: boolean }
   | { t: 'admin_set_biz_xp'; bizId: number; xp: number; mode: 'set' | 'add'; reason?: string }
+  | { t: 'admin_grant_license'; bizId: number; product: ProductId; reason?: string }
+  | { t: 'admin_revoke_license'; bizId: number; product: ProductId; reason?: string }
+  | { t: 'get_supply_economy' }
   | { t: 'ping' };
 
 // ---------- server -> client ----------
@@ -737,7 +740,15 @@ export type ServerMsg =
   | { t: 'rival_alert'; alert: RivalAlert }              // realtime push to the affected player
   | { t: 'city_news'; items: CityNewsItem[] }            // bounded feed snapshot
   | { t: 'city_news_item'; item: CityNewsItem }          // realtime append
+  // ---- V2.8 Phase 1 ----
+  | { t: 'supply_economy'; economy: SupplyEconomy }      // admin diagnostic
   | { t: 'pong' };
+
+// V2.8 — aggregate supply-economy health for the Admin Console (operator-only).
+export interface SupplyEconomy {
+  overall: { player: number; central: number; ratio: number; health: string };
+  byProduct: { product: ProductId; player: number; central: number; ratio: number }[];
+}
 
 // ---------- V2.7 Phase 4 domain types ----------
 

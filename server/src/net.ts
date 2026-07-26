@@ -614,6 +614,23 @@ export class Net {
           this.broadcast({ t: 'biz', biz: world.toBizPub(biz) });
           break;
         }
+        case 'admin_grant_license': {
+          const biz = await world.adminGrantLicense(pid, msg.bizId, msg.product);
+          this.send(conn.ws, { t: 'toast', code: 'toast.admin_done', kind: 'success' });
+          this.sendToPlayer(biz.ownerId, { t: 'my_biz', biz: world.toBizPriv(biz) });
+          break;
+        }
+        case 'admin_revoke_license': {
+          const biz = await world.adminRevokeLicense(pid, msg.bizId, msg.product);
+          this.send(conn.ws, { t: 'toast', code: 'toast.admin_done', kind: 'success' });
+          this.sendToPlayer(biz.ownerId, { t: 'my_biz', biz: world.toBizPriv(biz) });
+          break;
+        }
+        case 'get_supply_economy': {
+          world.requireAdmin(pid);
+          this.send(conn.ws, { t: 'supply_economy', economy: await world.playerSourcedRatio() });
+          break;
+        }
         case 'dev': {
           if (!config.devTools) throw new GameError('err.dev_disabled');
           const result = await world.devCommand(pid, msg.cmd, msg.value, msg.bizId);

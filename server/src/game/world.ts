@@ -138,6 +138,16 @@ import {
   productCompatible,
   SLOT_SWITCH_COOLDOWN_SECS,
   LEDGER_PRODUCT_LICENSE,
+  WHOLESALE_PREMIUM,
+  WHOLESALE_REF_WINDOW_SECS,
+  WHOLESALE_REF_MIN_TRADES,
+  WHOLESALE_REF_MIN_VOLUME,
+  WHOLESALE_REF_MAX_OBS_WEIGHT,
+  WHOLESALE_REF_CLAMP_LO,
+  WHOLESALE_REF_CLAMP_HI,
+  WHOLESALE_REPRICE_SECS,
+  WHOLESALE_MAX_STEP_FRAC,
+  supplyHealth,
   type ProductCapability,
   type UrgentOrderKind,
   type UrgentOrderPub,
@@ -1045,6 +1055,7 @@ export class World extends EventEmitter {
     }
     await this.processEvents(now);
     await this.processWholesale(now);
+    await this.repriceWholesale(now);    // V2.8 player-first reference pricing
     await this.sweepExpiredOffers(now);
     await this.sweepUrgentOrders(now);   // expire past-deadline orders
     await this.maybeSpawnUrgentOrder(now); // conservative auto-scheduler
@@ -1955,6 +1966,126 @@ export class World extends EventEmitter {
     this.emit('biz_pub', biz);
     this.emit('push_state', { playerId: biz.ownerId });
     return biz;
+  }
+
+  /** Admin: grant a license (recovery/testing). Audited, server-authoritative. */
+  async adminGrantLicense(adminId: number, bizId: number, product: ProductId): Promise<BizRec> {
+    this.requireAdmin(adminId);
+    const biz = this.businesses.get(bizId);
+    if (!biz) throw new GameError('err.unknown_business');
+    const cap = productCapability(biz.type, product);
+    if (!cap) throw new GameError('err.license_incompatible');
+    if (biz.licenses.has(product)) return biz;
+    biz.licenses.set(product, cap);
+    await query(`INSERT INTO business_licenses (business_id, product, capability) VALUES ($1,$2,$3) ON CONFLICT DO NOTHING`, [bizId, product, cap]);
+    await this.logAdminAction(adminId, 'GRANT_LICENSE', 'business', String(bizId), { product });
+    this.emit('biz_pub', biz);
+    this.emit('push_state', { playerId: biz.ownerId });
+    return biz;
+  }
+
+  /**
+   * Admin: revoke a license. SAFE: a revoke also deactivates the product so no
+   * invalid active-product state is ever left behind. Audited.
+   */
+  async adminRevokeLicense(adminId: number, bizId: number, product: ProductId): Promise<BizRec> {
+    this.requireAdmin(adminId);
+    const biz = this.businesses.get(bizId);
+    if (!biz) throw new GameError('err.unknown_business');
+    if (!biz.licenses.has(product)) return biz;
+    biz.licenses.delete(product);
+    if (biz.activeProducts.delete(product)) {
+      await query(`DELETE FROM business_active_products WHERE business_id=$1 AND product=$2`, [bizId, product]);
+    }
+    await query(`DELETE FROM business_licenses WHERE business_id=$1 AND product=$2`, [bizId, product]);
+    await this.logAdminAction(adminId, 'REVOKE_LICENSE', 'business', String(bizId), { product });
+    this.emit('biz_pub', biz);
+    this.emit('push_state', { playerId: biz.ownerId });
+    return biz;
+  }
+
+  // ============================================================
+  // V2.8 Phase 1 — Central Wholesale player-first reference pricing +
+  // Player-Sourced Input Ratio (operator diagnostic).
+  // ============================================================
+
+  private lastWholesaleRepriceMs = 0;
+
+  /**
+   * Manipulation-resistant reference from COMPLETED player marketplace trades in
+   * a bounded window: self-trades excluded, tiny-volume ignored (min sample +
+   * volume), single spikes bounded by a per-trade weight cap, then a
+   * volume-weighted median. null when there isn't enough trustworthy history.
+   */
+  async wholesaleReference(product: ProductId): Promise<number | null> {
+    const from = new Date(Date.now() - WHOLESALE_REF_WINDOW_SECS * 1000).toISOString();
+    const r = await query(
+      `SELECT price, qty FROM trades WHERE product=$1 AND buyer_id <> seller_id AND created_at >= $2 ORDER BY price ASC`,
+      [product, from]
+    );
+    const obs = r.rows.map((row: any) => ({ price: Number(row.price), w: Math.min(Number(row.qty), WHOLESALE_REF_MAX_OBS_WEIGHT) }));
+    const totalW = obs.reduce((s, o) => s + o.w, 0);
+    if (obs.length < WHOLESALE_REF_MIN_TRADES || totalW < WHOLESALE_REF_MIN_VOLUME) return null;
+    let acc = 0;
+    for (const o of obs) { acc += o.w; if (acc >= totalW / 2) return o.price; }
+    return obs[obs.length - 1].price;
+  }
+
+  /**
+   * Conservatively re-price Central Wholesale toward `reference × (1+premium)`,
+   * clamped to a safe band around the base NPC price and moved at most a small
+   * step per refresh, so it reacts slowly and never undercuts healthy player
+   * sourcing. No trustworthy history → hold at the base NPC price.
+   */
+  private async repriceWholesale(now: number): Promise<void> {
+    if (now - this.lastWholesaleRepriceMs < WHOLESALE_REPRICE_SECS * 1000) return;
+    this.lastWholesaleRepriceMs = now;
+    let changed = false;
+    for (const ws of this.wholesale.values()) {
+      const npcBase = NPC_WHOLESALE_PRICES[ws.product] ?? PRODUCTS[ws.product].basePrice;
+      const ref = await this.wholesaleReference(ws.product);
+      let target = ref != null ? Math.round(ref * (1 + WHOLESALE_PREMIUM)) : npcBase;
+      target = Math.max(Math.round(npcBase * WHOLESALE_REF_CLAMP_LO), Math.min(Math.round(npcBase * WHOLESALE_REF_CLAMP_HI), target));
+      const maxStep = Math.max(1, Math.round(npcBase * WHOLESALE_MAX_STEP_FRAC));
+      const delta = Math.max(-maxStep, Math.min(maxStep, target - ws.basePrice));
+      if (delta !== 0) {
+        ws.basePrice = Math.max(1, ws.basePrice + delta);
+        ws.dirty = true; changed = true;
+        await query('UPDATE wholesale_supply SET base_price=$1, updated_at=now() WHERE product=$2', [ws.basePrice, ws.product]).catch(() => {});
+      }
+    }
+    if (changed) this.emitWholesale();
+  }
+
+  /**
+   * City-level Player-Sourced Input Ratio from committed deliveries: goods that
+   * arrived from another player's business vs from Central Wholesale, over the
+   * recent window. Aggregate operator diagnostic — no private company data.
+   */
+  async playerSourcedRatio(): Promise<{ overall: { player: number; central: number; ratio: number; health: string }; byProduct: { product: ProductId; player: number; central: number; ratio: number }[] }> {
+    const from = new Date(Date.now() - WHOLESALE_REF_WINDOW_SECS * 1000).toISOString();
+    const r = await query(
+      `SELECT product, (from_lot = $2) AS central, SUM(qty)::bigint AS units
+       FROM deliveries WHERE created_at >= $1 GROUP BY product, (from_lot = $2)`,
+      [from, WHOLESALE_LOT_ID]
+    );
+    const byP = new Map<ProductId, { player: number; central: number }>();
+    let totP = 0, totC = 0;
+    for (const row of r.rows) {
+      const p = row.product as ProductId;
+      const units = Number(row.units);
+      const e = byP.get(p) ?? { player: 0, central: 0 };
+      if (row.central) { e.central += units; totC += units; } else { e.player += units; totP += units; }
+      byP.set(p, e);
+    }
+    const ratio = totP + totC > 0 ? totP / (totP + totC) : 0;
+    return {
+      overall: { player: totP, central: totC, ratio, health: supplyHealth(ratio) },
+      byProduct: [...byP.entries()].map(([product, v]) => ({
+        product, player: v.player, central: v.central,
+        ratio: v.player + v.central > 0 ? v.player / (v.player + v.central) : 0,
+      })).sort((a, b) => a.product.localeCompare(b.product)),
+    };
   }
 
   async chooseBusiness(playerId: number, type: BusinessType): Promise<BizRec> {
