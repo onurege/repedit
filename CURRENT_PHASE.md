@@ -1,6 +1,33 @@
-# V2.7 — PLAYER INTERACTION & LIVE OPS (in progress, phased)
+# CURRENT STATE — V2.8.1 (stabilization) · V2.8 COMPLETE
 
-Shipping in tested, deployable phases per the prompt's P0->P2 priority.
+**Latest: V2.8.1 — Economy & System Consistency (stabilization).** No new
+gameplay systems; makes every V2.8 system operate on one coherent model. Fixes
+this release delivered: (1) a single authoritative `TRADABLE_PRODUCTS` source —
+marketplace/offers are business-aware (SELL = products the selected business
+owns, BUY = every tradable) with no hardcoded lists; wholesale UI now shows raw
+only (no phantom bread). (2) ONE production-start validation shared by the
+planner MAX, `start_production` and auto-repeat; MAX = min(ingredients, projected
+storage room); a batch that would overflow is REJECTED up-front — WAITING_FOR_
+STORAGE is now reserved for genuine races only. (3) Queue cancel: a QUEUED job
+can be cancelled (refund ingredients, drop repeat, re-resolve line); started/
+blocked jobs stay committed. (4) Internal Company Transfer: move inventory
+between a company's businesses via a real delivery — no money/XP/revenue/
+rankings/trade-count; the receiver inherits truthful cost basis. (5) Level
+naming disambiguated in the UI: **Business Level** (1–50, XP) vs **Facility
+Tier** (1–3, upgrade) vs Company Level. See DECISIONS.md "V2.8.1" for the full
+audit. **Not deployed to VPS.**
+
+**V2.8 (COMPLETE, Phases 1–4):** product economy foundation (business levels
+1–50, licenses, slots, recipes, player-first wholesale) → manual production +
+queues + cost basis → 14-product catalog + supply chains + demand + profitability
+→ specialization + mastery + City Icon + bounded automation. Details below and
+in DECISIONS.md.
+
+---
+
+# V2.7 — PLAYER INTERACTION & LIVE OPS (shipped, phased)
+
+Shipped in tested, deployable phases per the prompt's P0->P2 priority.
 
 ## Phase 4 (shipped) — Urgent City Orders, Rival Alerts & City News
 A living-city layer built entirely on committed data. **Urgent City Orders:**

@@ -179,10 +179,13 @@ describe('completion — output, XP, exactly-once', () => {
 describe('storage-blocked completion (V2.6.2 preserved)', () => {
   it('holds finished goods when full, then completes exactly once when space frees', async () => {
     const { id, biz } = await shop(world, 's1');
-    // Coffee capacity is 200 at facility tier 3; fill it so output cannot fit.
-    give(biz, 'coffee', 200);
+    // V2.8.1: production starts only when there is projected room (cap 200, room 10).
+    give(biz, 'coffee', 190);
     give(biz, 'milk', 100); give(biz, 'beans', 100);
-    await world.startProduction(id, biz.id, 'coffee', 10);
+    await world.startProduction(id, biz.id, 'coffee', 10); // valid at start
+    // RACE: the slot fills to capacity before the batch completes (e.g. a delivery
+    // lands). Completion must hold the output in WAITING_FOR_STORAGE, not overflow.
+    give(biz, 'coffee', 200);
     await world.devCommand(id, 'finish_production', 0, biz.id);
     expect(head(biz).status).toBe('waiting_storage'); // blocked, not lost
     expect(onHand(biz, 'coffee')).toBe(200);           // never overflowed

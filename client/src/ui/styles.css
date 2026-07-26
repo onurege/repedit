@@ -1002,6 +1002,14 @@ html.touch .controls-hint { display: none; }
 .pp-repeat-n { min-width: 48px; text-align: center; font-weight: 800; }
 .pp-repeat-max { color: #94a3b8; font-size: 12px; }
 .pq-repeat { font-size: 11px; font-weight: 800; color: #7c3aed; }
+.pq-row .pq-rp { flex: 1; }
+.btn.tiny { padding: 2px 7px; font-size: 12px; min-width: 0; line-height: 1.4; border-radius: 6px; }
+.btn.tiny.warn { background: #fee2e2; color: #b91c1c; border: none; }
+.xfer { margin-top: 14px; padding: 10px 12px; border: 1.5px solid #dbe3ee; border-radius: 12px; background: #f8fafc; }
+.xfer-h { margin: 0 0 8px; font-size: 13px; }
+.xfer-row { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+.xfer-row select { flex: 1; min-width: 90px; }
+@media (max-width: 640px), (max-height: 500px) { .xfer-row select, .xfer-row input, .xfer-row .btn { min-height: 40px; } }
 @media (max-width: 640px), (max-height: 500px) {
   .spec-cards { grid-template-columns: 1fr; }
   .spec-card .btn, .pp-repeat .btn { min-height: 44px; }

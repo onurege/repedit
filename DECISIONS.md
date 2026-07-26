@@ -885,3 +885,82 @@ event/shortage scenarios reasoned in the health report below — all SIMULATED.
 Not in Phase 4 (STOP — V2.8 COMPLETE): new products/business types, Cocoa/Mocha,
 seasons, achievements, employees, warehouses, player retail pricing, respec,
 parallel lines, auto-buy/auto-contract/auto-trade, infinite automation, V2.9.
+
+## V2.8.1 — Economy & System Consistency (STABILIZATION)
+
+No new gameplay systems. A full consistency audit so V2.8 behaves like ONE
+coherent game rather than layered historical systems. Every fix removes a class
+of the underlying problem, not just a single occurrence.
+
+**Product source — single authority (Part 3/10/12/13).** New shared
+`TRADABLE_PRODUCTS` + `isTradable()` — the ONE list of player-tradable goods;
+server (`world.TRADABLE`) and client both read it. Removed hardcoded arrays:
+marketplace create-order `['milk','wheat','bread','beans']`, offer modal
+`OFFER_TRADABLE`, and the wholesale panel `['wheat','milk','beans','bread']`
+(which showed **bread** — no longer wholesale-sold since Phase 3). Screens are
+now business-aware: **SELL** lists only products the selected business currently
+owns (in stock); **BUY** lists every tradable product. The marketplace order now
+carries `bizId` (business context, Part 2). Wholesale UI states raw-only +
+"finished goods come from players".
+
+**Production/storage consistency (Part 4/5).** ONE `productionStartError(biz,
+product, plan)` is the single source of truth used by the planner MAX,
+`start_production`, and auto-repeat (license/active/queue/ingredients/storage
+all in one place). Added a PROJECTED storage check: `projectedOutputRoom =
+capacity − on-hand+reserved − incoming deliveries − output already queued`.
+`MAX = min(ingredient-max, projectedOutputRoom)`, and a batch whose output can't
+fit is **rejected at start** — WAITING_FOR_STORAGE is now reserved for genuine
+races (a delivery landing between start and completion), never for invalid
+planning. (The storage-blocked test was updated to model a real race.)
+
+**Queue cancel (Part 6).** New `cancelProduction` (owner) — a QUEUED job may be
+cancelled: refund committed ingredients (restored at existing WAC), drop its
+repeat, re-resolve the line, persist `status='cancelled'`, guarded by the same
+per-business production lock. A PRODUCING or WAITING_FOR_STORAGE job stays
+committed (no refund exploit). UI: a ✕ on each queued row.
+
+**Internal Company Transfer (Part 9).** New `transferInternal(from, to, product,
+qty)` between two businesses of the same company (1 player = 1 company). Ships by
+a **real delivery** (no teleport) — the source loses stock immediately, the
+destination receives it on arrival with the source's **cost basis** inherited
+(truthful accounting). It is NOT a trade: no money, no XP, no revenue, no
+rankings/market-share, no trade-count, no supplier stats. Rejects same-business
+and destinations that can't store the product. UI: a transfer form in the
+Inventory tab (shown only when you own >1 business).
+
+**Level naming (Part 1).** Disambiguated in the UI: the overview now shows
+**Business Level** (bizLevel 1–50, XP-driven) AND **Facility Tier** (level 1–3,
+upgrade) as separate rows; the old "Level" label for the 1–3 tier is renamed
+"Facility Tier" everywhere (overview, upgrade tab, pickers) and the upgrade
+button says "Upgrade to Tier N". Business Level stays the headline on the Level
+tab. Company/Player level are separate and unchanged.
+
+**Business context (Part 2).** Audited the economic actions; all now carry an
+explicit business: production/offers/contracts/buyNpc already did; the
+marketplace order was the gap (now sends `bizId`). Delivery/NPC-retail/XP/cost
+basis are inherently per-business.
+
+**Panel consistency (Part 11) — verified.** The Business Management panel is a
+single `renderBusinessPanel(client.myBiz)`; every entry point (map click, My
+Businesses chip, notification, search) sets `selectedBizId` then opens the same
+panel — identical tabs (Overview/Level/Products/Produce/Inventory/Pricing-or-
+Production/Upgrade). No divergent variants.
+
+**Duplicated logic (Part 13) — consolidated.** Storage (`capacityFor`), tradable
+list, production validation, queue depth, and cost basis each have a single
+implementation now; the local server `TRADABLE` copy and the two client product
+lists were the remaining duplicates and were removed.
+
+**Part 8 (Customer Satisfaction vs Reputation) — DEFERRED, documented.** A true
+split introduces a NEW tracked economic driver (satisfaction feeding NPC/XP,
+reputation feeding trust/contracts) — which conflicts with this release's two
+governing constraints: "DO NOT add new gameplay systems" and "stabilization,
+don't break." Splitting the single `reputation` value (currently driven by both
+retail fairness and trade fulfilment) would change balanced economic behavior
+and carries the highest regression risk of any item here. Senior call: keep the
+single reputation value for V2.8.1 and defer the split to a dedicated future
+spec. Recorded as a known limitation, not silently dropped.
+
+Migration: NONE required — all V2.8.1 changes reuse existing schema
+(specialization/production_jobs/cost_basis/deliveries columns already exist).
+Internal transfer + queue cancel operate on existing tables.

@@ -129,12 +129,15 @@ await A.waitForFunction((c) => (window.__bd.client.myBiz.inventory.coffee?.qty ?
 check('both queued batches completed (coffee +20, no duplicates)', (await inv(A, 'coffee')) === coffeeBefore + 20, `+${(await inv(A, 'coffee')) - coffeeBefore}`);
 check('line empty after finishing the queue', await A.evaluate(() => (window.__bd.client.myBiz.productionLine?.jobs?.length ?? 0) === 0));
 
-// 7) Storage-blocked (WAITING_FOR_STORAGE): fill coffee to capacity, then produce.
+// 7) Storage-blocked (WAITING_FOR_STORAGE) via a RACE. V2.8.1: a batch that can't
+// fit is rejected at start, so blocking only happens if the slot fills DURING
+// production. Start with room, then fill the slot before completion.
 const cap = await A.evaluate(() => window.__bd.client.myBiz.inventory.coffee?.capacity ?? 0);
-await setCoffee(cap); // fill finished-goods storage so a new batch cannot fit
+await setCoffee(cap - 10); // leave exactly room for the 10-batch
 await dev(A, 'add_milk', 100); await dev(A, 'add_beans', 100); await A.waitForTimeout(300);
-await send(A, { t: 'start_production', bizId: id, product: 'coffee', qty: 10 });
+await send(A, { t: 'start_production', bizId: id, product: 'coffee', qty: 10 }); // valid at start
 await A.waitForTimeout(400);
+await setCoffee(cap); // RACE: slot fills to capacity before the batch completes
 await dev(A, 'finish_production', 0); // completes -> cannot fit -> waiting_storage
 await A.waitForFunction(() => window.__bd.client.myBiz.productionLine?.jobs?.[0]?.status === 'waiting_storage', { timeout: 8000 }).catch(() => {});
 check('output that will not fit becomes WAITING_FOR_STORAGE', await A.evaluate(() => window.__bd.client.myBiz.productionLine?.jobs?.[0]?.status === 'waiting_storage'));

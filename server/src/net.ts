@@ -662,6 +662,19 @@ export class Net {
           this.broadcast({ t: 'biz', biz: world.toBizPub(biz) });
           break;
         }
+        case 'cancel_production': {
+          const biz = await world.cancelProduction(pid, msg.bizId, msg.jobId);
+          this.send(conn.ws, { t: 'my_biz', biz: world.toBizPriv(biz) });
+          this.send(conn.ws, { t: 'toast', code: 'toast.production_cancelled', kind: 'info' });
+          break;
+        }
+        case 'transfer_internal': {
+          const { from, to } = await world.transferInternal(pid, msg.fromBizId, msg.toBizId, msg.product, msg.qty);
+          this.send(conn.ws, { t: 'my_biz', biz: world.toBizPriv(from) });
+          this.send(conn.ws, { t: 'my_biz', biz: world.toBizPriv(to) });
+          this.send(conn.ws, { t: 'toast', code: 'toast.transfer_sent', params: { qty: msg.qty, product: msg.product }, kind: 'success' });
+          break;
+        }
         case 'get_production': {
           const biz = msg.bizId != null ? world.businesses.get(msg.bizId) : world.bizByOwner(pid);
           if (!biz || biz.ownerId !== pid) throw new GameError('err.unknown_business');

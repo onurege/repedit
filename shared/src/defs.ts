@@ -216,6 +216,18 @@ export const MARKET_MIN_PRICE = 1;
 export const MARKET_MAX_PRICE = 500;
 export const MARKET_MAX_QTY = 10000;
 
+// V2.8.1 — the ONE authoritative list of products that can change hands between
+// players (marketplace / offers / contracts). Client and server both read this;
+// no screen may hardcode its own product list.
+export const TRADABLE_PRODUCTS: ProductId[] = [
+  'milk', 'beans', 'wheat', 'eggs', 'strawberry',
+  'bread', 'croissant', 'cookie', 'cake', 'strawberry_cake',
+  'coffee', 'latte', 'cappuccino', 'strawberry_latte',
+];
+export function isTradable(product: ProductId): boolean {
+  return TRADABLE_PRODUCTS.includes(product);
+}
+
 // ---- Supply contracts (Phase 3) ----
 // A business can SUPPLY these tradable products (things it produces),
 // and can CONSUME these as recurring inputs. A contract for `product`
