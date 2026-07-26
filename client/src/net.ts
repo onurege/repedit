@@ -90,6 +90,7 @@ export class GameClient {
   urgentOrders = new Map<number, UrgentOrderPub>();
   cityNews: CityNewsItem[] = [];
   rivalAlerts: RivalAlert[] = [];
+  supplyEconomy: import('@district/shared').SupplyEconomy | null = null;
   connected = false;
 
   private ws: WebSocket | null = null;
@@ -489,6 +490,10 @@ export class GameClient {
         this.cityNews = [msg.item, ...this.cityNews].slice(0, 40);
         this.emit('city_news_item', msg.item);
         this.emit('update');
+        break;
+      case 'supply_economy':
+        this.supplyEconomy = msg.economy;
+        this.emit('supply_economy');
         break;
     }
   }

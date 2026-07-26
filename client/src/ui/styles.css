@@ -861,3 +861,74 @@ html.touch .controls-hint { display: none; }
 
   .district-bar { left: auto; right: 8px; transform: none; }
 }
+
+/* ============================================================
+   V2.8 Phase 1 — Business Level, progression, licenses, products.
+   Uses the existing card/typography language; cards stack on mobile.
+   ============================================================ */
+.lvl-head { display: flex; align-items: center; gap: 12px; margin-bottom: 10px; }
+.lvl-badge { width: 46px; height: 46px; border-radius: 12px; background: #1d4ed8; color: #fff; font-weight: 900; font-size: 20px; display: flex; align-items: center; justify-content: center; flex: 0 0 auto; }
+.lvl-badge.max { background: linear-gradient(135deg,#f59e0b,#d97706); }
+.lvl-lv { font-weight: 800; font-size: 16px; color: #0f172a; }
+.lvl-tier { font-size: 12.5px; font-weight: 700; color: #64748b; }
+.lvl-xp { font-size: 12.5px; color: #475569; margin-bottom: 4px; font-variant-numeric: tabular-nums; }
+.lvl-bar { height: 10px; border-radius: 6px; background: #e2e8f0; overflow: hidden; margin-bottom: 12px; }
+.lvl-bar > div { height: 100%; background: linear-gradient(90deg,#3b82f6,#1d4ed8); border-radius: 6px; }
+.lvl-next, .lvl-slots { display: flex; justify-content: space-between; align-items: center; padding: 8px 10px; background: #f8fafc; border-radius: 10px; margin-bottom: 8px; font-size: 13px; }
+.lvl-next .k, .lvl-slots .k { color: #64748b; font-weight: 700; }
+.lvl-next .v, .lvl-slots .v { font-weight: 700; color: #0f172a; }
+.lvl-roadmap-h, .prod-h { font-size: 12px; text-transform: uppercase; letter-spacing: 0.6px; color: #94a3b8; margin: 16px 0 8px; }
+.road-tier { margin-bottom: 12px; }
+.road-tier-h { font-weight: 800; font-size: 13px; color: #334155; margin-bottom: 5px; }
+.road-tier-h small { color: #94a3b8; font-weight: 600; }
+.road-row { display: flex; align-items: center; gap: 10px; padding: 5px 8px; border-radius: 8px; font-size: 12.5px; border-left: 3px solid transparent; }
+.road-row .road-lv { width: 26px; text-align: center; font-weight: 800; color: #94a3b8; }
+.road-row .road-rew { color: #475569; }
+.road-row.done { opacity: 0.6; }
+.road-row.done .road-lv { color: #16a34a; }
+.road-row.cur { background: #eef4ff; border-left-color: #1d4ed8; }
+.road-row.cur .road-lv { color: #1d4ed8; }
+.road-row.milestone { background: #fffbeb; }
+.road-row.milestone.cur { background: #eef4ff; }
+.road-row.milestone .road-lv { color: #b45309; }
+
+.slot-head { font-weight: 800; font-size: 14px; color: #0f172a; margin-bottom: 10px; padding: 8px 12px; background: #eff5ff; border-radius: 10px; text-align: center; }
+.prod-list { display: flex; flex-direction: column; gap: 8px; }
+.prod-card { border: 1.5px solid #dbe3ee; border-radius: 12px; padding: 10px 12px; background: #fff; }
+.prod-card.owned { border-color: #c7dbff; background: #f8fbff; }
+.prod-card.locked { opacity: 0.72; }
+.pc-head { display: flex; align-items: center; gap: 6px; font-size: 14px; flex-wrap: wrap; }
+.pc-status { margin-left: auto; font-size: 10px; font-weight: 800; padding: 2px 8px; border-radius: 999px; }
+.pc-status.on { background: #dcfce7; color: #15803d; }
+.pc-status.off { background: #f1f5f9; color: #94a3b8; }
+.cap-badge { font-size: 9.5px; font-weight: 800; padding: 2px 7px; border-radius: 999px; letter-spacing: 0.4px; }
+.cap-badge.produce { background: #dbeafe; color: #1d4ed8; }
+.cap-badge.retail { background: #fef3c7; color: #b45309; }
+.rec { font-size: 12px; color: #475569; margin: 6px 0; background: #f8fafc; border-radius: 8px; padding: 6px 8px; }
+.rec .rec-in { color: #334155; }
+.rec.retail { color: #b45309; }
+.pc-req { font-size: 12.5px; color: #475569; margin: 4px 0 8px; font-weight: 600; }
+.pc-locked { font-size: 12px; color: #b45309; font-weight: 600; margin-top: 4px; }
+.prod-card .btn.small { width: 100%; margin-top: 4px; }
+.license-card { width: min(440px, 94vw); }
+.license-card .lic-prod { font-size: 18px; font-weight: 800; margin: 4px 0; display: flex; align-items: center; gap: 8px; }
+.license-card .lic-sub { color: #64748b; font-size: 13px; margin-bottom: 10px; }
+.license-card .lic-rows { margin: 12px 0; }
+
+/* Admin supply-economy panel */
+.supply-overall { text-align: center; padding: 14px; border-radius: 12px; margin-bottom: 12px; }
+.supply-overall.healthy { background: #dcfce7; color: #15803d; }
+.supply-overall.central_dependent { background: #fef9c3; color: #a16207; }
+.supply-overall.critical { background: #fee2e2; color: #b91c1c; }
+.supply-overall .sv-ratio { font-size: 30px; font-weight: 900; }
+.supply-overall .sv-label { font-size: 12px; font-weight: 800; letter-spacing: 0.5px; text-transform: uppercase; }
+.supply-row { display: flex; align-items: center; gap: 10px; padding: 8px 10px; border-radius: 10px; background: #f8fafc; margin-bottom: 6px; }
+.supply-row .sr-name { font-weight: 700; width: 90px; }
+.supply-bar { flex: 1; height: 14px; border-radius: 7px; background: #fecaca; overflow: hidden; }
+.supply-bar > div { height: 100%; background: linear-gradient(90deg,#4ade80,#16a34a); }
+.supply-row .sr-pct { font-weight: 800; width: 44px; text-align: right; font-size: 13px; }
+
+@media (max-width: 640px) {
+  .prod-card .btn.small, .license-card .offer-actions .btn { min-height: 44px; }
+  .road-row { min-height: 34px; }
+}

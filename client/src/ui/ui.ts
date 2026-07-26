@@ -18,6 +18,8 @@ import {
   type Opportunity, type BriefMarket,
   type RivalAlert, type CityNewsItem, type UrgentOrderPub,
   MARKET_MIN_PRICE, MARKET_MAX_PRICE, MARKET_MAX_QTY,
+  MAX_BUSINESS_LEVEL, levelReward, businessTier, slotsForLevel,
+  type BizPriv, type RecipePub, type OwnedLicensePub, type AvailableLicensePub, type SupplyEconomy,
 } from '@district/shared';
 import { IS_TOUCH } from '../touch.js';
 import { client } from '../net.js';
@@ -191,6 +193,9 @@ export class UI {
     });
     client.on('city_news_item', () => {
       if (this.panelKind === 'news' && this.newsTab === 'city') { this.lastBodyHTML = ''; this.renderPanel(); }
+    });
+    client.on('supply_economy', () => {
+      if (this.panelKind === 'admin' && this.adminTab === 'supply') { this.lastBodyHTML = ''; this.renderPanel(); }
     });
     client.on('level_up', (level: number) => {
       sfx.levelUp();
@@ -1094,6 +1099,8 @@ export class UI {
     this.setRenamableTitle(title, bizHeading(biz), () => this.showRenameBusiness(biz.id));
     const tab = this.tabBar(tabs, [
       { id: 'overview', label: t('tab.overview') },
+      { id: 'level', label: t('tab.level') },
+      { id: 'products', label: t('tab.products') },
       { id: 'inventory', label: t('tab.inventory') },
       isFarm
         ? { id: 'production', label: t('tab.production') }
@@ -1258,7 +1265,161 @@ export class UI {
           client.send({ t: 'upgrade' });
         });
       });
+    } else if (tab === 'level') {
+      this.renderBizLevel(body, biz);
+    } else if (tab === 'products') {
+      this.renderBizProducts(body, biz);
     }
+  }
+
+  // ---- V2.8 Phase 1: Business Level & progression roadmap ----
+  private renderBizLevel(body: HTMLElement, biz: import('@district/shared').BizPriv): void {
+    const pr = biz.progression;
+    const tierName = t('tier.' + pr.tier);
+    const pct = pr.atMax ? 100 : pr.xpForNextLevel > 0 ? Math.min(100, Math.round((pr.xpIntoLevel / pr.xpForNextLevel) * 100)) : 0;
+    const nextReward = pr.atMax || pr.nextRewardLevel == null ? '' : (() => {
+      const r = levelReward(pr.nextRewardLevel);
+      const label = r.slotGained ? t('reward.slot', { n: r.slots })
+        : r.majorMilestone ? t('reward.tier', { tier: t('tier.' + businessTier(pr.nextRewardLevel)) })
+          : t('reward.storage');
+      return `<div class="lvl-next"><span class="k">${t('lvl.next', { level: pr.nextRewardLevel })}</span><span class="v">${label}</span></div>`;
+    })();
+    const slotNext = (() => {
+      for (let l = biz.bizLevel + 1; l <= MAX_BUSINESS_LEVEL; l++) {
+        if (slotsForLevel(l) > pr.slotLimit) return t('slots.next', { level: l, n: slotsForLevel(l) });
+      }
+      return t('slots.max', { n: pr.slotLimit });
+    })();
+    const roadmap = this.progressionRoadmap(biz.bizLevel);
+    this.setBody(body, `
+      <div class="lvl-head">
+        <div class="lvl-badge ${pr.atMax ? 'max' : ''}">${pr.atMax ? '★' : biz.bizLevel}</div>
+        <div class="lvl-headmain">
+          <div class="lvl-lv">${t('lvl.level', { level: biz.bizLevel })}${pr.atMax ? ` · ${t('lvl.max')}` : ''}</div>
+          <div class="lvl-tier">${tierName}</div>
+        </div>
+      </div>
+      <div class="lvl-xp">${pr.atMax ? t('lvl.at_max') : `${pr.xpIntoLevel.toLocaleString()} / ${pr.xpForNextLevel.toLocaleString()} XP`}</div>
+      <div class="lvl-bar"><div style="width:${pct}%"></div></div>
+      ${nextReward}
+      <div class="lvl-slots"><span class="k">${t('slots.current', { n: pr.slotLimit })}</span><span class="v">${slotNext}</span></div>
+      <h4 class="lvl-roadmap-h">${t('lvl.roadmap')}</h4>
+      ${roadmap}`);
+  }
+
+  /** Canonical progression roadmap grouped by tier (client renders shared defs). */
+  private progressionRoadmap(current: number): string {
+    const tiers: [string, number, number][] = [
+      ['local', 1, 10], ['established', 11, 20], ['regional', 21, 30], ['major', 31, 40], ['city_icon', 41, 50],
+    ];
+    return tiers.map(([tier, lo, hi]) => {
+      const rows: string[] = [];
+      for (let l = lo; l <= hi; l++) {
+        const r = levelReward(l);
+        const state = l < current ? 'done' : l === current ? 'cur' : 'future';
+        const milestone = r.milestone ? ' milestone' : '';
+        const label = r.slotGained ? `🎰 ${t('reward.slot', { n: r.slots })}`
+          : r.majorMilestone ? `🏆 ${t('tier.' + tier)}`
+            : `📦 ${t('reward.storage')}`;
+        rows.push(`<div class="road-row ${state}${milestone}"><span class="road-lv">${l}</span><span class="road-rew">${label}</span></div>`);
+      }
+      return `<div class="road-tier"><div class="road-tier-h">${t('tier.' + tier)} <small>${lo}–${hi}</small></div>${rows.join('')}</div>`;
+    }).join('');
+  }
+
+  // ---- V2.8 Phase 1: product licenses & active products ----
+  private recipePreview(recipe: import('@district/shared').RecipePub | null, capability: 'produce' | 'retail'): string {
+    if (capability === 'retail') return `<div class="rec retail">🛒 ${t('recipe.retail')}</div>`;
+    if (!recipe) return '';
+    const ins = recipe.inputs.map((i) => `${PRODUCTS[i.product].emoji} ${pName(i.product)} ×${i.qty}`).join(' + ');
+    return `<div class="rec"><span class="rec-in">${ins}</span> → ${PRODUCTS[recipe.output].emoji} ${pName(recipe.output)} ×${recipe.outputQty}</div>`;
+  }
+  private capBadge(cap: 'produce' | 'retail'): string {
+    return `<span class="cap-badge ${cap}">${t('cap.' + cap)}</span>`;
+  }
+
+  private renderBizProducts(body: HTMLElement, biz: import('@district/shared').BizPriv): void {
+    const pr = biz.progression;
+    const ownedCard = (o: import('@district/shared').OwnedLicensePub) => `
+      <div class="prod-card owned">
+        <div class="pc-head">${PRODUCTS[o.product].emoji} <b>${pName(o.product)}</b> ${this.capBadge(o.capability)}
+          <span class="pc-status ${o.active ? 'on' : 'off'}">${o.active ? t('products.active') : t('products.inactive')}</span></div>
+        ${this.recipePreview(o.recipe, o.capability)}
+        <button class="btn small ${o.active ? 'ghost' : 'primary'}" data-toggle="${o.product}:${o.active ? '0' : '1'}">${o.active ? t('products.deactivate') : t('products.activate')}</button>
+      </div>`;
+    const availCard = (a: import('@district/shared').AvailableLicensePub) => `
+      <div class="prod-card avail">
+        <div class="pc-head">${PRODUCTS[a.product].emoji} <b>${pName(a.product)}</b> ${this.capBadge(a.capability)}</div>
+        ${this.recipePreview(a.recipe, a.capability)}
+        <div class="pc-req">${t('license.fee', { fee: fmt(a.fee) })}</div>
+        <button class="btn small primary" data-buy="${a.product}">${t('license.buy')}</button>
+      </div>`;
+    const lockedCard = (a: import('@district/shared').AvailableLicensePub) => {
+      const reasons: string[] = [];
+      if (!a.levelMet) reasons.push(t('locked.level', { level: a.requiredLevel }));
+      if (!a.prereqMet && a.prereqLicense) reasons.push(t('locked.prereq', { product: pName(a.prereqLicense) }));
+      return `
+      <div class="prod-card locked">
+        <div class="pc-head">🔒 ${PRODUCTS[a.product].emoji} <b>${pName(a.product)}</b> ${this.capBadge(a.capability)}</div>
+        ${this.recipePreview(a.recipe, a.capability)}
+        <div class="pc-locked">${reasons.join(' · ')}</div>
+      </div>`;
+    };
+    const availMet = pr.available.filter((a) => a.met);
+    const availLocked = pr.available.filter((a) => !a.met);
+    const html = `
+      <div class="slot-head">${t('products.slots', { used: pr.slotsUsed, limit: pr.slotLimit })}</div>
+      <div class="prod-list">${pr.owned.map(ownedCard).join('')}</div>
+      ${availMet.length ? `<h4 class="prod-h">${t('products.available')}</h4><div class="prod-list">${availMet.map(availCard).join('')}</div>` : ''}
+      ${availLocked.length ? `<h4 class="prod-h">${t('products.locked')}</h4><div class="prod-list">${availLocked.map(lockedCard).join('')}</div>` : ''}`;
+    this.setBody(body, html, (b) => {
+      b.querySelectorAll('[data-toggle]').forEach((el) => el.addEventListener('click', () => {
+        sfx.click();
+        const [product, active] = (el as HTMLElement).dataset.toggle!.split(':');
+        client.send({ t: 'set_product_active', bizId: biz.id, product: product as ProductId, active: active === '1' });
+      }));
+      b.querySelectorAll('[data-buy]').forEach((el) => el.addEventListener('click', () => {
+        sfx.click();
+        this.confirmBuyLicense(biz, (el as HTMLElement).dataset.buy as ProductId);
+      }));
+    });
+  }
+
+  /** Game-native license purchase confirmation (no prompt/confirm/alert). */
+  private confirmBuyLicense(biz: import('@district/shared').BizPriv, product: ProductId): void {
+    if (document.getElementById('license-overlay')) return;
+    const a = biz.progression.available.find((x) => x.product === product);
+    if (!a) return;
+    const cash = client.you?.cash ?? 0;
+    const afford = cash >= a.fee;
+    const overlay = document.createElement('div');
+    overlay.className = 'overlay modal';
+    overlay.id = 'license-overlay';
+    overlay.innerHTML = `
+      <div class="card license-card">
+        <h1>${t('license.confirm_title')}</h1>
+        <div class="lic-prod">${PRODUCTS[product].emoji} <b>${pName(product)}</b> ${this.capBadge(a.capability)}</div>
+        <div class="lic-sub">${bizHeading(biz)}</div>
+        ${this.recipePreview(a.recipe, a.capability)}
+        <div class="lic-rows">
+          <div class="orv-kv"><span>${t('license.fee_label')}</span><span><b>${fmt(a.fee)}</b></span></div>
+          <div class="orv-kv"><span>${t('license.treasury')}</span><span class="${afford ? '' : 'neg'}">${fmt(cash)} → ${fmt(cash - a.fee)}</span></div>
+        </div>
+        ${afford ? '' : `<div class="offer-err error">⚠ ${t('err.not_enough_cash', { cost: fmt(a.fee) })}</div>`}
+        <div class="offer-actions">
+          <button class="btn ghost" id="lic-cancel">${t('offer.cancel_btn')}</button>
+          <button class="btn primary" id="lic-buy" ${afford ? '' : 'disabled'}>${t('license.buy')}</button>
+        </div>
+      </div>`;
+    document.body.appendChild(overlay);
+    const close = () => overlay.remove();
+    overlay.addEventListener('click', (e) => { if (e.target === overlay) close(); });
+    overlay.querySelector('#lic-cancel')!.addEventListener('click', () => { sfx.click(); close(); });
+    overlay.querySelector('#lic-buy')!.addEventListener('click', () => {
+      sfx.click();
+      client.send({ t: 'buy_license', bizId: biz.id, product }); // server authoritative + exactly-once
+      close();
+    });
   }
 
   private renderMarketPanel(title: HTMLElement, tabs: HTMLElement, body: HTMLElement): void {
@@ -2389,6 +2550,7 @@ export class UI {
       { id: 'dashboard', label: t('admin.tab.dashboard') },
       { id: 'players', label: t('admin.tab.players') },
       { id: 'wholesale', label: t('admin.tab.wholesale') },
+      { id: 'supply', label: t('admin.tab.supply') },
       { id: 'orders', label: t('admin.urgent.title') },
       { id: 'audit', label: t('admin.tab.audit') },
     ]);
@@ -2396,8 +2558,32 @@ export class UI {
     if (tab === 'dashboard') this.renderAdminDashboard(body);
     else if (tab === 'players') this.renderAdminPlayers(body);
     else if (tab === 'wholesale') this.renderAdminWholesale(body);
+    else if (tab === 'supply') this.renderAdminSupply(body);
     else if (tab === 'orders') this.renderAdminUrgent(body);
     else this.renderAdminAudit(body);
+  }
+
+  /** Admin: aggregate supply-economy health (Player-Sourced Input Ratio). */
+  private renderAdminSupply(body: HTMLElement): void {
+    const eco = client.supplyEconomy;
+    if (!eco) { client.send({ t: 'get_supply_economy' }); this.setBody(body, `<p class="hint">${t('admin.loading')}</p>`); return; }
+    const pct = (r: number) => `${Math.round(r * 100)}%`;
+    const rows = eco.byProduct.map((p) => `
+      <div class="supply-row">
+        <span class="sr-name">${PRODUCTS[p.product].emoji} ${pName(p.product)}</span>
+        <span class="supply-bar"><div style="width:${Math.round(p.ratio * 100)}%"></div></span>
+        <span class="sr-pct">${pct(p.ratio)}</span>
+      </div>`).join('') || `<p class="hint">${t('admin.supply.none')}</p>`;
+    this.setBody(body, `
+      <div class="supply-overall ${eco.overall.health}">
+        <div class="sv-ratio">${pct(eco.overall.ratio)}</div>
+        <div class="sv-label">${t('admin.supply.player')} · ${t('admin.supply.health.' + eco.overall.health)}</div>
+      </div>
+      <div class="hint" style="margin-bottom:10px">${t('admin.supply.desc', { player: eco.overall.player, central: eco.overall.central })}</div>
+      <h4 class="admin-h">${t('admin.supply.by_product')}</h4>${rows}
+      <button class="btn small ghost" id="supply-refresh" style="margin-top:10px">${t('admin.refresh')}</button>`, (b) => {
+      b.querySelector('#supply-refresh')!.addEventListener('click', () => { sfx.click(); client.send({ t: 'get_supply_economy' }); });
+    });
   }
 
   /** Admin: create / cancel urgent city orders (server enforces requireAdmin). */
